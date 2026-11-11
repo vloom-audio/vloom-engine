@@ -47,7 +47,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: .cpm-cache
           key: cpm-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake', 'tests/CMakeLists.txt') }}
@@ -79,7 +79,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: .cpm-cache
           key: cpm-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake', 'tests/CMakeLists.txt') }}
