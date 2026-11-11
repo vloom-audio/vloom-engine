@@ -1,0 +1,16 @@
+option(VLOOM_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
+
+function(vloom_set_warnings target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8)
+        if(VLOOM_WARNINGS_AS_ERRORS)
+            target_compile_options(${target} PRIVATE /WX)
+        endif()
+    else()
+        target_compile_options(${target} PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wno-sign-conversion>)
+        if(VLOOM_WARNINGS_AS_ERRORS)
+            target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-Werror>)
+        endif()
+    endif()
+endfunction()

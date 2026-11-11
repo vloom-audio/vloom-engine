@@ -1,0 +1,31 @@
+# Shared by every Vloom Audio C++ repository. Run scripts/format.sh to apply.
+BasedOnStyle: WebKit
+ColumnLimit: 110
+IndentWidth: 4
+PointerAlignment: Left
+Cpp11BracedListStyle: true
+SpaceBeforeCpp11BracedList: false
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLambdasOnASingleLine: All
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterFunction: true
+  AfterClass: false
+  AfterStruct: false
+  AfterNamespace: false
+NamespaceIndentation: None
+FixNamespaceComments: true
+
+# Include order: own header / local, vloom, third-party, standard library.
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^"'
+    Priority: 1
+  - Regex: '^<vloom/'
+    Priority: 2
+  - Regex: '^<(catch2|miniaudio|Q[A-Za-z]*)'
+    Priority: 3
+  - Regex: '^<.*'
+    Priority: 4
