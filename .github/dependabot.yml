@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # Keeps the actions used in .github/workflows up to date.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    # Must pass scripts/check_commit_messages.sh: "👷 ops(deps): Bump …".
+    commit-message:
+      prefix: "👷 ops"
+      include: scope

@@ -1,0 +1,4 @@
+# Reviewers requested automatically on pull requests.
+# Replace or extend with real GitHub usernames / teams as the team grows,
+# e.g. /src/dsp/ @vloom-audio/dsp
+*                   @neondeveloperz
