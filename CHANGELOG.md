@@ -11,5 +11,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Wait-free command queue from control thread to audio thread (`core/SpscQueue`)
 - Sample-accurate, drift-free transport at 960 PPQ (`time/Transport`)
 - Metronome (`dsp/Metronome`)
+- Master gain with a per-block ramp (`Engine::setMasterGain`)
+- Smoothed CPU load of the audio callback (`Engine::cpuLoad`)
+- Master balance with the same ramp as the gain (`Engine::setMasterPan`)
+- Lock-free output peak metering for the UI (`Engine::takeOutputPeak`)
 - Offline rendering to WAV (`render/OfflineRenderer`)
 - `vloom-cli` with `devices`, `play` and `render` commands
