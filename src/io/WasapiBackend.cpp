@@ -140,8 +140,110 @@ DWORD speakerMask(int channels)
     }
 }
 
+/// Forwards endpoint notifications to a callback. Windows calls it on its
+/// own threads; the callback only bumps a counter.
+class DeviceNotifier final : public IMMNotificationClient {
+public:
+    explicit DeviceNotifier(std::function<void()> onChange)
+        : onChange_(std::move(onChange))
+    {
+    }
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override
+    {
+        if (object == nullptr)
+            return E_POINTER;
+        if (iid == __uuidof(IUnknown) || iid == __uuidof(IMMNotificationClient)) {
+            *object = static_cast<IMMNotificationClient*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *object = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++references_; }
+    ULONG STDMETHODCALLTYPE Release() override
+    {
+        const ULONG left = --references_;
+        if (left == 0)
+            delete this;
+        return left;
+    }
+
+    HRESULT STDMETHODCALLTYPE OnDeviceStateChanged(LPCWSTR /*id*/, DWORD /*state*/) override
+    {
+        return notify();
+    }
+    HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR /*id*/) override { return notify(); }
+    HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR /*id*/) override { return notify(); }
+    HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(EDataFlow flow, ERole /*role*/, LPCWSTR /*id*/) override
+    {
+        return flow == eRender ? notify() : S_OK;
+    }
+    // Volume, names and formats change often and do not add or remove outputs.
+    HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(LPCWSTR /*id*/, const PROPERTYKEY /*key*/) override
+    {
+        return S_OK;
+    }
+
+private:
+    ~DeviceNotifier() = default; // only through Release()
+
+    HRESULT notify()
+    {
+        onChange_();
+        return S_OK;
+    }
+
+    std::function<void()> onChange_;
+    std::atomic<ULONG> references_{1};
+};
+
+/// Registers a DeviceNotifier for as long as it lives. COM stays initialised
+/// on the creating thread meanwhile, so destroy it on that thread.
+class WasapiDeviceListSubscription final : public DeviceListSubscription {
+public:
+    static std::unique_ptr<DeviceListSubscription> create(std::function<void()> onChange)
+    {
+        auto subscription = std::unique_ptr<WasapiDeviceListSubscription>(new WasapiDeviceListSubscription);
+        if (!subscription->com_.usable()
+            || FAILED(CoCreateInstance(
+                __uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&subscription->enumerator_))))
+            return nullptr;
+        subscription->notifier_ = new DeviceNotifier(std::move(onChange));
+        if (FAILED(
+                subscription->enumerator_->RegisterEndpointNotificationCallback(subscription->notifier_))) {
+            subscription->notifier_->Release();
+            subscription->notifier_ = nullptr;
+            return nullptr;
+        }
+        return subscription;
+    }
+
+    ~WasapiDeviceListSubscription() override
+    {
+        if (notifier_ != nullptr) {
+            enumerator_->UnregisterEndpointNotificationCallback(notifier_);
+            notifier_->Release();
+        }
+        enumerator_.Reset(); // before com_ leaves the apartment
+    }
+
+private:
+    WasapiDeviceListSubscription() = default;
+
+    ComScope com_; ///< first in, last out
+    ComPtr<IMMDeviceEnumerator> enumerator_;
+    DeviceNotifier* notifier_ = nullptr;
+};
+
 class WasapiBackend final : public AudioBackend {
 public:
+    std::unique_ptr<DeviceListSubscription> watchDeviceList(std::function<void()> onChange) override
+    {
+        return WasapiDeviceListSubscription::create(std::move(onChange));
+    }
+
     ~WasapiBackend() override { close(); }
 
     std::vector<BackendDeviceInfo> listOutputDevices() override

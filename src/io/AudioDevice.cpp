@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <vector>
 
 namespace vloom {
@@ -149,5 +150,27 @@ bool AudioDevice::isRunning() const noexcept { return impl_->open && impl_->back
 int AudioDevice::sampleRate() const noexcept { return impl_->open ? impl_->info.sampleRate : 0; }
 int AudioDevice::channels() const noexcept { return impl_->open ? impl_->info.channels : 0; }
 std::string AudioDevice::deviceName() const { return impl_->open ? impl_->info.deviceName : std::string(); }
+
+struct DeviceListWatcher::Impl {
+    // The counter outlives the subscription's last callback: it is shared.
+    std::shared_ptr<std::atomic<std::uint64_t>> generation = std::make_shared<std::atomic<std::uint64_t>>(0);
+    std::unique_ptr<io::AudioBackend> backend = io::createPlatformBackend();
+    std::unique_ptr<io::DeviceListSubscription> subscription = backend->watchDeviceList(
+        [counter = generation] { counter->fetch_add(1, std::memory_order_relaxed); });
+};
+
+DeviceListWatcher::DeviceListWatcher()
+    : impl_(std::make_unique<Impl>())
+{
+}
+
+DeviceListWatcher::~DeviceListWatcher() = default;
+
+bool DeviceListWatcher::isSupported() const noexcept { return impl_->subscription != nullptr; }
+
+std::uint64_t DeviceListWatcher::generation() const noexcept
+{
+    return impl_->generation->load(std::memory_order_relaxed);
+}
 
 } // namespace vloom

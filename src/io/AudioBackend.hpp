@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Vloom Audio contributors
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -36,6 +37,16 @@ struct BackendStreamInfo {
 /// `numFrames` can exceed AudioDevice::kMaxBlockFrames.
 using RenderFn = void (*)(void* user, float* interleaved, int numChannels, int numFrames) noexcept;
 
+/// Keeps device-list notifications coming while it lives (see
+/// AudioBackend::watchDeviceList()).
+class DeviceListSubscription {
+public:
+    DeviceListSubscription() = default;
+    virtual ~DeviceListSubscription() = default;
+    DeviceListSubscription(const DeviceListSubscription&) = delete;
+    DeviceListSubscription& operator=(const DeviceListSubscription&) = delete;
+};
+
 /// One platform audio API. Control calls come from one control thread;
 /// RenderFn is called from the backend's own real-time thread between
 /// start() and stop().
@@ -59,6 +70,18 @@ public:
     virtual void close() noexcept = 0;
     /// True between start() and stop(), unless the device was lost (unplugged).
     [[nodiscard]] virtual bool isRunning() const noexcept = 0;
+
+    /// Calls `onChange` when outputs are added or removed or the default
+    /// output changes. It runs on an OS thread, so it must be quick and
+    /// thread-safe. Notifications stop when the subscription is destroyed;
+    /// create and destroy it on the same thread. Null when the platform cannot
+    /// notify (callers then list devices again from time to time).
+    [[nodiscard]] virtual std::unique_ptr<DeviceListSubscription> watchDeviceList(
+        std::function<void()> onChange)
+    {
+        (void)onChange;
+        return nullptr;
+    }
 };
 
 /// WASAPI on Windows, CoreAudio on macOS, ALSA on Linux.

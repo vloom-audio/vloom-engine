@@ -71,9 +71,47 @@ int outputChannels(AudioDeviceID device)
     return channels;
 }
 
+/// Listens to the system object for the device list and the default output.
+/// CoreAudio calls the listener on its own notification thread.
+class CoreAudioDeviceListSubscription final : public DeviceListSubscription {
+public:
+    explicit CoreAudioDeviceListSubscription(std::function<void()> onChange)
+        : onChange_(std::move(onChange))
+    {
+        for (const AudioObjectPropertyAddress& where : kWatched)
+            AudioObjectAddPropertyListener(kAudioObjectSystemObject, &where, &changed, this);
+    }
+    ~CoreAudioDeviceListSubscription() override
+    {
+        for (const AudioObjectPropertyAddress& where : kWatched)
+            AudioObjectRemovePropertyListener(kAudioObjectSystemObject, &where, &changed, this);
+    }
+
+private:
+    static constexpr AudioObjectPropertyAddress kWatched[] = {
+        {kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
+        {kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal,
+            kAudioObjectPropertyElementMain},
+    };
+
+    static OSStatus changed(AudioObjectID /*object*/, UInt32 /*count*/,
+        const AudioObjectPropertyAddress* /*addresses*/, void* self)
+    {
+        static_cast<CoreAudioDeviceListSubscription*>(self)->onChange_();
+        return noErr;
+    }
+
+    std::function<void()> onChange_;
+};
+
 class CoreAudioBackend final : public AudioBackend {
 public:
     ~CoreAudioBackend() override { close(); }
+
+    std::unique_ptr<DeviceListSubscription> watchDeviceList(std::function<void()> onChange) override
+    {
+        return std::make_unique<CoreAudioDeviceListSubscription>(std::move(onChange));
+    }
 
     std::vector<BackendDeviceInfo> listOutputDevices() override
     {

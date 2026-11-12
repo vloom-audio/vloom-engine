@@ -13,6 +13,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   pinned to the commit of its v3.7.1 tag.
 
 ### Added
+- `DeviceListWatcher` (`io/AudioDevice`): counts output-device changes as the
+  OS reports them (WASAPI endpoint notifications, CoreAudio property
+  listeners), so callers list devices only after a change instead of polling,
+  which takes 50-200 ms on Windows; ALSA reports it cannot notify
 - Mixer routing (`mixer/MixerState`): each step-sequencer channel plays into
   one of up to 125 insert buses (or straight into the master) with its own
   gain and balance pan; each insert has gain, pan and a peak meter
