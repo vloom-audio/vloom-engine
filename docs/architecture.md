@@ -8,13 +8,15 @@
 | core | `core/` | Lock-free queue, version, small utilities | — |
 | time | `time/` | PPQ, bar/beat/tick, transport clock | core |
 | dsp | `dsp/` | Sound generators and processors | core |
-| io | `io/` | Hardware audio devices (miniaudio) | core |
+| io | `io/` | Hardware audio devices (WASAPI, CoreAudio, ALSA) | core |
 | render | `render/` | Offline rendering, file export | engine |
 
 Rules:
 
 - Lower modules never include higher ones (`dsp` never includes `Engine.hpp`).
-- Only `io/` and `render/` talk to miniaudio. Its header never appears in `include/`.
+- Platform audio APIs are used only in `src/io/<Name>Backend.cpp`, one file per
+  OS behind the internal `io::AudioBackend` interface. No platform header
+  appears in `include/` (see [ADR 0004](adr/0004-native-audio-io.md)).
 - Each public header in `include/vloom/engine/<module>/` has its `.cpp` in
   `src/<module>/` and its tests in `tests/<module>/`.
 

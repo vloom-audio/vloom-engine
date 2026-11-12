@@ -7,7 +7,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- Audio output on macOS, Windows and Linux via miniaudio (`io/AudioDevice`)
+- Audio output through each OS's own API, behind `io/AudioDevice`: WASAPI
+  (shared, event driven, MMCSS "Pro Audio") on Windows, CoreAudio (AUHAL) on
+  macOS, ALSA on Linux (also reaching PulseAudio and PipeWire)
+- Own 32-bit float WAV writer (`render/WavWriter`)
 - Wait-free command queue from control thread to audio thread (`core/SpscQueue`)
 - Sample-accurate, drift-free transport at 960 PPQ (`time/Transport`)
 - Metronome (`dsp/Metronome`)
@@ -17,3 +20,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Lock-free output peak metering for the UI (`Engine::takeOutputPeak`)
 - Offline rendering to WAV (`render/OfflineRenderer`)
 - `vloom-cli` with `devices`, `play` and `render` commands
+
+### Removed
+- miniaudio. It was used only for device output and WAV writing, but its
+  whole source, decoders included, was built in; 0.11.21 carried
+  CVE-2024-41147 (heap overflow in the FLAC decoder). See ADR 0004.

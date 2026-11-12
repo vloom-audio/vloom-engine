@@ -1,6 +1,6 @@
 # 0002. miniaudio for audio device I/O
 
-- Status: accepted
+- Status: superseded by [0004](0004-native-audio-io.md) on 2026-11-12
 - Date: 2026-11-11
 
 ## Context

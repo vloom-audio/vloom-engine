@@ -16,12 +16,15 @@ target_sources(vloom_engine PRIVATE
     # dsp — sound generators and processors
     dsp/Metronome.cpp
 
-    # io — hardware audio devices
+    # io — hardware audio devices; each backend compiles only on its OS
+    io/AlsaBackend.cpp
     io/AudioDevice.cpp
-    io/miniaudio_impl.c
+    io/CoreAudioBackend.cpp
+    io/WasapiBackend.cpp
 
     # render — offline (faster than real time) rendering
-    render/OfflineRenderer.cpp)
+    render/OfflineRenderer.cpp
+    render/WavWriter.cpp)
 
 target_include_directories(vloom_engine
     PUBLIC  ${PROJECT_SOURCE_DIR}/include
@@ -31,13 +34,16 @@ target_compile_definitions(vloom_engine PRIVATE VLOOM_ENGINE_VERSION="${PROJECT_
 vloom_set_warnings(vloom_engine)
 
 find_package(Threads REQUIRED)
-target_link_libraries(vloom_engine PRIVATE vloom_miniaudio Threads::Threads ${CMAKE_DL_LIBS})
+target_link_libraries(vloom_engine PRIVATE Threads::Threads)
 
-if(APPLE)
+if(WIN32)
+    # WASAPI: COM (ole32) and the MMCSS "Pro Audio" thread class (avrt).
+    target_link_libraries(vloom_engine PRIVATE ole32 avrt)
+elseif(APPLE)
     target_link_libraries(vloom_engine PRIVATE
         "-framework CoreFoundation"
         "-framework CoreAudio"
         "-framework AudioToolbox")
-elseif(UNIX)
-    target_link_libraries(vloom_engine PRIVATE m)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(vloom_engine PRIVATE ALSA::ALSA m)
 endif()
