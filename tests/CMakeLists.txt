@@ -7,12 +7,15 @@ CPMAddPackage(
 add_executable(vloom_engine_tests
     EngineTests.cpp
     core/SpscQueueTests.cpp
+    dsp/SamplerTests.cpp
     io/AudioDeviceTests.cpp
     render/WavWriterTests.cpp
     sample/ResamplerTests.cpp
     sample/WavReaderTests.cpp
     time/MusicalTimeTests.cpp
-    time/TransportTests.cpp)
+    time/TransportTests.cpp
+    support/Allocations.cpp
+    support/AllocationsTests.cpp)
 
 target_include_directories(vloom_engine_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(vloom_engine_tests PRIVATE vloom::engine Catch2::Catch2WithMain)
