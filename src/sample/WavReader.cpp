@@ -19,7 +19,10 @@ namespace {
 constexpr std::uint16_t kFormatPcm = 1;
 constexpr std::uint16_t kFormatFloat = 3;
 constexpr std::uint16_t kFormatExtensible = 0xFFFE;
+constexpr int kMinSampleRate = 1000; ///< lower is no audio sample, and would explode when resampled
 constexpr int kMaxSampleRate = 768000;
+/// Float samples are clamped here (+60 dBFS): kept loud, far from overflow when mixed.
+constexpr double kMaxFloatSample = 1024.0;
 
 // Bytes 2..15 of every KSDATAFORMAT_SUBTYPE_* GUID; bytes 0..1 hold the format tag.
 constexpr std::array<std::uint8_t, 14> kSubFormatTail{
@@ -87,7 +90,8 @@ std::string parseFormat(std::span<const std::uint8_t> b, std::size_t at, std::ui
         return "Unsupported WAV encoding (only PCM and float are read)";
     if (format.channels < 1 || format.channels > limits.maxChannels)
         return "Unsupported number of channels: " + std::to_string(format.channels);
-    if (rate < 1 || rate > static_cast<std::uint32_t>(kMaxSampleRate))
+    if (rate < static_cast<std::uint32_t>(kMinSampleRate)
+        || rate > static_cast<std::uint32_t>(kMaxSampleRate))
         return "Unsupported sample rate: " + std::to_string(rate);
     format.sampleRate = static_cast<int>(rate);
 
@@ -105,8 +109,11 @@ float decodeSample(std::span<const std::uint8_t> b, std::size_t at, const Format
     if (format.tag == kFormatFloat) {
         const double value = format.bits == 32 ? static_cast<double>(std::bit_cast<float>(u32(b, at)))
                                                : std::bit_cast<double>(u64(b, at));
-        // Non-finite samples would poison every mix they reach.
-        return std::isfinite(value) ? static_cast<float>(value) : 0.0f;
+        // Non-finite samples would poison every mix they reach; huge finite
+        // ones would overflow float (cast) or the mix (sums).
+        if (!std::isfinite(value))
+            return 0.0f;
+        return static_cast<float>(std::clamp(value, -kMaxFloatSample, kMaxFloatSample));
     }
     switch (format.bits) {
     case 8:

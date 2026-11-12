@@ -13,6 +13,7 @@
 
 #include <array>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -282,4 +283,20 @@ TEST_CASE("Steps between samples fire on the next sample, also across a block bo
         expected.push_back(static_cast<std::size_t>(std::ceil(k * 5512.5)));
     INFO("block size " << blockSize);
     CHECK(vloom::test::findOnsets(audio, 2, 1000) == expected);
+}
+
+TEST_CASE("Nothing non-finite reaches the output", "[sequencer]")
+{
+    // Defence in depth behind the WAV reader's own checks.
+    auto bad = std::make_shared<vloom::SampleBuffer>(1, 4, kRate);
+    bad->channel(0)[0] = std::numeric_limits<float>::infinity();
+    bad->channel(0)[1] = -std::numeric_limits<float>::infinity();
+    bad->channel(0)[2] = std::numeric_limits<float>::quiet_NaN();
+    vloom::Engine engine;
+    prepare(engine);
+    engine.setSequencerState(rack({channel(bad, std::make_shared<vloom::ChannelVoices>(), "x"),
+        channel(bad, std::make_shared<vloom::ChannelVoices>(), "x")})); // +inf and -inf mixed: NaN
+    engine.play();
+    for (const float v : render(engine, 0.05))
+        REQUIRE(std::isfinite(v));
 }

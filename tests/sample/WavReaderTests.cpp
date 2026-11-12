@@ -342,3 +342,35 @@ TEST_CASE("WAV files are read from UTF-8 paths", "[sample]")
     std::error_code ec;
     std::filesystem::remove_all(folder, ec);
 }
+
+TEST_CASE("Sample rates below 1 kHz are refused", "[sample]")
+{
+    // Review finding: a 1 Hz WAV passed every limit, then asked the
+    // resampler for 48000 times its length.
+    const Bytes frame{0, 0};
+    CHECK_FALSE(vloom::decodeWav(wav(fmtBody(1, 1, 1, 16), frame)).buffer);
+    CHECK_FALSE(vloom::decodeWav(wav(fmtBody(1, 1, 999, 16), frame)).buffer);
+    CHECK(vloom::decodeWav(wav(fmtBody(1, 1, 1000, 16), frame)).buffer);
+}
+
+TEST_CASE("Huge float samples are clamped before they become float", "[sample]")
+{
+    // Review finding: 1e300 as a 64-bit sample passed the finite check, then
+    // overflowed to infinity when narrowed to float.
+    Bytes data64;
+    for (const double v : {1e300, -1e300}) {
+        const auto bits = std::bit_cast<std::uint64_t>(v);
+        putU32(data64, static_cast<std::uint32_t>(bits));
+        putU32(data64, static_cast<std::uint32_t>(bits >> 32));
+    }
+    const auto r64 = vloom::decodeWav(wav(fmtBody(3, 1, 48000, 64), data64));
+    REQUIRE(r64.buffer);
+    CHECK(r64.buffer->channel(0)[0] == 1024.0f);
+    CHECK(r64.buffer->channel(0)[1] == -1024.0f);
+
+    Bytes data32;
+    putU32(data32, std::bit_cast<std::uint32_t>(3.0e38f));
+    const auto r32 = vloom::decodeWav(wav(fmtBody(3, 1, 48000, 32), data32));
+    REQUIRE(r32.buffer);
+    CHECK(r32.buffer->channel(0)[0] == 1024.0f);
+}

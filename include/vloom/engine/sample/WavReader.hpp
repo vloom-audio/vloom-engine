@@ -34,7 +34,8 @@ struct WavReadResult {
 /// Built for untrusted input: every chunk is bounds-checked against the
 /// actual data, only the `fmt ` and `data` chunks are read (metadata such as
 /// LIST, bext or cue is skipped unparsed), sizes are checked against
-/// `limits` before allocating, and NaN / infinite float samples become 0.
+/// `limits` before allocating, sample rates must be 1 kHz .. 768 kHz, NaN /
+/// infinite float samples become 0 and float samples are clamped to +/-1024.
 /// A data chunk whose declared size runs past the end of the file (an
 /// unfinished recording) is read up to the last whole frame.
 [[nodiscard]] WavReadResult decodeWav(std::span<const std::uint8_t> bytes, const WavReadLimits& limits = {});

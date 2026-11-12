@@ -135,6 +135,14 @@ void Engine::applyMasterGain(float* const* out, int numChannels, int numFrames) 
     }
 }
 
+void Engine::sanitizeOutput(float* const* out, int numChannels, int numFrames) noexcept
+{
+    for (int ch = 0; ch < numChannels; ++ch)
+        for (int i = 0; i < numFrames; ++i)
+            if (!std::isfinite(out[ch][i]))
+                out[ch][i] = 0.0f;
+}
+
 void Engine::meterOutput(float* const* out, int numChannels, int numFrames) noexcept
 {
     const int metered = std::min(numChannels, static_cast<int>(outputPeak_.size()));
@@ -243,6 +251,7 @@ void Engine::process(float* const* out, int numChannels, int numFrames) noexcept
     renderSegment(out, numChannels, cursor, numFrames - cursor);
     sequencer_.endBlock();
     applyMasterGain(out, numChannels, numFrames);
+    sanitizeOutput(out, numChannels, numFrames);
     meterOutput(out, numChannels, numFrames);
     transport_.advance(numFrames);
     publishStatus();

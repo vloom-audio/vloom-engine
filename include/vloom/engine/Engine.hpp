@@ -84,6 +84,8 @@ private:
     void applyMasterGain(float* const* out, int numChannels, int numFrames) noexcept;
     [[nodiscard]] float channelGainTarget(int channel, int numChannels) const noexcept;
     void meterOutput(float* const* out, int numChannels, int numFrames) noexcept;
+    /// NaN / infinity become silence before the device sees them.
+    static void sanitizeOutput(float* const* out, int numChannels, int numFrames) noexcept;
     void measureLoad(double seconds, int numFrames) noexcept;
     void renderSegment(float* const* out, int numChannels, int startFrame, int numFrames) noexcept;
 

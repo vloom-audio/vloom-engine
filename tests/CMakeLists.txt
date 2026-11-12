@@ -12,6 +12,7 @@ add_executable(vloom_engine_tests
     io/AudioDeviceTests.cpp
     render/WavWriterTests.cpp
     sample/ResamplerTests.cpp
+    sample/SampleLoaderTests.cpp
     sample/WavReaderTests.cpp
     sequencer/StepSequencerTests.cpp
     time/MusicalTimeTests.cpp
