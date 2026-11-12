@@ -21,11 +21,16 @@ struct AudioDeviceConfig {
     int channels = 2;
 };
 
-/// Thin wrapper around a hardware output device (miniaudio backend:
-/// CoreAudio on macOS, WASAPI on Windows, ALSA/PulseAudio/JACK on Linux).
+/// A hardware output device, through each OS's own audio API: WASAPI
+/// (shared, event driven) on Windows, CoreAudio (HAL output unit) on macOS,
+/// ALSA on Linux (which also reaches PulseAudio and PipeWire).
 ///
 /// The callback runs on the real-time audio thread and receives
-/// non-interleaved float buffers.
+/// non-interleaved float buffers of at most kMaxBlockFrames frames. When the
+/// device runs at another rate or channel count the OS converts, so
+/// sampleRate() reports the rate the callback is driven at.
+///
+/// If the device is lost while running (unplugged), isRunning() turns false.
 class AudioDevice {
 public:
     using Callback = std::function<void(float* const* out, int numChannels, int numFrames)>;

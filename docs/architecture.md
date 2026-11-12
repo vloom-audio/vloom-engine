@@ -8,13 +8,18 @@
 | core | `core/` | Lock-free queue, version, small utilities | — |
 | time | `time/` | PPQ, bar/beat/tick, transport clock | core |
 | dsp | `dsp/` | Sound generators and processors | core |
-| io | `io/` | Hardware audio devices (miniaudio) | core |
+| io | `io/` | Hardware audio devices (WASAPI, CoreAudio, ALSA) | core |
+| mixer | `mixer/` | Insert settings (volume, pan) and the pan law; Engine mixes the buses | core |
+| sample | `sample/` | Decoded audio in memory: WAV reading, resampling | core |
+| sequencer | `sequencer/` | Channel rack state and step playback | core, dsp, sample, time |
 | render | `render/` | Offline rendering, file export | engine |
 
 Rules:
 
 - Lower modules never include higher ones (`dsp` never includes `Engine.hpp`).
-- Only `io/` and `render/` talk to miniaudio. Its header never appears in `include/`.
+- Platform audio APIs are used only in `src/io/<Name>Backend.cpp`, one file per
+  OS behind the internal `io::AudioBackend` interface. No platform header
+  appears in `include/` (see [ADR 0004](adr/0004-native-audio-io.md)).
 - Each public header in `include/vloom/engine/<module>/` has its `.cpp` in
   `src/<module>/` and its tests in `tests/<module>/`.
 
@@ -32,10 +37,12 @@ Rules:
 `Command` into a wait-free single-producer / single-consumer ring buffer
 (`core/SpscQueue.hpp`). `Engine::process()` drains it at the start of every block.
 
-Structural changes (adding a channel, inserting an effect) will not use this
-queue. A background thread will build a new immutable *render graph* and the
-audio thread will switch to it with one atomic pointer exchange; the old graph
-is freed later on a non-real-time thread.
+Structured state (channels, samples, patterns) does not use this queue. The
+control thread builds an immutable snapshot and publishes it with
+`core/SnapshotExchange`: one atomic pointer exchange. Replaced snapshots drain
+until no voice plays their samples, then go back to the control thread to be
+freed. Voice state lives outside the snapshots, so edits never cut sound.
+See [ADR 0005](adr/0005-state-snapshots-for-the-audio-thread.md).
 
 ## Audio → control
 

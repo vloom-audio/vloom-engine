@@ -15,6 +15,10 @@ namespace vloom {
 /// accumulates block after block.
 class Transport {
 public:
+    /// Furthest position locate() accepts (about 16 000 hours at 120 BPM);
+    /// keeps tick and frame arithmetic far from overflow.
+    static constexpr double kMaxTicks = 1e11;
+
     void prepare(double sampleRate) noexcept;
 
     void play() noexcept { playing_ = true; }

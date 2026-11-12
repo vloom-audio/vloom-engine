@@ -4,12 +4,64 @@
 
 #include <vloom/engine.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <thread>
 
 namespace vloom::cli {
+
+namespace {
+
+/// Builds the channel rack from --channel options, loading every sample at
+/// `sampleRate`. Null (with a message printed) on bad input.
+std::unique_ptr<const SequencerState> buildRack(const Args& args, double sampleRate)
+{
+    auto state = std::make_unique<SequencerState>();
+    int longest = 0;
+    for (const ChannelArg& arg : args.channels) {
+        ChannelState channel;
+        for (const char c : arg.pattern) {
+            if (c == 'x' || c == 'X')
+                channel.steps.push_back(1);
+            else if (c == '.' || c == '-')
+                channel.steps.push_back(0);
+            else if (c != '|') {
+                std::fprintf(stderr, "error: bad step '%c' in pattern %s\n", c, arg.pattern.c_str());
+                return nullptr;
+            }
+        }
+        std::string error;
+        channel.sample = loadSample(arg.path, sampleRate, &error);
+        if (!channel.sample) {
+            std::fprintf(stderr, "error: %s\n", error.c_str());
+            return nullptr;
+        }
+        channel.voices = std::make_shared<ChannelVoices>();
+        longest = std::max(longest, static_cast<int>(channel.steps.size()));
+        state->channels.push_back(std::move(channel));
+    }
+    state->stepCount = std::max(longest, 1);
+    return state;
+}
+
+/// Sets tempo, metronome and channel rack from the arguments.
+bool setUp(Engine& engine, const Args& args, double sampleRate)
+{
+    engine.setTempo(args.bpm);
+    engine.setMetronomeEnabled(args.click.value_or(args.channels.empty()));
+    if (args.channels.empty())
+        return true;
+    auto rack = buildRack(args, sampleRate);
+    if (!rack)
+        return false;
+    engine.setSequencerState(std::move(rack));
+    return true;
+}
+
+} // namespace
 
 int listDevices()
 {
@@ -40,7 +92,8 @@ int play(const Args& args)
         return 1;
     }
     engine.prepare(device.sampleRate(), AudioDevice::kMaxBlockFrames);
-    engine.setTempo(args.bpm);
+    if (!setUp(engine, args, device.sampleRate()))
+        return 1;
     engine.play();
 
     if (!device.start(&error)) {
@@ -49,11 +102,17 @@ int play(const Args& args)
     }
 
     const double seconds = args.seconds > 0.0 ? args.seconds : 8.0;
-    std::printf("Playing metronome on '%s' at %d Hz, %.1f BPM for %.1f s\n", device.deviceName().c_str(),
+    std::printf("Playing %s on '%s' at %d Hz, %.1f BPM for %.1f s\n",
+        args.channels.empty() ? "metronome" : "channel rack", device.deviceName().c_str(),
         device.sampleRate(), args.bpm, seconds);
 
     const auto until = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
     while (std::chrono::steady_clock::now() < until) {
+        if (!device.isRunning()) {
+            std::puts("");
+            std::fputs("error: the audio device was disconnected\n", stderr);
+            return 1;
+        }
         const auto bbt = toBarBeatTick(engine.positionTicks(), engine.beatsPerBar());
         std::printf("\r  %3lld.%d.%03d", static_cast<long long>(bbt.bar), bbt.beat, bbt.tick);
         std::fflush(stdout);
@@ -74,7 +133,8 @@ int render(const Args& args)
 
     Engine engine;
     engine.prepare(args.rate, 512);
-    engine.setTempo(args.bpm);
+    if (!setUp(engine, args, args.rate))
+        return 1;
     engine.play();
 
     OfflineRenderOptions opts;

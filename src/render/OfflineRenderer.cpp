@@ -3,8 +3,7 @@
 #include "vloom/engine/render/OfflineRenderer.hpp"
 
 #include "vloom/engine/Engine.hpp"
-
-#include <miniaudio.h>
+#include "vloom/engine/render/WavWriter.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -40,29 +39,8 @@ bool renderToWav(
     Engine& engine, const std::string& path, const OfflineRenderOptions& options, std::string* error)
 {
     const auto samples = renderInterleaved(engine, options);
-    const int channels = std::max(options.channels, 1);
-
-    ma_encoder_config cfg = ma_encoder_config_init(ma_encoding_format_wav, ma_format_f32,
-        static_cast<ma_uint32>(channels), static_cast<ma_uint32>(engine.sampleRate()));
-
-    ma_encoder encoder;
-    if (ma_encoder_init_file(path.c_str(), &cfg, &encoder) != MA_SUCCESS) {
-        if (error)
-            *error = "Could not open '" + path + "' for writing";
-        return false;
-    }
-
-    const auto frames = static_cast<ma_uint64>(samples.size() / static_cast<std::size_t>(channels));
-    ma_uint64 written = 0;
-    const ma_result res = ma_encoder_write_pcm_frames(&encoder, samples.data(), frames, &written);
-    ma_encoder_uninit(&encoder);
-
-    if (res != MA_SUCCESS || written != frames) {
-        if (error)
-            *error = "Failed while writing '" + path + "'";
-        return false;
-    }
-    return true;
+    return writeWavFloat32(path, samples, std::max(options.channels, 1),
+        static_cast<int>(std::lround(engine.sampleRate())), error);
 }
 
 } // namespace vloom
