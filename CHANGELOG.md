@@ -6,6 +6,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+- Supply chain: GitHub Actions are pinned to commit SHAs (checkout v7.0.1, cache
+  v6.1.0; Dependabot keeps them current), the CPM.cmake download is checked against a
+  pinned SHA-256 (a cached copy that does not match is fetched again), and Catch2 is
+  pinned to the commit of its v3.7.1 tag.
+
 ### Added
 - Audio output on macOS, Windows and Linux via miniaudio (`io/AudioDevice`)
 - Wait-free command queue from control thread to audio thread (`core/SpscQueue`)
