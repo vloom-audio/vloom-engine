@@ -13,6 +13,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <string>
 
 namespace vloom::io {
@@ -176,6 +177,12 @@ public:
             return false;
         }
 
+        // Unplugged devices report "not alive": then isRunning() turns false.
+        lost_.store(false);
+        device_ = device;
+        const auto alive = address(kAudioDevicePropertyDeviceIsAlive);
+        AudioObjectAddPropertyListener(device_, &alive, &CoreAudioBackend::aliveChanged, this);
+
         info.sampleRate = static_cast<int>(sampleRate);
         info.channels = channels;
         info.deviceName = deviceName(device);
@@ -206,6 +213,11 @@ public:
 
     void close() noexcept override
     {
+        if (device_ != kAudioObjectUnknown) {
+            const auto alive = address(kAudioDevicePropertyDeviceIsAlive);
+            AudioObjectRemovePropertyListener(device_, &alive, &CoreAudioBackend::aliveChanged, this);
+            device_ = kAudioObjectUnknown;
+        }
         stop();
         if (unit_ != nullptr) {
             AudioUnitUninitialize(unit_);
@@ -224,11 +236,35 @@ private:
         auto* backend = static_cast<CoreAudioBackend*>(self);
         if (buffers == nullptr || buffers->mNumberBuffers < 1 || buffers->mBuffers[0].mData == nullptr)
             return noErr;
+        if (backend->lost_.load(std::memory_order_relaxed)) {
+            // The device is gone and the unit may have moved to another
+            // output on its own: stay silent until the host reopens one.
+            std::memset(buffers->mBuffers[0].mData, 0, buffers->mBuffers[0].mDataByteSize);
+            return noErr;
+        }
         backend->render_(backend->user_, static_cast<float*>(buffers->mBuffers[0].mData), backend->channels_,
             static_cast<int>(frames));
         return noErr;
     }
 
+    // CoreAudio's notification thread.
+    static OSStatus aliveChanged(
+        AudioObjectID device, UInt32 /*count*/, const AudioObjectPropertyAddress* /*addresses*/, void* self)
+    {
+        UInt32 alive = 1;
+        UInt32 size = sizeof(alive);
+        const auto where = address(kAudioDevicePropertyDeviceIsAlive);
+        // A device already removed may not answer at all: that is lost too.
+        if (AudioObjectGetPropertyData(device, &where, 0, nullptr, &size, &alive) != noErr || alive == 0) {
+            auto* backend = static_cast<CoreAudioBackend*>(self);
+            backend->lost_.store(true);
+            backend->running_.store(false);
+        }
+        return noErr;
+    }
+
+    AudioDeviceID device_ = kAudioObjectUnknown;
+    std::atomic<bool> lost_{false}; ///< set by the "alive" listener
     AudioComponentInstance unit_ = nullptr;
     RenderFn render_ = nullptr;
     void* user_ = nullptr;

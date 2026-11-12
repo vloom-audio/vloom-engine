@@ -15,12 +15,22 @@ target_sources(vloom_engine PRIVATE
 
     # dsp — sound generators and processors
     dsp/Metronome.cpp
+    dsp/Sampler.cpp
 
     # io — hardware audio devices; each backend compiles only on its OS
     io/AlsaBackend.cpp
     io/AudioDevice.cpp
     io/CoreAudioBackend.cpp
     io/WasapiBackend.cpp
+
+    # sample — decoded audio in memory: WAV reading, resampling
+    sample/Resampler.cpp
+    sample/SampleBuffer.cpp
+    sample/SampleLoader.cpp
+    sample/WavReader.cpp
+
+    # sequencer — the channel rack: steps that trigger samples
+    sequencer/StepSequencer.cpp
 
     # render — offline (faster than real time) rendering
     render/OfflineRenderer.cpp

@@ -211,3 +211,29 @@ TEST_CASE("Status is published after each block", "[engine]")
     CHECK_FALSE(engine.isPlaying());
     CHECK(engine.positionTicks() == pos);
 }
+
+TEST_CASE("Non-finite tempo and positions are ignored", "[engine]")
+{
+    // Review finding: NaN reached the scheduler and hung the audio thread.
+    vloom::Engine engine;
+    engine.prepare(48000.0, 256);
+    engine.setTempo(130.0);
+    engine.setTempo(std::numeric_limits<double>::quiet_NaN());
+    engine.setTempo(std::numeric_limits<double>::infinity());
+    engine.locate(std::numeric_limits<double>::quiet_NaN());
+    engine.locate(std::numeric_limits<double>::infinity());
+    engine.play();
+
+    vloom::OfflineRenderOptions opts;
+    opts.seconds = 0.1;
+    opts.blockSize = 256;
+    vloom::renderInterleaved(engine, opts); // must return
+    CHECK(engine.tempo() == 130.0);
+    CHECK(std::isfinite(engine.positionTicks()));
+    CHECK(engine.positionTicks() < vloom::kPpq);
+
+    // Absurdly far positions are clamped, never overflowing the scheduler.
+    engine.locate(1e30);
+    vloom::renderInterleaved(engine, opts);
+    CHECK(std::isfinite(engine.positionTicks()));
+}

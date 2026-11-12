@@ -4,10 +4,14 @@
 
 #include "vloom/engine/core/SpscQueue.hpp"
 #include "vloom/engine/dsp/Metronome.hpp"
+#include "vloom/engine/mixer/MixerState.hpp"
+#include "vloom/engine/sequencer/StepSequencer.hpp"
 #include "vloom/engine/time/Transport.hpp"
 
 #include <array>
 #include <atomic>
+#include <memory>
+#include <vector>
 
 namespace vloom {
 
@@ -23,13 +27,15 @@ namespace vloom {
 ///  - Status getters may be called from any thread.
 class Engine {
 public:
-    Engine() = default;
+    /// Allocates the mixer's buses (about 4 MB), so process() never has to.
+    Engine();
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
 
     void prepare(double sampleRate, int maxBlockSize);
 
-    /// Renders numFrames of non-interleaved audio into `out`.
+    /// Renders numFrames of non-interleaved audio into `out`. Blocks longer
+    /// than kMaxBlockFrames are rendered in parts.
     void process(float* const* out, int numChannels, int numFrames) noexcept;
 
     // ---- control (one control thread) — return false if the queue is full
@@ -47,6 +53,17 @@ public:
 
     static constexpr float kMaxMasterGain = 2.0f;
 
+    /// Replaces the channel rack (channels, samples, steps) the audio thread
+    /// plays, from the next block on. Ringing notes are not cut: keep each
+    /// channel's ChannelVoices across states (docs/adr/0005).
+    void setSequencerState(std::unique_ptr<const SequencerState> state);
+    /// Frees states the audio thread has finished with. Call it regularly
+    /// from the control thread (a UI timer); setSequencerState() does too.
+    void collectGarbage();
+    /// Replaces the mixer inserts' volume and pan (mute and solo folded into
+    /// the gain by the host), from the next block on; changes ramp.
+    void setMixerState(std::unique_ptr<const MixerState> state);
+
     // ---- status (any thread)
     [[nodiscard]] bool isPlaying() const noexcept { return playing_.load(std::memory_order_relaxed); }
     [[nodiscard]] double positionTicks() const noexcept { return position_.load(std::memory_order_relaxed); }
@@ -60,6 +77,9 @@ public:
     /// the last call, after master gain and pan; resets it to 0. For one
     /// meter reader (the UI); other channels read 0.
     [[nodiscard]] float takeOutputPeak(int channel) noexcept;
+    /// Like takeOutputPeak() for mixer insert `insert` (1 .. kMaxInserts),
+    /// after its volume and pan.
+    [[nodiscard]] float takeInsertPeak(int insert, int channel) noexcept;
 
 private:
     struct Command {
@@ -74,11 +94,27 @@ private:
     void applyMasterGain(float* const* out, int numChannels, int numFrames) noexcept;
     [[nodiscard]] float channelGainTarget(int channel, int numChannels) const noexcept;
     void meterOutput(float* const* out, int numChannels, int numFrames) noexcept;
+    /// NaN / infinity become silence before the device sees them.
+    static void sanitizeOutput(float* const* out, int numChannels, int numFrames) noexcept;
     void measureLoad(double seconds, int numFrames) noexcept;
+    void renderSegment(float* const* out, int numChannels, int startFrame, int numFrames) noexcept;
+    void processBlock(float* const* out, int numChannels, int numFrames) noexcept;
+    /// Inserts (volume, pan, meters) into the master bus, the master bus into `out`.
+    void mixBuses(float* const* out, int numChannels, int numFrames) noexcept;
 
     SpscQueue<Command, 256> commands_;
     Transport transport_;
     Metronome metronome_;
+    StepSequencer sequencer_;
+    SnapshotExchange<MixerState> mixer_;
+    /// audio thread: stereo bus per insert, 0 = master bus; kMaxBlockFrames each
+    std::vector<float> busMemory_;
+    std::array<float*, 2 * (kMaxInserts + 1)> buses_{};
+    std::array<bool, kMaxInserts + 1> busUsed_{};
+    std::array<StereoGain, kMaxInserts + 1> insertApplied_{}; ///< audio thread: ramp start per insert
+    std::array<bool, kMaxInserts + 1> insertSounding_{}; ///< audio thread: the insert had sound last block
+    std::array<std::array<std::atomic<float>, 2>, kMaxInserts + 1> insertPeak_{};
+    bool stopVoices_ = false; ///< audio thread: a Stop command arrived this block
     bool metronomeEnabled_ = true;
     float masterGainTarget_ = 1.0f; ///< audio thread: latest requested gain
     float masterPanTarget_ = 0.0f; ///< audio thread: latest requested balance

@@ -6,11 +6,41 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+- Supply chain: GitHub Actions are pinned to commit SHAs (checkout v7.0.1, cache
+  v6.1.0; Dependabot keeps them current), the CPM.cmake download is checked against a
+  pinned SHA-256 (a cached copy that does not match is fetched again), and Catch2 is
+  pinned to the commit of its v3.7.1 tag.
+
 ### Added
+- Mixer routing (`mixer/MixerState`): each step-sequencer channel plays into
+  one of up to 125 insert buses (or straight into the master) with its own
+  gain and balance pan; each insert has gain, pan and a peak meter
+  (`Engine::setMixerState()`, `takeInsertPeak()`). Every level change is
+  ramped over one block, and blocks longer than 4096 frames are split
+- A lost output device behaves the same on every OS: the backend stops sending
+  audio and `isRunning()` turns false (CoreAudio's unit is kept silent instead of
+  moving to another output on its own); `vloom-cli play` stops with an error
 - Audio output through each OS's own API, behind `io/AudioDevice`: WASAPI
   (shared, event driven, MMCSS "Pro Audio") on Windows, CoreAudio (AUHAL) on
   macOS, ALSA on Linux (also reaching PulseAudio and PipeWire)
 - Own 32-bit float WAV writer (`render/WavWriter`)
+- WAV reader for untrusted files: PCM 8/16/24/32-bit, float 32/64-bit,
+  WAVE_FORMAT_EXTENSIBLE; bounds-checked chunk walk, metadata skipped
+  unread, size limits before allocating, NaN / infinity become silence
+  (`sample/WavReader`)
+- Band-limited windowed-sinc resampler (`sample/Resampler`) and
+  `loadSample()` to read a file at the engine's rate
+- One-shot sample player with per-channel polyphony (1-64 voices) that fades
+  stolen and stopped notes instead of clicking (`dsp/Sampler`)
+- Lock-free snapshot hand-over between the control and audio threads
+  (`core/SnapshotExchange`, ADR 0005)
+- Step sequencer: channels with sample, gain, pan, mute and steps, played
+  sample-accurately alongside the metronome; edits never cut ringing notes,
+  removed channels and transport stop fade out (`sequencer/`,
+  `Engine::setSequencerState`)
+- `vloom-cli play` / `render` take `--channel <file.wav>:<pattern>` and
+  `--click` / `--no-click`
 - Wait-free command queue from control thread to audio thread (`core/SpscQueue`)
 - Sample-accurate, drift-free transport at 960 PPQ (`time/Transport`)
 - Metronome (`dsp/Metronome`)
