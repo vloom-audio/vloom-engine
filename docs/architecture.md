@@ -9,6 +9,7 @@
 | time | `time/` | PPQ, bar/beat/tick, transport clock | core |
 | dsp | `dsp/` | Sound generators and processors | core |
 | io | `io/` | Hardware audio devices (WASAPI, CoreAudio, ALSA) | core |
+| sample | `sample/` | Decoded audio in memory: WAV reading, resampling | core |
 | render | `render/` | Offline rendering, file export | engine |
 
 Rules:

@@ -22,6 +22,11 @@ target_sources(vloom_engine PRIVATE
     io/CoreAudioBackend.cpp
     io/WasapiBackend.cpp
 
+    # sample — decoded audio in memory: WAV reading, resampling
+    sample/Resampler.cpp
+    sample/SampleBuffer.cpp
+    sample/WavReader.cpp
+
     # render — offline (faster than real time) rendering
     render/OfflineRenderer.cpp
     render/WavWriter.cpp)

@@ -38,6 +38,12 @@
 #include <thread>
 #include <wrl/client.h>
 
+// COM code uses Microsoft extensions (__uuidof, also inside IID_PPV_ARGS);
+// this file only builds on Windows, where they are the normal way.
+#if defined(__clang__)
+#pragma clang diagnostic ignored "-Wlanguage-extension-token"
+#endif
+
 namespace vloom::io {
 
 namespace {

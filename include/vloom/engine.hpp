@@ -12,5 +12,8 @@
 #include "vloom/engine/io/AudioDevice.hpp"
 #include "vloom/engine/render/OfflineRenderer.hpp"
 #include "vloom/engine/render/WavWriter.hpp"
+#include "vloom/engine/sample/Resampler.hpp"
+#include "vloom/engine/sample/SampleBuffer.hpp"
+#include "vloom/engine/sample/WavReader.hpp"
 #include "vloom/engine/time/MusicalTime.hpp"
 #include "vloom/engine/time/Transport.hpp"
