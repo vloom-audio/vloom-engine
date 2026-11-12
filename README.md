@@ -28,8 +28,9 @@ reused by other Vloom Audio tools.
 - **Lock-free control.** The UI or CLI sends commands to the audio thread
   through a single-producer / single-consumer queue (`core/SpscQueue`); state
   comes back through atomics.
-- **Cross-platform audio I/O** through [miniaudio](https://miniaud.io):
-  CoreAudio on macOS, WASAPI on Windows, ALSA / PulseAudio / JACK on Linux.
+- **Native audio I/O, no third-party audio library**: WASAPI on Windows,
+  CoreAudio on macOS, ALSA on Linux (PulseAudio and PipeWire through ALSA).
+  See [ADR 0004](docs/adr/0004-native-audio-io.md).
 - **Offline rendering** to 32-bit float WAV, used by the tests and by
   `vloom-cli render`.
 
@@ -39,8 +40,10 @@ reused by other Vloom Audio tools.
 
 - CMake ≥ 3.22 and Git
 - A C++20 compiler: Apple Clang 15+ (macOS), GCC 12+ (Linux), MSVC 2022 (Windows)
-- Dependencies (`miniaudio`, `Catch2`) are downloaded and pinned by CMake
-  through [CPM](https://github.com/cpm-cmake/CPM.cmake); see `cmake/Dependencies.cmake`.
+- Linux only: the ALSA headers (`libasound2-dev` on Debian/Ubuntu, `alsa-lib-devel` on Fedora)
+- The test framework (`Catch2`) is downloaded and pinned by CMake through
+  [CPM](https://github.com/cpm-cmake/CPM.cmake); the engine itself has no
+  third-party runtime dependency (`cmake/Dependencies.cmake`).
 
 ---
 
@@ -93,8 +96,8 @@ vloom-engine/
 │   ├── Engine.hpp            # The engine: process(), play / stop / tempo control
 │   ├── core/                 # SpscQueue, version info
 │   ├── dsp/                  # Sound generators and processors (Metronome)
-│   ├── io/                   # Hardware audio devices (wraps miniaudio)
-│   ├── render/               # Offline rendering
+│   ├── io/                   # Hardware audio devices (WASAPI, CoreAudio, ALSA)
+│   ├── render/               # Offline rendering, WAV writer
 │   └── time/                 # Musical time, Transport
 ├── src/                      # Implementation, same module folders as include/
 ├── tests/                    # Catch2 tests, same module folders as src/

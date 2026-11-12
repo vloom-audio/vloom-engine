@@ -4,7 +4,7 @@ project(vloom_engine
     VERSION 0.1.0
     DESCRIPTION "Real-time audio engine for VloomDAW"
     HOMEPAGE_URL "https://github.com/vloom-audio/vloom-engine"
-    LANGUAGES C CXX)
+    LANGUAGES CXX)
 
 # Tests and tools are on by default only when this is the top-level project,
 # so VloomDAW (which adds the engine as a subdirectory) doesn't build them.

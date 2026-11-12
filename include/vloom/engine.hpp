@@ -11,5 +11,6 @@
 #include "vloom/engine/dsp/Metronome.hpp"
 #include "vloom/engine/io/AudioDevice.hpp"
 #include "vloom/engine/render/OfflineRenderer.hpp"
+#include "vloom/engine/render/WavWriter.hpp"
 #include "vloom/engine/time/MusicalTime.hpp"
 #include "vloom/engine/time/Transport.hpp"

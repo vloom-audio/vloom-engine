@@ -7,6 +7,8 @@ CPMAddPackage(
 add_executable(vloom_engine_tests
     EngineTests.cpp
     core/SpscQueueTests.cpp
+    io/AudioDeviceTests.cpp
+    render/WavWriterTests.cpp
     time/MusicalTimeTests.cpp
     time/TransportTests.cpp)
 
