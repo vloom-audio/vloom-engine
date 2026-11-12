@@ -34,10 +34,15 @@ them dead.
    snapshot containing that channel points at the same object. Edits
    therefore never reset voices.
 4. **When a draining snapshot is done.** A snapshot can go once, for each of
-   its channels, either its sample is also in the current snapshot (still
-   owned there) or that channel's sampler no longer `uses()` it. Samplers of
-   channels missing from the current snapshot (deleted channels) keep being
-   rendered from the draining snapshot until their voices have faded.
+   its channels, (a) the channel's sampler is in the current snapshot or is
+   silent, and (b) the channel's sample is in the current snapshot (still
+   owned there) or **no** sampler still rendered (current or draining)
+   `uses()` it. Checking only the channel's own sampler is not enough: two
+   channels can share one sample, and the voice still playing it may belong
+   to the other channel (found in review; regression test in
+   `StepSequencerTests`). Samplers of channels missing from the current
+   snapshot (deleted channels) keep being rendered from the draining snapshot
+   until their voices have faded.
 
 Small, frequent controls (play, stop, tempo, master gain) stay on the command
 queue.

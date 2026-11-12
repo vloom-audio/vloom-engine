@@ -231,3 +231,33 @@ TEST_CASE("Playing the rack does not allocate", "[sequencer]")
         engine.process(out.data(), 2, 256);
     CHECK(counter.count() == 0);
 }
+
+TEST_CASE("A sample two channels share stays alive while either still plays it", "[sequencer]")
+{
+    // Review finding: an old state was released when only its own channel's
+    // sampler had stopped, while another channel's sampler still played the
+    // sample through a raw pointer.
+    vloom::Engine engine;
+    prepare(engine);
+    const auto x = std::make_shared<vloom::ChannelVoices>();
+    const auto y = std::make_shared<vloom::ChannelVoices>();
+    std::weak_ptr<const vloom::SampleBuffer> watch;
+    {
+        auto shared = constant(24000); // 0.5 s
+        watch = shared;
+        engine.setSequencerState(rack({channel(shared, x, "x"), channel(shared, y, "")})); // X plays it
+        engine.play();
+        render(engine, 0.05);
+        engine.setSequencerState(rack({channel(constant(10), x, ""), channel(shared, y, "")})); // X moves on
+    }
+    render(engine, 0.05);
+    engine.collectGarbage();
+    engine.setSequencerState(rack({channel(constant(10), x, ""), channel(constant(10), y, "")})); // Y too
+    render(engine, 0.05);
+    engine.collectGarbage();
+    CHECK_FALSE(watch.expired()); // X's note of it still sounds
+
+    render(engine, 0.5);
+    engine.collectGarbage();
+    CHECK(watch.expired());
+}

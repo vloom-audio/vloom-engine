@@ -41,6 +41,10 @@ public:
 
 private:
     [[nodiscard]] bool inCurrent(const ChannelVoices* voices) const noexcept;
+    [[nodiscard]] bool sampleInCurrent(const SampleBuffer* sample) const noexcept;
+    /// True when any sampler the audio thread still renders (current or
+    /// draining states) plays `sample`.
+    [[nodiscard]] bool samplePlaying(const SampleBuffer* sample) const noexcept;
     [[nodiscard]] bool canRelease(const SequencerState& old) const noexcept;
 
     SnapshotExchange<SequencerState> exchange_;

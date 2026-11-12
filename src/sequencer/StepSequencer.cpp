@@ -82,29 +82,44 @@ bool StepSequencer::inCurrent(const ChannelVoices* voices) const noexcept
 bool StepSequencer::canRelease(const SequencerState& old) const noexcept
 {
     // ADR 0005: an old state may go once nothing it alone owns is still
-    // playing. Its samples may be in use if the current state shares them
-    // (they stay alive there); its voice objects must be silent unless the
-    // current state still has them.
+    // needed. Its voice objects must be silent unless the current state still
+    // has them. Its samples must not be played by ANY sampler still rendered,
+    // unless the current state holds them too: two channels can share one
+    // sample, and the one still playing it may belong to another channel.
     for (const ChannelState& channel : old.channels) {
         const ChannelVoices* voices = channel.voices.get();
-        if (voices == nullptr)
-            continue;
-        const bool voicesKept = inCurrent(voices);
-        if (!voicesKept && voices->sampler.activeVoices() > 0)
+        if (voices != nullptr && !inCurrent(voices) && voices->sampler.activeVoices() > 0)
             return false; // a removed channel still fading
-        if (channel.sample == nullptr || !voices->sampler.uses(channel.sample.get()))
-            continue;
-        bool sampleKept = false;
-        if (current_ != nullptr)
-            for (const ChannelState& now : current_->channels)
-                if (now.sample == channel.sample) {
-                    sampleKept = true;
-                    break;
-                }
-        if (!sampleKept)
-            return false; // a replaced sample still sounding
+        const SampleBuffer* sample = channel.sample.get();
+        if (sample != nullptr && !sampleInCurrent(sample) && samplePlaying(sample))
+            return false; // a sample only this state owns is still sounding
     }
     return true;
+}
+
+bool StepSequencer::sampleInCurrent(const SampleBuffer* sample) const noexcept
+{
+    if (current_ == nullptr)
+        return false;
+    for (const ChannelState& channel : current_->channels)
+        if (channel.sample.get() == sample)
+            return true;
+    return false;
+}
+
+bool StepSequencer::samplePlaying(const SampleBuffer* sample) const noexcept
+{
+    const auto plays = [sample](const SequencerState& state) {
+        for (const ChannelState& channel : state.channels)
+            if (channel.voices != nullptr && channel.voices->sampler.uses(sample))
+                return true;
+        return false;
+    };
+    if (current_ != nullptr && plays(*current_))
+        return true;
+    bool playing = false;
+    exchange_.forEachDraining([&](const SequencerState& state) { playing = playing || plays(state); });
+    return playing;
 }
 
 } // namespace vloom
