@@ -3,15 +3,16 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![C++ Standard](https://img.shields.io/badge/C%2B%2B-20-brightgreen.svg)](#requirements)
 [![Platforms](https://img.shields.io/badge/Platforms-macOS%20|%20Linux%20|%20Windows-lightgrey.svg)](#quick-start)
-[![Status: M0](https://img.shields.io/badge/Status-M0%20(First%20Sound)-orange.svg)](#roadmap)
+[![Status: M1](https://img.shields.io/badge/Status-M1%20(Channel%20Rack)-orange.svg)](#roadmap)
 
 The real-time audio engine behind [VloomDAW](https://github.com/vloom-audio/VloomDAW).
 A plain **C++20** library with no UI dependency, so it can be tested headless and
 reused by other Vloom Audio tools.
 
-> **Current milestone: M0 — first sound.** Opens an audio device, runs a
-> sample-accurate transport at 960 PPQ, plays a metronome, renders offline to
-> WAV, and ships the `vloom-cli` developer tool.
+> **Current milestone: M1 — channel rack.** Plays WAV samples from a step
+> sequencer, sample-accurately alongside the metronome, and mixes each channel
+> into one of up to 125 insert buses. Outputs through each OS's own audio API,
+> renders offline to WAV, and ships the `vloom-cli` developer tool.
 
 ---
 
@@ -37,6 +38,9 @@ reused by other Vloom Audio tools.
   reader, built for untrusted files) with per-channel polyphony; edits are
   published as immutable snapshots, so they never block or cut the audio
   ([ADR 0005](docs/adr/0005-state-snapshots-for-the-audio-thread.md)).
+- **Mixer routing (M1)**: each channel plays into an insert bus (or straight
+  into the master) with its own volume and pan; inserts have volume, pan and a
+  peak meter. Level changes ramp over one block, so they do not click.
 
 ---
 
@@ -103,10 +107,13 @@ Platform setup and troubleshooting: **[docs/getting-started.md](docs/getting-sta
 vloom-engine/
 ├── include/vloom/engine/     # Public API (what VloomDAW may include)
 │   ├── Engine.hpp            # The engine: process(), play / stop / tempo control
-│   ├── core/                 # SpscQueue, version info
-│   ├── dsp/                  # Sound generators and processors (Metronome)
+│   ├── core/                 # SpscQueue, SnapshotExchange, version info
+│   ├── dsp/                  # Sound generators and processors (Metronome, Sampler)
 │   ├── io/                   # Hardware audio devices (WASAPI, CoreAudio, ALSA)
+│   ├── mixer/                # Insert settings and the pan law
 │   ├── render/               # Offline rendering, WAV writer
+│   ├── sample/               # WAV reader, resampler, sample loading
+│   ├── sequencer/            # Channel rack state and step playback
 │   └── time/                 # Musical time, Transport
 ├── src/                      # Implementation, same module folders as include/
 ├── tests/                    # Catch2 tests, same module folders as src/
@@ -127,10 +134,10 @@ vloom-engine/
 
 | Milestone | Deliverables | Status |
 |:---:|---|:---:|
-| **M0** | Audio device output, transport, metronome, offline WAV render, CLI | *In review* |
-| **M1** | Step sequencer and sample playback (drum channel rack) | *Next* |
-| **M2** | MIDI notes, piano-roll data model, first built-in synth | *Planned* |
-| **M3** | Playlist (patterns on a timeline), mixer, WAV export | *Planned* |
+| **M0** | Audio device output, transport, metronome, offline WAV render, CLI | *Done* |
+| **M1** | Step sequencer and sample playback (drum channel rack); mixer routing to inserts | *Done* |
+| **M2** | MIDI notes, piano-roll data model, first built-in synth | *Next* |
+| **M3** | Playlist (patterns on a timeline), WAV export | *Planned* |
 | **M4** | CLAP, then VST3 plugin hosting; project save / load | *Planned* |
 
 Details: [docs/architecture.md#roadmap](docs/architecture.md#roadmap).

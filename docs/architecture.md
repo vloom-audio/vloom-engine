@@ -55,8 +55,9 @@ After each block the engine publishes play state, playhead and tempo to
 - `Transport` stores an *anchor* (ticks at the last tempo change or locate)
   and counts whole frames since then. Position is always derived from those,
   so rounding error never accumulates.
-- Events (today: metronome clicks) are scheduled on the exact sample they fall
-  on: the block is rendered in segments split at each event's offset.
+- Events (metronome clicks and channel-rack steps) are scheduled on the exact
+  sample they fall on: the block is rendered in segments split at each event's
+  offset.
 
 ## Testing
 
@@ -66,8 +67,8 @@ sample-exact results across many block sizes. Rendering must be deterministic.
 
 ## Roadmap
 
-1. **M0** device output, transport, metronome, offline render ← *here*
-2. **M1** pattern / step sequencer, sample playback (drum channel rack)
-3. **M2** MIDI notes, piano-roll data model, first built-in synth
-4. **M3** playlist (patterns on a timeline), mixer, WAV export
+1. **M0** device output, transport, metronome, offline render
+2. **M1** pattern / step sequencer, sample playback (drum channel rack), mixer routing
+3. **M2** MIDI notes, piano-roll data model, first built-in synth ← *next*
+4. **M3** playlist (patterns on a timeline), WAV export
 5. **M4** CLAP then VST3 hosting, project save / load
