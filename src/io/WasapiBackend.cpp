@@ -304,8 +304,13 @@ private:
                 }
             }
             const DWORD waited = WaitForMultipleObjects(2, events, FALSE, clientRunning ? 2000 : INFINITE);
-            if (waited == WAIT_OBJECT_0 + 1 && clientRunning) {
-                if (!renderAvailable(client.Get(), renderClient.Get(), bufferFrames)) {
+            // An invalidated endpoint (unplugged) may stop signalling the
+            // event, so a timeout also checks the device.
+            UINT32 padding = 0;
+            const bool lost
+                = waited == WAIT_TIMEOUT && clientRunning && FAILED(client->GetCurrentPadding(&padding));
+            if ((waited == WAIT_OBJECT_0 + 1 && clientRunning) || lost) {
+                if (lost || !renderAvailable(client.Get(), renderClient.Get(), bufferFrames)) {
                     // Device lost (unplugged, format changed): stop rendering;
                     // the control thread sees isRunning() == false.
                     client->Stop();

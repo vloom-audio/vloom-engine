@@ -176,6 +176,11 @@ public:
             return false;
         }
 
+        // Unplugged devices report "not alive": then isRunning() turns false.
+        device_ = device;
+        const auto alive = address(kAudioDevicePropertyDeviceIsAlive);
+        AudioObjectAddPropertyListener(device_, &alive, &CoreAudioBackend::aliveChanged, this);
+
         info.sampleRate = static_cast<int>(sampleRate);
         info.channels = channels;
         info.deviceName = deviceName(device);
@@ -206,6 +211,11 @@ public:
 
     void close() noexcept override
     {
+        if (device_ != kAudioObjectUnknown) {
+            const auto alive = address(kAudioDevicePropertyDeviceIsAlive);
+            AudioObjectRemovePropertyListener(device_, &alive, &CoreAudioBackend::aliveChanged, this);
+            device_ = kAudioObjectUnknown;
+        }
         stop();
         if (unit_ != nullptr) {
             AudioUnitUninitialize(unit_);
@@ -229,6 +239,19 @@ private:
         return noErr;
     }
 
+    // CoreAudio's notification thread.
+    static OSStatus aliveChanged(
+        AudioObjectID device, UInt32 /*count*/, const AudioObjectPropertyAddress* /*addresses*/, void* self)
+    {
+        UInt32 alive = 1;
+        UInt32 size = sizeof(alive);
+        const auto where = address(kAudioDevicePropertyDeviceIsAlive);
+        if (AudioObjectGetPropertyData(device, &where, 0, nullptr, &size, &alive) == noErr && alive == 0)
+            static_cast<CoreAudioBackend*>(self)->running_.store(false);
+        return noErr;
+    }
+
+    AudioDeviceID device_ = kAudioObjectUnknown;
     AudioComponentInstance unit_ = nullptr;
     RenderFn render_ = nullptr;
     void* user_ = nullptr;
