@@ -186,10 +186,12 @@ void Engine::process(float* const* out, int numChannels, int numFrames) noexcept
 
     if (transport_.isPlaying()) {
         // Two event streams, metronome beats and sequencer steps, merged in
-        // time order. Each event fires on the exact sample it falls on: the
-        // block is rendered in segments split at the events. An event within
-        // kEpsilon frames of a sample boundary snaps to that sample, so
-        // rounding noise never shifts it.
+        // time order. Each event fires on the first sample at or after its
+        // exact time: the block is rendered in segments split at the events.
+        // An event within kEpsilon frames of a sample boundary snaps to that
+        // sample, so rounding noise never shifts it. One rule decides both
+        // "later block" and "already played", so an event between the last
+        // sample of one block and the first of the next fires exactly once.
         constexpr double kEpsilon = 1e-6;
         const double start = transport_.positionTicks();
         const int ticksPerStep = sequencer_.ticksPerStep();
@@ -202,17 +204,17 @@ void Engine::process(float* const* out, int numChannels, int numFrames) noexcept
             const double stepTick = ticksPerStep > 0 ? static_cast<double>(step) * stepTicks
                                                      : std::numeric_limits<double>::infinity();
             const double tick = std::min(beatTick, stepTick);
-            const double frames = transport_.framesUntil(tick);
-            if (frames < -kEpsilon) { // already played in an earlier block
+            const double at = std::ceil(transport_.framesUntil(tick) - kEpsilon); // sample it fires on
+            if (at < 0.0) { // fired in an earlier block
                 if (beatTick == tick)
                     ++beat;
                 if (stepTick == tick)
                     ++step;
                 continue;
             }
-            const int offset = static_cast<int>(std::ceil(frames - kEpsilon));
-            if (offset >= numFrames)
-                break;
+            if (at >= static_cast<double>(numFrames))
+                break; // a later block
+            const int offset = static_cast<int>(at);
 
             renderSegment(out, numChannels, cursor, offset - cursor);
             cursor = offset;

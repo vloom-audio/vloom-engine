@@ -261,3 +261,25 @@ TEST_CASE("A sample two channels share stays alive while either still plays it",
     engine.collectGarbage();
     CHECK(watch.expired());
 }
+
+TEST_CASE("Steps between samples fire on the next sample, also across a block boundary", "[sequencer]")
+{
+    // Review finding: an event in the last fractional frame of a block was
+    // deferred, then skipped as "already played". At 44.1 kHz and 120 BPM a
+    // step is 5512.5 frames: step k fires on frame ceil(k * 5512.5).
+    const int blockSize = GENERATE(64, 333, 512, 5513);
+    vloom::Engine engine;
+    engine.prepare(44100.0, blockSize);
+    engine.setTempo(120.0);
+    engine.setMetronomeEnabled(false);
+    engine.setSequencerState(
+        rack({channel(constant(1), std::make_shared<vloom::ChannelVoices>(), "xxxxxxxxxxxxxxxx")}));
+    engine.play();
+    const auto audio = render(engine, 3.0, blockSize); // 132300 frames: steps 0..23
+
+    std::vector<std::size_t> expected;
+    for (int k = 0; k < 24; ++k)
+        expected.push_back(static_cast<std::size_t>(std::ceil(k * 5512.5)));
+    INFO("block size " << blockSize);
+    CHECK(vloom::test::findOnsets(audio, 2, 1000) == expected);
+}
