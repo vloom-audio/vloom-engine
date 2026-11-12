@@ -4,22 +4,27 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <memory>
-#include <vector>
+#include <new>
 
 // The "does not allocate" tests are only worth something if the counter sees
 // allocations at all.
-TEST_CASE("The allocation counter sees new and vector growth", "[support]")
+//
+// The allocation functions are called directly: optimisers may remove a
+// new-expression whose memory never escapes (allowed since C++14, and GCC
+// and Clang do at -O2), but not a call to ::operator new itself.
+TEST_CASE("The allocation counter sees operator new and new[]", "[support]")
 {
     if (!vloom::test::allocationCountingEnabled())
         SKIP("operator new is not replaceable in this build (AddressSanitizer on Windows)");
     const vloom::test::AllocationCounter counter;
     CHECK(counter.count() == 0);
-    auto box = std::make_unique<int>(1);
-    const long long afterNew = counter.count();
-    CHECK(afterNew == 1);
-    std::vector<int> v;
-    v.push_back(*box);
-    // Not an exact number: MSVC debug builds also allocate an iterator proxy.
-    CHECK(counter.count() > afterNew);
+
+    void* one = ::operator new(16);
+    CHECK(counter.count() == 1);
+    void* many = ::operator new[](64);
+    CHECK(counter.count() == 2);
+
+    ::operator delete(one);
+    ::operator delete[](many);
+    CHECK(counter.count() == 2); // freeing is not counted
 }
