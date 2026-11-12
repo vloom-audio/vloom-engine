@@ -9,6 +9,7 @@
 | time | `time/` | PPQ, bar/beat/tick, transport clock | core |
 | dsp | `dsp/` | Sound generators and processors | core |
 | io | `io/` | Hardware audio devices (WASAPI, CoreAudio, ALSA) | core |
+| mixer | `mixer/` | Insert settings (volume, pan) and the pan law; Engine mixes the buses | core |
 | sample | `sample/` | Decoded audio in memory: WAV reading, resampling | core |
 | sequencer | `sequencer/` | Channel rack state and step playback | core, dsp, sample, time |
 | render | `render/` | Offline rendering, file export | engine |

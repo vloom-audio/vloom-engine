@@ -25,18 +25,21 @@ void StepSequencer::triggerStep(std::int64_t step) noexcept
         if (channel.muted || channel.voices == nullptr || index >= channel.steps.size()
             || channel.steps[index] == 0)
             continue;
-        channel.voices->sampler.trigger(channel.sample.get(), channel.gain, channel.pan);
+        // Volume and pan are applied to the whole channel in mix(), live.
+        channel.voices->sampler.trigger(channel.sample.get());
     }
 }
 
-void StepSequencer::render(float* const* out, int numChannels, int startFrame, int numFrames) noexcept
+void StepSequencer::render(int startFrame, int numFrames) noexcept
 {
     ++pass_;
     const auto play = [&](ChannelVoices* voices) {
-        if (voices == nullptr || voices->renderedPass == pass_)
+        if (voices == nullptr || voices->renderedPass == pass_ || voices->sampler.activeVoices() == 0)
             return;
         voices->renderedPass = pass_;
-        voices->sampler.render(out, numChannels, startFrame, numFrames);
+        float* const buffer[2] = {voices->left.data(), voices->right.data()};
+        voices->sampler.render(buffer, 2, startFrame, numFrames);
+        voices->written = true;
     };
     if (current_ != nullptr)
         for (const ChannelState& channel : current_->channels)
@@ -51,6 +54,55 @@ void StepSequencer::render(float* const* out, int numChannels, int startFrame, i
             voices->sampler.stopAll();
             play(voices);
         }
+    });
+}
+
+void StepSequencer::mix(int numFrames, float* const* buses, bool* used) noexcept
+{
+    ++block_;
+    const auto mixChannel = [&](const ChannelState& channel) {
+        ChannelVoices* voices = channel.voices.get();
+        if (voices == nullptr || voices->mixedBlock == block_)
+            return;
+        voices->mixedBlock = block_;
+        const StereoGain target = balance(channel.gain, channel.pan);
+        if (!voices->rampStarted) { // first block: no ramp from a stale value
+            voices->rampStarted = true;
+            voices->applied = target;
+        }
+        if (!voices->written) { // silent: the next sound starts at the current setting
+            voices->applied = target;
+            return;
+        }
+        const int insert = channel.insert >= 0 && channel.insert <= kMaxInserts ? channel.insert : 0;
+        float* outLeft = buses[2 * insert];
+        float* outRight = buses[2 * insert + 1];
+        used[insert] = true;
+
+        // Linear ramp across the block, reaching the target on its last frame.
+        const float n = static_cast<float>(numFrames);
+        const float stepLeft = (target.left - voices->applied.left) / n;
+        const float stepRight = (target.right - voices->applied.right) / n;
+        float* left = voices->left.data();
+        float* right = voices->right.data();
+        for (int i = 0; i < numFrames; ++i) {
+            const float k = static_cast<float>(i + 1);
+            outLeft[i] += left[i] * (voices->applied.left + stepLeft * k);
+            outRight[i] += right[i] * (voices->applied.right + stepRight * k);
+            left[i] = 0.0f;
+            right[i] = 0.0f;
+        }
+        voices->applied = target;
+        voices->written = false;
+    };
+    if (current_ != nullptr)
+        for (const ChannelState& channel : current_->channels)
+            mixChannel(channel);
+    // Removed channels still fading: through the insert of their last state.
+    exchange_.forEachDraining([&](const SequencerState& old) {
+        for (const ChannelState& channel : old.channels)
+            if (channel.voices != nullptr && !inCurrent(channel.voices.get()))
+                mixChannel(channel);
     });
 }
 

@@ -111,7 +111,8 @@ TEST_CASE("Every channel plays its own steps", "[sequencer]")
     engine.play();
 
     const auto audio = render(engine, 0.5);
-    CHECK(left(audio, 0) == Approx(1.0f));
+    // Channel pan is a balance on the channel: hard left keeps the left side.
+    CHECK(left(audio, 0) == Approx(kCentre));
     CHECK(audio[1] == Approx(0.0f).margin(1e-7)); // right channel of frame 0
     CHECK(left(audio, 2 * kStepFrames) == Approx(0.5f * kCentre));
 }

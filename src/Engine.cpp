@@ -11,6 +11,13 @@
 
 namespace vloom {
 
+Engine::Engine()
+    : busMemory_(static_cast<std::size_t>(2 * (kMaxInserts + 1) * kMaxBlockFrames), 0.0f)
+{
+    for (std::size_t i = 0; i < buses_.size(); ++i)
+        buses_[i] = busMemory_.data() + i * static_cast<std::size_t>(kMaxBlockFrames);
+}
+
 void Engine::prepare(double sampleRate, int /*maxBlockSize*/)
 {
     // Called while audio is stopped, so touching audio-thread state is safe.
@@ -54,7 +61,21 @@ void Engine::setSequencerState(std::unique_ptr<const SequencerState> state)
     sequencer_.publish(std::move(state));
 }
 
-void Engine::collectGarbage() { sequencer_.collect(); }
+void Engine::collectGarbage()
+{
+    sequencer_.collect();
+    mixer_.collect();
+}
+
+void Engine::setMixerState(std::unique_ptr<const MixerState> state) { mixer_.publish(std::move(state)); }
+
+float Engine::takeInsertPeak(int insert, int channel) noexcept
+{
+    if (insert < 1 || insert > kMaxInserts || channel < 0 || channel > 1)
+        return 0.0f;
+    return insertPeak_[static_cast<std::size_t>(insert)][static_cast<std::size_t>(channel)].exchange(
+        0.0f, std::memory_order_relaxed);
+}
 
 bool Engine::setMasterPan(float pan)
 {
@@ -183,7 +204,7 @@ void Engine::renderSegment(float* const* out, int numChannels, int startFrame, i
     if (numFrames <= 0)
         return;
     metronome_.render(out, numChannels, startFrame, numFrames);
-    sequencer_.render(out, numChannels, startFrame, numFrames);
+    sequencer_.render(startFrame, numFrames);
 }
 
 void Engine::process(float* const* out, int numChannels, int numFrames) noexcept
@@ -191,6 +212,87 @@ void Engine::process(float* const* out, int numChannels, int numFrames) noexcept
     // steady_clock::now() does not allocate or lock.
     const auto started = std::chrono::steady_clock::now();
 
+    // Buses hold kMaxBlockFrames: longer requests are rendered in parts.
+    constexpr int kMaxChannels = 8;
+    for (int ch = kMaxChannels; ch < numChannels; ++ch) // beyond what is rendered: silence
+        std::memset(out[ch], 0, sizeof(float) * static_cast<std::size_t>(std::max(numFrames, 0)));
+    const int channels = std::min(numChannels, kMaxChannels);
+    std::array<float*, kMaxChannels> part{};
+    for (int done = 0; done < numFrames;) {
+        const int frames = std::min(numFrames - done, kMaxBlockFrames);
+        for (int ch = 0; ch < channels; ++ch)
+            part[static_cast<std::size_t>(ch)] = out[ch] + done;
+        processBlock(part.data(), channels, frames);
+        done += frames;
+    }
+
+    measureLoad(std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count(), numFrames);
+}
+
+void Engine::mixBuses(float* const* out, int numChannels, int numFrames) noexcept
+{
+    const MixerState* state = mixer_.acquire();
+    float* masterLeft = buses_[0];
+    float* masterRight = buses_[1];
+    const float n = static_cast<float>(numFrames);
+    for (int insert = 1; insert <= kMaxInserts; ++insert) {
+        const auto index = static_cast<std::size_t>(insert);
+        const InsertState settings
+            = state != nullptr && index <= state->inserts.size() ? state->inserts[index - 1] : InsertState{};
+        const StereoGain target = balance(settings.gain, settings.pan);
+        StereoGain& applied = insertApplied_[index];
+        if (!busUsed_[index]) {
+            applied = target; // silent: nothing to ramp
+            insertSounding_[index] = false;
+            continue;
+        }
+        if (!insertSounding_[index])
+            applied = target; // was silent: start at the setting, no ramp from a stale one
+        insertSounding_[index] = true;
+        busUsed_[index] = false;
+        float* left = buses_[2 * index];
+        float* right = buses_[2 * index + 1];
+        const float stepLeft = (target.left - applied.left) / n;
+        const float stepRight = (target.right - applied.right) / n;
+        float peakLeft = 0.0f;
+        float peakRight = 0.0f;
+        for (int i = 0; i < numFrames; ++i) {
+            const float k = static_cast<float>(i + 1);
+            const float l = left[i] * (applied.left + stepLeft * k);
+            const float r = right[i] * (applied.right + stepRight * k);
+            masterLeft[i] += l;
+            masterRight[i] += r;
+            peakLeft = std::max(peakLeft, std::abs(l));
+            peakRight = std::max(peakRight, std::abs(r));
+            left[i] = 0.0f;
+            right[i] = 0.0f;
+        }
+        applied = target;
+        for (std::size_t ch = 0; ch < 2; ++ch) {
+            const float peak = ch == 0 ? peakLeft : peakRight;
+            auto& slot = insertPeak_[index][ch];
+            float seen = slot.load(std::memory_order_relaxed);
+            while (peak > seen && !slot.compare_exchange_weak(seen, peak, std::memory_order_relaxed)) { }
+        }
+    }
+    mixer_.release([](const MixerState&) { return true; }); // plain values: nothing to wait for
+
+    // The master bus (direct channels plus inserts) into the output.
+    for (int i = 0; i < numFrames; ++i) {
+        if (numChannels >= 2) {
+            out[0][i] += masterLeft[i];
+            out[1][i] += masterRight[i];
+        } else if (numChannels == 1) {
+            out[0][i] += 0.5f * (masterLeft[i] + masterRight[i]);
+        }
+        masterLeft[i] = 0.0f;
+        masterRight[i] = 0.0f;
+    }
+    busUsed_[0] = false;
+}
+
+void Engine::processBlock(float* const* out, int numChannels, int numFrames) noexcept
+{
     stopVoices_ = false;
     applyCommands();
     sequencer_.beginBlock();
@@ -249,14 +351,14 @@ void Engine::process(float* const* out, int numChannels, int numFrames) noexcept
     }
 
     renderSegment(out, numChannels, cursor, numFrames - cursor);
+    sequencer_.mix(numFrames, buses_.data(), busUsed_.data());
+    mixBuses(out, numChannels, numFrames);
     sequencer_.endBlock();
     applyMasterGain(out, numChannels, numFrames);
     sanitizeOutput(out, numChannels, numFrames);
     meterOutput(out, numChannels, numFrames);
     transport_.advance(numFrames);
     publishStatus();
-
-    measureLoad(std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count(), numFrames);
 }
 
 } // namespace vloom

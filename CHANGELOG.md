@@ -7,6 +7,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Mixer routing (`mixer/MixerState`): each step-sequencer channel plays into
+  one of up to 125 insert buses (or straight into the master) with its own
+  gain and balance pan; each insert has gain, pan and a peak meter
+  (`Engine::setMixerState()`, `takeInsertPeak()`). Every level change is
+  ramped over one block, and blocks longer than 4096 frames are split
 - A lost output device behaves the same on every OS: the backend stops sending
   audio and `isRunning()` turns false (CoreAudio's unit is kept silent instead of
   moving to another output on its own); `vloom-cli play` stops with an error
