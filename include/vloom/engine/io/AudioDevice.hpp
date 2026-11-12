@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Vloom Audio contributors
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -56,6 +57,34 @@ public:
     [[nodiscard]] int sampleRate() const noexcept;
     [[nodiscard]] int channels() const noexcept;
     [[nodiscard]] std::string deviceName() const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+/// Counts changes to the list of output devices as the OS reports them
+/// (outputs plugged in or out, the default output changed), so a caller can
+/// list devices again only when something changed. Listing them costs
+/// 50-200 ms on Windows and disturbs other threads: polling it every couple of
+/// seconds made the UI stutter.
+///
+/// Threading: create and destroy on one thread (on Windows it keeps COM
+/// initialised there meanwhile); generation() from any thread.
+class DeviceListWatcher {
+public:
+    DeviceListWatcher();
+    ~DeviceListWatcher();
+    DeviceListWatcher(const DeviceListWatcher&) = delete;
+    DeviceListWatcher& operator=(const DeviceListWatcher&) = delete;
+
+    /// False where the OS cannot notify (ALSA) or refused: list devices
+    /// again from time to time instead.
+    [[nodiscard]] bool isSupported() const noexcept;
+
+    /// Starts at 0 and grows after each change. One change may count more
+    /// than once; compare with the value at the last listing.
+    [[nodiscard]] std::uint64_t generation() const noexcept;
 
 private:
     struct Impl;

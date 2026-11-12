@@ -56,6 +56,29 @@ TEST_CASE("Listing devices works without hardware", "[io]")
     CHECK(defaults <= 1);
 }
 
+TEST_CASE("A device list watcher starts at 0 and stops cleanly", "[io]")
+{
+    // No hardware needed: on a machine without audio it may be unsupported,
+    // but it never throws, and nothing counts without a change.
+    for (int i = 0; i < 3; ++i) {
+        vloom::DeviceListWatcher watcher;
+        CHECK(watcher.generation() == 0);
+#if defined(__linux__)
+        CHECK_FALSE(watcher.isSupported()); // ALSA cannot notify
+#endif
+    }
+}
+
+TEST_CASE("Windows and macOS report device-list changes", "[.][hardware][io]")
+{
+    vloom::DeviceListWatcher watcher;
+#if defined(_WIN32) || defined(__APPLE__)
+    CHECK(watcher.isSupported());
+#else
+    CHECK_FALSE(watcher.isSupported());
+#endif
+}
+
 TEST_CASE("The default device plays and stops", "[.][hardware][io]")
 {
     vloom::AudioDevice device;
