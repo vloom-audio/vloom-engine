@@ -6,6 +6,7 @@ CPMAddPackage(
 # Test files mirror src/: tests/<module>/<Name>Tests.cpp
 add_executable(vloom_engine_tests
     EngineTests.cpp
+    core/SnapshotExchangeTests.cpp
     core/SpscQueueTests.cpp
     dsp/SamplerTests.cpp
     io/AudioDeviceTests.cpp

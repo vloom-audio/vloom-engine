@@ -35,10 +35,12 @@ Rules:
 `Command` into a wait-free single-producer / single-consumer ring buffer
 (`core/SpscQueue.hpp`). `Engine::process()` drains it at the start of every block.
 
-Structural changes (adding a channel, inserting an effect) will not use this
-queue. A background thread will build a new immutable *render graph* and the
-audio thread will switch to it with one atomic pointer exchange; the old graph
-is freed later on a non-real-time thread.
+Structured state (channels, samples, patterns) does not use this queue. The
+control thread builds an immutable snapshot and publishes it with
+`core/SnapshotExchange`: one atomic pointer exchange. Replaced snapshots drain
+until no voice plays their samples, then go back to the control thread to be
+freed. Voice state lives outside the snapshots, so edits never cut sound.
+See [ADR 0005](adr/0005-state-snapshots-for-the-audio-thread.md).
 
 ## Audio → control
 

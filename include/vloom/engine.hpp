@@ -6,6 +6,7 @@
 #pragma once
 
 #include "vloom/engine/Engine.hpp"
+#include "vloom/engine/core/SnapshotExchange.hpp"
 #include "vloom/engine/core/SpscQueue.hpp"
 #include "vloom/engine/core/Version.hpp"
 #include "vloom/engine/dsp/Metronome.hpp"
