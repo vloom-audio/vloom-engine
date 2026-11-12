@@ -47,8 +47,14 @@ WAV files are written by our own `render/WavWriter`.
   tested on hardware so far. Tests that need a device are tagged `[hardware]`
   and hidden: run them with `vloom_engine_tests "[hardware]"` on a machine with
   speakers.
+- A lost device (unplugged) behaves the same on every OS: the backend stops
+  sending audio and `isRunning()` turns false. No backend moves to another
+  output on its own (CoreAudio's output unit would; it is kept silent). What
+  happens next is the host's policy: VloomDAW falls back to the system default
+  and returns to the user's device when it is plugged in again; `vloom-cli
+  play` stops with an error.
 - Not covered yet: WASAPI exclusive mode and ASIO (Windows), JACK (Linux),
-  device-change notifications (a lost device just stops: `isRunning()` turns
-  false), audio input. Each can be added as another backend or option.
+  device-change notifications (hosts poll for a returning device), audio
+  input. Each can be added as another backend or option.
 - Decoding sample files (M1) will be our own code too: WAV first, other
   formats through dedicated, fuzzed libraries when needed.

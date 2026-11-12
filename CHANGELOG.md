@@ -7,6 +7,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- A lost output device behaves the same on every OS: the backend stops sending
+  audio and `isRunning()` turns false (CoreAudio's unit is kept silent instead of
+  moving to another output on its own); `vloom-cli play` stops with an error
 - Audio output through each OS's own API, behind `io/AudioDevice`: WASAPI
   (shared, event driven, MMCSS "Pro Audio") on Windows, CoreAudio (AUHAL) on
   macOS, ALSA on Linux (also reaching PulseAudio and PipeWire)

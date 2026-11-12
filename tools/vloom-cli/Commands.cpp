@@ -108,6 +108,11 @@ int play(const Args& args)
 
     const auto until = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
     while (std::chrono::steady_clock::now() < until) {
+        if (!device.isRunning()) {
+            std::puts("");
+            std::fputs("error: the audio device was disconnected\n", stderr);
+            return 1;
+        }
         const auto bbt = toBarBeatTick(engine.positionTicks(), engine.beatsPerBar());
         std::printf("\r  %3lld.%d.%03d", static_cast<long long>(bbt.bar), bbt.beat, bbt.tick);
         std::fflush(stdout);
