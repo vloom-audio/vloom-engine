@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Vloom Audio contributors
 #include "Args.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string_view>
@@ -63,6 +64,10 @@ std::optional<Args> parseArgs(int argc, char** argv)
             std::fprintf(stderr, "unknown or incomplete option: %s\n", argv[i]);
             return std::nullopt;
         }
+    }
+    if (!(args.bpm > 0.0) || !std::isfinite(args.bpm)) {
+        std::fprintf(stderr, "--bpm must be a positive number\n");
+        return std::nullopt;
     }
     return args;
 }

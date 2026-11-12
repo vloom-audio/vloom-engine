@@ -3,6 +3,7 @@
 #include "vloom/engine/time/Transport.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace vloom {
 
@@ -25,12 +26,16 @@ void Transport::reanchor() noexcept
 
 void Transport::locate(double ticks) noexcept
 {
-    anchorTicks_ = ticks < 0.0 ? 0.0 : ticks;
+    if (!std::isfinite(ticks))
+        return;
+    anchorTicks_ = std::clamp(ticks, 0.0, kMaxTicks);
     framesSinceAnchor_ = 0;
 }
 
 void Transport::setTempo(double bpm) noexcept
 {
+    if (!std::isfinite(bpm))
+        return; // std::clamp would keep NaN
     reanchor();
     bpm_ = std::clamp(bpm, kMinBpm, kMaxBpm);
 }

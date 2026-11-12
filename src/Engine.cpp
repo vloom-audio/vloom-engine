@@ -27,8 +27,18 @@ bool Engine::send(Command::Type type, double value) { return commands_.push(Comm
 
 bool Engine::play() { return send(Command::Type::Play); }
 bool Engine::stop() { return send(Command::Type::Stop); }
-bool Engine::locate(double ticks) { return send(Command::Type::Locate, ticks); }
-bool Engine::setTempo(double bpm) { return send(Command::Type::SetTempo, bpm); }
+bool Engine::locate(double ticks)
+{
+    if (!std::isfinite(ticks))
+        return true; // ignored, like setMasterGain()
+    return send(Command::Type::Locate, std::clamp(ticks, 0.0, Transport::kMaxTicks));
+}
+bool Engine::setTempo(double bpm)
+{
+    if (!std::isfinite(bpm))
+        return true; // ignored: NaN would stall the scheduler
+    return send(Command::Type::SetTempo, bpm);
+}
 bool Engine::setMetronomeEnabled(bool enabled)
 {
     return send(Command::Type::SetMetronome, enabled ? 1.0 : 0.0);
@@ -184,7 +194,7 @@ void Engine::process(float* const* out, int numChannels, int numFrames) noexcept
 
     int cursor = 0;
 
-    if (transport_.isPlaying()) {
+    if (transport_.isPlaying() && std::isfinite(transport_.positionTicks())) {
         // Two event streams, metronome beats and sequencer steps, merged in
         // time order. Each event fires on the first sample at or after its
         // exact time: the block is rendered in segments split at the events.
