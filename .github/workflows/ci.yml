@@ -72,6 +72,9 @@ jobs:
           [ -f "$cli" ] || cli=build/release/tools/vloom-cli/Release/vloom-cli.exe
           "$cli" --version
           "$cli" render click.wav --seconds 2
+          # Channel rack end to end: the click as a sample (44.1 kHz, resampled), three steps.
+          "$cli" render click44.wav --seconds 0.2 --rate 44100
+          "$cli" render rack.wav --seconds 2 --channel "click44.wav:x...|..x.|x...|...."
 
   sanitizers:
     name: ${{ matrix.preset }}

@@ -33,6 +33,10 @@ reused by other Vloom Audio tools.
   See [ADR 0004](docs/adr/0004-native-audio-io.md).
 - **Offline rendering** to 32-bit float WAV, used by the tests and by
   `vloom-cli render`.
+- **Channel rack (M1)**: a step sequencer that plays WAV samples (our own
+  reader, built for untrusted files) with per-channel polyphony; edits are
+  published as immutable snapshots, so they never block or cut the audio
+  ([ADR 0005](docs/adr/0005-state-snapshots-for-the-audio-thread.md)).
 
 ---
 
@@ -82,6 +86,11 @@ ctest --preset dev
 
 # Render 8 seconds of metronome at 140 BPM to a WAV file
 ./build/dev/tools/vloom-cli/vloom-cli render click.wav --bpm 140 --seconds 8
+
+# Play a channel rack: one --channel per sample, x = step on (16th notes)
+./build/dev/tools/vloom-cli/vloom-cli play --bpm 128 \
+    --channel kick.wav:x...x...x...x... \
+    --channel hat.wav:..x...x...x...x.
 ```
 
 Platform setup and troubleshooting: **[docs/getting-started.md](docs/getting-started.md)**.

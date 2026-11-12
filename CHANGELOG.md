@@ -11,6 +11,22 @@ and the project uses [Semantic Versioning](https://semver.org/).
   (shared, event driven, MMCSS "Pro Audio") on Windows, CoreAudio (AUHAL) on
   macOS, ALSA on Linux (also reaching PulseAudio and PipeWire)
 - Own 32-bit float WAV writer (`render/WavWriter`)
+- WAV reader for untrusted files: PCM 8/16/24/32-bit, float 32/64-bit,
+  WAVE_FORMAT_EXTENSIBLE; bounds-checked chunk walk, metadata skipped
+  unread, size limits before allocating, NaN / infinity become silence
+  (`sample/WavReader`)
+- Band-limited windowed-sinc resampler (`sample/Resampler`) and
+  `loadSample()` to read a file at the engine's rate
+- One-shot sample player with per-channel polyphony (1-64 voices) that fades
+  stolen and stopped notes instead of clicking (`dsp/Sampler`)
+- Lock-free snapshot hand-over between the control and audio threads
+  (`core/SnapshotExchange`, ADR 0005)
+- Step sequencer: channels with sample, gain, pan, mute and steps, played
+  sample-accurately alongside the metronome; edits never cut ringing notes,
+  removed channels and transport stop fade out (`sequencer/`,
+  `Engine::setSequencerState`)
+- `vloom-cli play` / `render` take `--channel <file.wav>:<pattern>` and
+  `--click` / `--no-click`
 - Wait-free command queue from control thread to audio thread (`core/SpscQueue`)
 - Sample-accurate, drift-free transport at 960 PPQ (`time/Transport`)
 - Metronome (`dsp/Metronome`)
