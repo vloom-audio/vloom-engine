@@ -13,6 +13,7 @@ add_executable(vloom_engine_tests
     render/WavWriterTests.cpp
     sample/ResamplerTests.cpp
     sample/WavReaderTests.cpp
+    sequencer/StepSequencerTests.cpp
     time/MusicalTimeTests.cpp
     time/TransportTests.cpp
     support/Allocations.cpp

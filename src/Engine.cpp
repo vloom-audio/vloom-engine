@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 
 namespace vloom {
 
@@ -38,6 +39,13 @@ bool Engine::setMasterGain(float gain)
         return true; // ignored, not an error worth retrying
     return send(Command::Type::SetMasterGain, static_cast<double>(std::clamp(gain, 0.0f, kMaxMasterGain)));
 }
+void Engine::setSequencerState(std::unique_ptr<const SequencerState> state)
+{
+    sequencer_.publish(std::move(state));
+}
+
+void Engine::collectGarbage() { sequencer_.collect(); }
+
 bool Engine::setMasterPan(float pan)
 {
     if (std::isnan(pan))
@@ -55,6 +63,7 @@ void Engine::applyCommands() noexcept
             break;
         case Command::Type::Stop:
             transport_.stop();
+            stopVoices_ = true;
             break;
         case Command::Type::Locate:
             transport_.locate(cmd.value);
@@ -151,12 +160,24 @@ void Engine::measureLoad(double seconds, int numFrames) noexcept
     cpuLoad_.store(smoothedLoad_, std::memory_order_relaxed);
 }
 
+void Engine::renderSegment(float* const* out, int numChannels, int startFrame, int numFrames) noexcept
+{
+    if (numFrames <= 0)
+        return;
+    metronome_.render(out, numChannels, startFrame, numFrames);
+    sequencer_.render(out, numChannels, startFrame, numFrames);
+}
+
 void Engine::process(float* const* out, int numChannels, int numFrames) noexcept
 {
     // steady_clock::now() does not allocate or lock.
     const auto started = std::chrono::steady_clock::now();
 
+    stopVoices_ = false;
     applyCommands();
+    sequencer_.beginBlock();
+    if (stopVoices_)
+        sequencer_.stopAll();
 
     for (int ch = 0; ch < numChannels; ++ch)
         std::memset(out[ch], 0, sizeof(float) * static_cast<std::size_t>(numFrames));
@@ -164,31 +185,51 @@ void Engine::process(float* const* out, int numChannels, int numFrames) noexcept
     int cursor = 0;
 
     if (transport_.isPlaying()) {
-        // Find every beat boundary inside this block and trigger the click on
-        // the exact sample it falls on (sample-accurate scheduling).
-        // A beat whose exact position is within kEpsilon frames of a sample
-        // boundary snaps to that sample, so rounding noise never shifts it.
+        // Two event streams, metronome beats and sequencer steps, merged in
+        // time order. Each event fires on the exact sample it falls on: the
+        // block is rendered in segments split at the events. An event within
+        // kEpsilon frames of a sample boundary snaps to that sample, so
+        // rounding noise never shifts it.
         constexpr double kEpsilon = 1e-6;
         const double start = transport_.positionTicks();
+        const int ticksPerStep = sequencer_.ticksPerStep();
+        const double stepTicks = static_cast<double>(ticksPerStep);
 
         auto beat = static_cast<std::int64_t>(std::floor(start / kPpq));
-        for (;; ++beat) {
+        auto step = ticksPerStep > 0 ? static_cast<std::int64_t>(std::floor(start / stepTicks)) : 0;
+        for (;;) {
             const double beatTick = static_cast<double>(beat) * kPpq;
-            const double frames = transport_.framesUntil(beatTick);
-            if (frames < -kEpsilon)
-                continue; // already played
+            const double stepTick = ticksPerStep > 0 ? static_cast<double>(step) * stepTicks
+                                                     : std::numeric_limits<double>::infinity();
+            const double tick = std::min(beatTick, stepTick);
+            const double frames = transport_.framesUntil(tick);
+            if (frames < -kEpsilon) { // already played in an earlier block
+                if (beatTick == tick)
+                    ++beat;
+                if (stepTick == tick)
+                    ++step;
+                continue;
+            }
             const int offset = static_cast<int>(std::ceil(frames - kEpsilon));
             if (offset >= numFrames)
                 break;
 
-            metronome_.render(out, numChannels, cursor, offset - cursor);
+            renderSegment(out, numChannels, cursor, offset - cursor);
             cursor = offset;
-            if (metronomeEnabled_)
-                metronome_.trigger(beat % transport_.beatsPerBar() == 0);
+            if (beatTick == tick) {
+                if (metronomeEnabled_)
+                    metronome_.trigger(beat % transport_.beatsPerBar() == 0);
+                ++beat;
+            }
+            if (stepTick == tick) {
+                sequencer_.triggerStep(step);
+                ++step;
+            }
         }
     }
 
-    metronome_.render(out, numChannels, cursor, numFrames - cursor);
+    renderSegment(out, numChannels, cursor, numFrames - cursor);
+    sequencer_.endBlock();
     applyMasterGain(out, numChannels, numFrames);
     meterOutput(out, numChannels, numFrames);
     transport_.advance(numFrames);

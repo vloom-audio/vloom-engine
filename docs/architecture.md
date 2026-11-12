@@ -10,6 +10,7 @@
 | dsp | `dsp/` | Sound generators and processors | core |
 | io | `io/` | Hardware audio devices (WASAPI, CoreAudio, ALSA) | core |
 | sample | `sample/` | Decoded audio in memory: WAV reading, resampling | core |
+| sequencer | `sequencer/` | Channel rack state and step playback | core, dsp, sample, time |
 | render | `render/` | Offline rendering, file export | engine |
 
 Rules:

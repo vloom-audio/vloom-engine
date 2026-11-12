@@ -4,10 +4,12 @@
 
 #include "vloom/engine/core/SpscQueue.hpp"
 #include "vloom/engine/dsp/Metronome.hpp"
+#include "vloom/engine/sequencer/StepSequencer.hpp"
 #include "vloom/engine/time/Transport.hpp"
 
 #include <array>
 #include <atomic>
+#include <memory>
 
 namespace vloom {
 
@@ -47,6 +49,14 @@ public:
 
     static constexpr float kMaxMasterGain = 2.0f;
 
+    /// Replaces the channel rack (channels, samples, steps) the audio thread
+    /// plays, from the next block on. Ringing notes are not cut: keep each
+    /// channel's ChannelVoices across states (docs/adr/0005).
+    void setSequencerState(std::unique_ptr<const SequencerState> state);
+    /// Frees states the audio thread has finished with. Call it regularly
+    /// from the control thread (a UI timer); setSequencerState() does too.
+    void collectGarbage();
+
     // ---- status (any thread)
     [[nodiscard]] bool isPlaying() const noexcept { return playing_.load(std::memory_order_relaxed); }
     [[nodiscard]] double positionTicks() const noexcept { return position_.load(std::memory_order_relaxed); }
@@ -75,10 +85,13 @@ private:
     [[nodiscard]] float channelGainTarget(int channel, int numChannels) const noexcept;
     void meterOutput(float* const* out, int numChannels, int numFrames) noexcept;
     void measureLoad(double seconds, int numFrames) noexcept;
+    void renderSegment(float* const* out, int numChannels, int startFrame, int numFrames) noexcept;
 
     SpscQueue<Command, 256> commands_;
     Transport transport_;
     Metronome metronome_;
+    StepSequencer sequencer_;
+    bool stopVoices_ = false; ///< audio thread: a Stop command arrived this block
     bool metronomeEnabled_ = true;
     float masterGainTarget_ = 1.0f; ///< audio thread: latest requested gain
     float masterPanTarget_ = 0.0f; ///< audio thread: latest requested balance

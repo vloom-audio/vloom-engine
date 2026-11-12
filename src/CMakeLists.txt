@@ -26,7 +26,11 @@ target_sources(vloom_engine PRIVATE
     # sample — decoded audio in memory: WAV reading, resampling
     sample/Resampler.cpp
     sample/SampleBuffer.cpp
+    sample/SampleLoader.cpp
     sample/WavReader.cpp
+
+    # sequencer — the channel rack: steps that trigger samples
+    sequencer/StepSequencer.cpp
 
     # render — offline (faster than real time) rendering
     render/OfflineRenderer.cpp
