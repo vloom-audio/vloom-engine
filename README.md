@@ -136,11 +136,16 @@ vloom-engine/
 |:---:|---|:---:|
 | **M0** | Audio device output, transport, metronome, offline WAV render, CLI | *Done* |
 | **M1** | Step sequencer and sample playback (drum channel rack); mixer routing to inserts | *Done* |
-| **M2** | MIDI notes, piano-roll data model, first built-in synth | *Next* |
-| **M3** | Playlist (patterns on a timeline), WAV export | *Planned* |
-| **M4** | CLAP, then VST3 plugin hosting; project save / load | *Planned* |
+| **M1.5** | Sample preview voice | *Next* |
+| **M2** | MIDI notes, pitched sampler, first built-in synth, master pitch | *Planned* |
+| **M3** | Arrangement (patterns on a timeline), song mode, WAV export | *Planned* |
+| **M4** | Plugin host interface, CLAP hosting | *Planned* |
+| **M5** | VST3 hosting, built-in effects, sends, delay compensation | *Planned* |
+| **M6** | Audio input and recording, MIDI input | *Planned* |
 
-Details: [docs/architecture.md#roadmap](docs/architecture.md#roadmap).
+Details: [docs/architecture.md#roadmap](docs/architecture.md#roadmap); the
+whole plan, engine and app, is in VloomDAW's
+[docs/roadmap.md](https://github.com/vloom-audio/VloomDAW/blob/main/docs/roadmap.md).
 
 ---
 

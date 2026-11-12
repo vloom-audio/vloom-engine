@@ -69,6 +69,9 @@ sample-exact results across many block sizes. Rendering must be deterministic.
 
 1. **M0** device output, transport, metronome, offline render
 2. **M1** pattern / step sequencer, sample playback (drum channel rack), mixer routing
-3. **M2** MIDI notes, piano-roll data model, first built-in synth ← *next*
-4. **M3** playlist (patterns on a timeline), WAV export
-5. **M4** CLAP then VST3 hosting, project save / load
+3. **M1.5** sample preview voice ← *next*
+4. **M2** MIDI notes, pitched sampler, first built-in synth, master pitch
+5. **M3** arrangement (patterns on a timeline), song mode, WAV export
+6. **M4** plugin host interface, CLAP hosting
+7. **M5** VST3 hosting, built-in effects, sends, delay compensation
+8. **M6** audio input and recording, MIDI input
