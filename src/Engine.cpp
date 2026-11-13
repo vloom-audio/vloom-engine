@@ -551,7 +551,12 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
         if (stopHere) {
             transport_.stop(); // the rest of the block renders the notes fading out
             sequencer_.stopAll();
+            // Stopped: the next play() is a fresh start, even when the stop
+            // fell on the block's last frame and no span runs after it.
+            wasRolling_ = false;
         } else if (loopBack) {
+            // expectedTicks_ is the loop end, the position now the loop start:
+            // the next span sees a jump.
             transport_.locate(loopStart_);
         }
     }

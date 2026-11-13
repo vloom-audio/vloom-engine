@@ -239,6 +239,32 @@ TEST_CASE("Stopping at the end fades sounding notes out", "[loop]")
     CHECK(after == 0.0f);
 }
 
+TEST_CASE("Play after a stop point on a block's last frame resumes audio clips", "[loop][song]")
+{
+    // Review finding: the scheduler still thought it was rolling, so the
+    // next play() did not resume the clips under way: they stayed silent.
+    vloom::Engine engine;
+    engine.prepare(kRate, 2000);
+    engine.setMetronomeEnabled(false);
+    auto state = std::make_unique<vloom::SequencerState>();
+    state->song = true;
+    vloom::ChannelState c;
+    c.sample = ramp(96000);
+    c.voices = std::make_shared<vloom::ChannelVoices>();
+    state->channels.push_back(std::move(c));
+    state->audioClips.push_back({0, 0});
+    engine.setSequencerState(std::move(state));
+    engine.setStopAt(kStepTicks); // frame 6000: the end of the third 2000-frame block
+    engine.play();
+    render(engine, 0.125, 2000); // exactly to the stop: play() comes in the very next block
+    REQUIRE_FALSE(engine.isPlaying());
+
+    engine.setStopAt(0.0);
+    engine.play(); // from tick 240: the clip is 6000 frames in
+    const auto audio = render(engine, 0.1, 2000);
+    CHECK(audio[1000 * 2] / 0.70710678f * static_cast<float>(kRate) == Approx(7000.0f).margin(0.05f));
+}
+
 TEST_CASE("Looping does not allocate on the audio thread", "[loop]")
 {
     vloom::Engine engine;
