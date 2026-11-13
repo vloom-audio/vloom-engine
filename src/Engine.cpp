@@ -23,13 +23,24 @@ Engine::Engine()
 void Engine::prepare(double sampleRate, int /*maxBlockSize*/)
 {
     // Called while audio is stopped, so touching audio-thread state is safe.
+    // A rate far outside what devices use would make the scheduler work per
+    // tick (too low) or break its arithmetic (non-finite).
+    sampleRate = std::isfinite(sampleRate) ? std::clamp(sampleRate, kMinSampleRate, kMaxSampleRate) : 48000.0;
     transport_.prepare(sampleRate);
     metronome_.prepare(sampleRate);
     sequencer_.setSampleRate(sampleRate);
 
-    Command discarded{};
-    while (commands_.pop(discarded)) { }
+    // Voices may still read samples made for the old rate (playing them at
+    // the wrong pitch) or be half way through a note: start clean. The next
+    // block counts as a fresh start, so song-mode audio clips resume.
+    sequencer_.resetVoices();
+    previewSampler_.reset();
+    wasRolling_ = false;
+
+    // Commands sent while the device was gone (Stop, Locate ...) still count.
     applyCommands();
+    sampleRateStatus_.store(transport_.sampleRate(), std::memory_order_relaxed);
+    beatsPerBarStatus_.store(transport_.beatsPerBar(), std::memory_order_relaxed);
     publishStatus();
 }
 
@@ -59,7 +70,7 @@ bool Engine::setMasterGain(float gain)
         return true; // ignored, not an error worth retrying
     return send(Command::Type::SetMasterGain, static_cast<double>(std::clamp(gain, 0.0f, kMaxMasterGain)));
 }
-void Engine::setSequencerState(std::unique_ptr<const SequencerState> state)
+void Engine::setSequencerState(std::unique_ptr<SequencerState> state)
 {
     sequencer_.publish(std::move(state));
 }
@@ -81,6 +92,10 @@ void Engine::previewSample(std::shared_ptr<const SampleBuffer> sample, float gai
 
 void Engine::renderPreview(int numFrames) noexcept
 {
+    // The transport's Stop silences the preview too; a preview asked for in
+    // the same block still starts (it came with or after the Stop).
+    if (stopVoices_)
+        previewSampler_.stopAll();
     const PreviewState* state = preview_.acquire();
     if (state != previewStarted_) {
         // A new preview (or a stop): the one sounding fades out, the new one
@@ -90,15 +105,19 @@ void Engine::renderPreview(int numFrames) noexcept
             previewSampler_.trigger(state->sample.get(), state->gain);
         previewStarted_ = state;
     }
-    if (stopVoices_)
-        previewSampler_.stopAll(); // the transport's Stop silences the preview too
 
     std::array<float*, 2> master{buses_[0], buses_[1]};
     previewSampler_.render(master.data(), 2, 0, numFrames);
     // A replaced preview's sample is freed (on the control thread) only once
     // no voice reads it any more, its fade included.
-    preview_.release([this](const PreviewState& old) {
-        return old.sample == nullptr || !previewSampler_.uses(old.sample.get());
+    // The current preview may play the same sample (the same file asked for
+    // again): that one stays alive through the current state, so an old
+    // state holding it can go. Otherwise old states would pile up until the
+    // exchange stops taking new previews.
+    const PreviewState* current = preview_.current();
+    preview_.release([this, current](const PreviewState& old) {
+        return old.sample == nullptr || (current != nullptr && current->sample == old.sample)
+            || !previewSampler_.uses(old.sample.get());
     });
     previewPlaying_.store(previewSampler_.activeVoices() > 0, std::memory_order_relaxed);
 }
@@ -357,48 +376,77 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
         // sample at or after its exact time: the block is rendered in
         // segments split at the events. An event within kEpsilon frames of a
         // sample boundary snaps to that sample, so rounding noise never
-        // shifts it. One rule decides both "later block" and "already
-        // played", so an event between the last sample of one block and the
-        // first of the next fires exactly once. Note ends are the exception:
-        // one already past (none should be) fires at once, so no note hangs.
-        // At one time, ends go first, so a note can follow the same key.
+        // shifts it. At one time, ends go first, so a note can follow the
+        // same key.
+        //
+        // While playback runs on, each stream carries its next event over
+        // from the last block, so every event fires exactly once even when
+        // the tempo changes between blocks (which moves where the fraction
+        // of a sample before an event lands). After a start or a jump the
+        // streams are picked up from the position: events before it are
+        // skipped. Note ends are kept by the voices; an overdue one fires
+        // at once, so no note hangs.
         constexpr double kEpsilon = 1e-6;
         const double start = transport_.positionTicks();
-        // Playback started or jumped (locate): song-mode audio clips already
-        // under way there start part-way through.
-        if (const double ticksPerSample = transport_.ticksPerSample();
-            ticksPerSample > 0.0 && (!wasRolling_ || std::abs(start - expectedTicks_) > kEpsilon))
+        const double ticksPerSample = transport_.ticksPerSample();
+        const bool jumped = !wasRolling_ || std::abs(start - expectedTicks_) > kEpsilon;
+        // Song-mode audio clips already under way there start part-way through.
+        if (jumped && ticksPerSample > 0.0)
             sequencer_.resumeAt(start, 1.0 / ticksPerSample);
         const int ticksPerStep = sequencer_.ticksPerStep();
         const double stepTicks = static_cast<double>(ticksPerStep);
 
-        auto beat = static_cast<std::int64_t>(std::floor(start / kPpq));
-        auto step = ticksPerStep > 0 ? static_cast<std::int64_t>(std::floor(start / stepTicks)) : 0;
+        const bool beatFresh = jumped;
+        const bool stepFresh = jumped || ticksPerStep != stepTicksUsed_;
+        const bool noteFresh = jumped;
+        if (beatFresh)
+            nextBeat_ = static_cast<std::int64_t>(std::floor(start / kPpq));
+        if (stepFresh) {
+            nextStep_ = ticksPerStep > 0 ? static_cast<std::int64_t>(std::floor(start / stepTicks)) : 0;
+            stepTicksUsed_ = ticksPerStep;
+        }
+        if (noteFresh)
+            noteFrom_ = static_cast<std::int64_t>(std::floor(start));
+
         constexpr double kNever = std::numeric_limits<double>::infinity();
         const auto tickOf = [](std::int64_t event) {
             return event == StepSequencer::kNoEvent ? kNever : static_cast<double>(event);
         };
-        std::int64_t noteStart = sequencer_.nextNoteStart(static_cast<std::int64_t>(std::floor(start)));
+        // Recomputed every block: notes edited meanwhile are seen.
+        std::int64_t noteStart = sequencer_.nextNoteStart(noteFrom_);
         for (;;) {
-            const double beatTick = static_cast<double>(beat) * kPpq;
-            const double stepTick = ticksPerStep > 0 ? static_cast<double>(step) * stepTicks : kNever;
+            const double beatTick = static_cast<double>(nextBeat_) * kPpq;
+            const double stepTick = ticksPerStep > 0 ? static_cast<double>(nextStep_) * stepTicks : kNever;
             const double startTick = tickOf(noteStart);
             const std::int64_t noteEnd = sequencer_.nextNoteEnd();
             const double endTick = tickOf(noteEnd);
             const double tick = std::min({beatTick, stepTick, startTick, endTick});
             if (tick == kNever)
                 break;
-            const double at = std::ceil(transport_.framesUntil(tick) - kEpsilon); // sample it fires on
-            if (at < 0.0) { // fired in an earlier block
-                if (endTick == tick)
-                    sequencer_.endNotes(noteEnd); // overdue: now
-                if (beatTick == tick)
-                    ++beat;
-                if (stepTick == tick)
-                    ++step;
-                if (startTick == tick)
-                    noteStart = sequencer_.nextNoteStart(noteStart + 1);
-                continue;
+            double at = std::ceil(transport_.framesUntil(tick) - kEpsilon); // sample it fires on
+            bool fireEnd = endTick == tick;
+            bool fireBeat = beatTick == tick;
+            bool fireStep = stepTick == tick;
+            bool fireStart = startTick == tick;
+            if (at < 0.0) {
+                // Before this block. Picked up from the position: skip it.
+                // Carried over: it has not fired yet, so it fires now.
+                if (fireBeat && beatFresh) {
+                    ++nextBeat_;
+                    fireBeat = false;
+                }
+                if (fireStep && stepFresh) {
+                    ++nextStep_;
+                    fireStep = false;
+                }
+                if (fireStart && noteFresh) {
+                    noteFrom_ = noteStart + 1;
+                    noteStart = sequencer_.nextNoteStart(noteFrom_);
+                    fireStart = false;
+                }
+                if (!fireEnd && !fireBeat && !fireStep && !fireStart)
+                    continue;
+                at = static_cast<double>(cursor);
             }
             if (at >= static_cast<double>(numFrames))
                 break; // a later block
@@ -406,22 +454,29 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
 
             renderSegment(out, numChannels, cursor, offset - cursor);
             cursor = offset;
-            if (endTick == tick)
+            if (fireEnd)
                 sequencer_.endNotes(noteEnd);
-            if (beatTick == tick) {
+            if (fireBeat) {
                 if (metronomeEnabled_)
-                    metronome_.trigger(beat % transport_.beatsPerBar() == 0);
-                ++beat;
+                    metronome_.trigger(nextBeat_ % transport_.beatsPerBar() == 0);
+                ++nextBeat_;
             }
-            if (stepTick == tick) {
-                sequencer_.triggerStep(step);
-                ++step;
+            if (fireStep) {
+                sequencer_.triggerStep(nextStep_);
+                ++nextStep_;
             }
-            if (startTick == tick) {
+            if (fireStart) {
                 sequencer_.startNotes(noteStart);
-                noteStart = sequencer_.nextNoteStart(noteStart + 1);
+                noteFrom_ = noteStart + 1;
+                noteStart = sequencer_.nextNoteStart(noteFrom_);
             }
         }
+        // Notes are looked up afresh each block, so the next search starts
+        // where this block ends: a note added behind the playhead meanwhile
+        // must not fire late. The pending start, if any, is never skipped.
+        const double lastFrame = start + (static_cast<double>(numFrames - 1) + kEpsilon) * ticksPerSample;
+        const auto future = static_cast<std::int64_t>(std::floor(lastFrame)) + 1;
+        noteFrom_ = std::max(noteFrom_, std::min(noteStart, future));
     }
 
     renderSegment(out, numChannels, cursor, numFrames - cursor);

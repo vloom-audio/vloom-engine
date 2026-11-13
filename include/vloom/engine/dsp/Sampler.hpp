@@ -117,7 +117,7 @@ private:
         std::uint64_t age = 0; ///< trigger order, to find the oldest
     };
 
-    static constexpr int kFadeSlots = 4; ///< extra slots for voices fading out
+    static constexpr int kFadeSlots = 8; ///< extra slots for voices fading out
 
     void renderVoice(
         Voice& voice, float* const* out, int numChannels, int startFrame, int numFrames) noexcept;

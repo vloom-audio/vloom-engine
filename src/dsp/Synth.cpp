@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numbers>
 
 namespace vloom {
@@ -60,8 +61,9 @@ Synth::Synth(int maxVoices)
 
 void Synth::setSampleRate(double sampleRate) noexcept
 {
-    if (std::isfinite(sampleRate) && sampleRate > 0.0)
-        sampleRate_ = sampleRate;
+    // At least 1 kHz keeps the filter's cutoff range (up to 0.45 of it) valid.
+    if (std::isfinite(sampleRate))
+        sampleRate_ = std::clamp(sampleRate, 1000.0, 768000.0);
 }
 
 void Synth::reset() noexcept
@@ -96,15 +98,22 @@ void Synth::noteOn(double frequency, float velocity, std::int64_t releaseAt) noe
         oldest->fadeLeft = kFadeFrames;
     }
 
-    // A free slot; if the fade slots are all busy too, cut the fade closest to its end.
+    // A free slot; if the fade slots are all busy too, cut the quietest fade.
     Voice* slot = nullptr;
+    float quietest = std::numeric_limits<float>::infinity();
     for (Voice& v : voices_) {
         if (v.stage == Stage::Off) {
             slot = &v;
             break;
         }
-        if (v.fading && (slot == nullptr || v.fadeLeft < slot->fadeLeft))
+        if (!v.fading)
+            continue;
+        const float level
+            = v.level * v.velocity * static_cast<float>(v.fadeLeft) / static_cast<float>(kFadeFrames + 1);
+        if (level < quietest) {
+            quietest = level;
             slot = &v;
+        }
     }
     if (slot == nullptr)
         return; // unreachable: there are more slots than voices

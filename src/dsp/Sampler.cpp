@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numbers>
 
 namespace vloom {
@@ -93,15 +94,23 @@ void Sampler::play(const SampleBuffer* sample, const PlayOptions& options) noexc
     if (sounding >= maxVoices_ && oldest != nullptr)
         startFade(*oldest, kFadeFrames);
 
-    // A free slot; if the fade slots are all busy too, cut the fade closest to its end.
+    // A free slot; if the fade slots are all busy too, cut the quietest fade
+    // (not the shortest: a voice stolen just now is still loud).
     Voice* slot = nullptr;
+    float quietest = std::numeric_limits<float>::infinity();
     for (Voice& v : voices_) {
         if (v.sample == nullptr) {
             slot = &v;
             break;
         }
-        if (v.fading && (slot == nullptr || v.fadeLeft < slot->fadeLeft))
+        if (!v.fading)
+            continue;
+        const float level = std::max(v.gainLeft, v.gainRight) * static_cast<float>(v.fadeLeft)
+            / static_cast<float>(v.fadeLength + 1);
+        if (level < quietest) {
+            quietest = level;
             slot = &v;
+        }
     }
     if (slot == nullptr)
         return; // unreachable: there are more slots than voices

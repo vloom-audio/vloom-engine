@@ -6,9 +6,12 @@
 set(VLOOM_SANITIZER "" CACHE STRING "Sanitizer to enable: address, thread or empty")
 set_property(CACHE VLOOM_SANITIZER PROPERTY STRINGS "" address thread)
 
-if(VLOOM_SANITIZER AND NOT MSVC)
+if(VLOOM_SANITIZER AND MSVC)
+    message(WARNING "vloom: VLOOM_SANITIZER is ignored with MSVC; use the asan/tsan presets with GCC or Clang")
+elseif(VLOOM_SANITIZER)
     if(VLOOM_SANITIZER STREQUAL "address")
-        set(_vloom_san_flags -fsanitize=address,undefined -fno-omit-frame-pointer)
+        # Undefined behaviour fails the run instead of printing and carrying on.
+        set(_vloom_san_flags -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
     elseif(VLOOM_SANITIZER STREQUAL "thread")
         set(_vloom_san_flags -fsanitize=thread)
     else()

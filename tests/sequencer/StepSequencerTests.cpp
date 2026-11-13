@@ -44,7 +44,7 @@ std::vector<std::uint8_t> steps(const std::string& pattern)
     return out;
 }
 
-std::unique_ptr<const vloom::SequencerState> rack(std::vector<vloom::ChannelState> channels)
+std::unique_ptr<vloom::SequencerState> rack(std::vector<vloom::ChannelState> channels)
 {
     auto state = std::make_unique<vloom::SequencerState>();
     state->channels = std::move(channels);

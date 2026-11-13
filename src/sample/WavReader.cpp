@@ -7,8 +7,10 @@
 #include <bit>
 #include <cmath>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
+#include <new>
 #include <system_error>
 #include <vector>
 
@@ -206,7 +208,12 @@ WavReadResult decodeWav(std::span<const std::uint8_t> bytes, const WavReadLimits
 
 WavReadResult readWavFile(const std::string& path, const WavReadLimits& limits)
 {
-    const std::filesystem::path file(std::u8string(path.begin(), path.end()));
+    std::filesystem::path file;
+    try {
+        file = std::filesystem::path(std::u8string(path.begin(), path.end()));
+    } catch (const std::exception&) { // not valid UTF-8
+        return fail("'" + path + "' is not a valid file name");
+    }
     std::error_code ec;
     const std::uintmax_t size = std::filesystem::file_size(file, ec);
     if (ec)
@@ -217,7 +224,12 @@ WavReadResult readWavFile(const std::string& path, const WavReadLimits& limits)
     std::ifstream stream(file, std::ios::binary);
     if (!stream)
         return fail("Could not open '" + path + "'");
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
+    std::vector<std::uint8_t> bytes;
+    try {
+        bytes.resize(static_cast<std::size_t>(size));
+    } catch (const std::bad_alloc&) {
+        return fail("Not enough memory to read '" + path + "'");
+    }
     stream.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     if (stream.gcount() != static_cast<std::streamsize>(bytes.size()))
         return fail("Could not read '" + path + "'");
