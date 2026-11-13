@@ -73,6 +73,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   `alignas` types cannot allocate on the audio thread unnoticed.
 
 ### Changed
+- `resample()` (used by `loadSample()`) works out each output frame's filter
+  taps once for all channels instead of once per channel: about 30% faster on
+  stereo files (a 4-minute song from 44.1 to 48 kHz: 4.6 s to 3.2 s in a
+  release build), with the same output.
 - `Engine::setSequencerState()` and `StepSequencer::publish()` take a
   `std::unique_ptr<SequencerState>`: notes are sorted by start on the control
   thread so the audio thread finds the next one by binary search (notes may
@@ -81,6 +85,20 @@ and the project uses [Semantic Versioning](https://semver.org/).
   (`WavFileWriter`), so a failed write never leaves a broken file.
 
 ### Added
+- Audio clips fitted to the song's tempo: `SongAudioClip::sample` replaces
+  the channel's sample for that clip (e.g. a copy time-stretched to the
+  tempo) and `SongAudioClip::rate` plays it faster or slower (resampled, the
+  pitch following); offsets count in the sample as played, and
+  `songEndTicks()` follows. An old state is kept while a clip's own sample
+  still sounds, as for channel samples (ADR 0005).
+- Clips that show part of their content, for cutting and trimming them in a
+  playlist: `SongPatternClip::offsetSteps` starts a pattern clip that far
+  into its pattern (steps and notes; wrapping round a repeating pattern);
+  `SongAudioClip::offsetSteps` starts an audio clip that far into its sample
+  (at the current tempo, faded in) and `SongAudioClip::lengthSteps` ends it
+  there (faded out over `Sampler::kReleaseFrames`), also when playback starts
+  inside it. `songEndTicks()` counts only the part a clip plays.
+  `StepSequencer::triggerStep()` takes the frames per tick to place the offset.
 - Loop region and stop point (M3): `Engine::setLoop(start, end)` loops
   `[start, end)` while playing, jumping back on the exact sample, with the
   events at the loop start firing every pass (song-mode audio clips under

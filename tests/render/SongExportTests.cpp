@@ -112,6 +112,25 @@ TEST_CASE("The song ends with its last pattern or audio clip", "[export]")
     CHECK(vloom::songEndTicks(odd, 120.0) == static_cast<std::int64_t>(1e11));
 }
 
+TEST_CASE("A cut audio clip ends the song where its part of the sample does", "[export][clips]")
+{
+    auto state = song(constant(48000)); // 1 s: 1920 ticks at 120 BPM
+    vloom::SongAudioClip clip{0, 0};
+    clip.offsetSteps = 2; // 480 ticks into the sample: 1440 left
+    state.audioClips.push_back(clip);
+    CHECK(vloom::songEndTicks(state, 120.0) == 1440);
+    state.audioClips[0].lengthSteps = 4; // 960 ticks long
+    CHECK(vloom::songEndTicks(state, 120.0) == 960);
+    state.audioClips[0].lengthSteps = 100; // longer than what is left: the sample's end
+    CHECK(vloom::songEndTicks(state, 120.0) == 1440);
+    state.audioClips[0].offsetSteps = 10; // past the sample's end: silent
+    CHECK(vloom::songEndTicks(state, 120.0) == 0);
+    // Fitted to the tempo by resampling at twice the speed: half as long.
+    state.audioClips[0] = vloom::SongAudioClip{0, 0};
+    state.audioClips[0].rate = 2.0;
+    CHECK(vloom::songEndTicks(state, 120.0) == 960);
+}
+
 TEST_CASE("An export sounds exactly like the live engine", "[export]")
 {
     TempFolder folder;

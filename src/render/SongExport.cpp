@@ -54,12 +54,25 @@ std::int64_t songEndTicks(const SequencerState& song, double tempo)
             || !inRange(clip.startStep, 0, ticksPerStep))
             continue;
         const ChannelState& channel = song.channels[static_cast<std::size_t>(clip.channel)];
-        if (channel.sample == nullptr || channel.sample->empty() || !(channel.sample->sampleRate() > 0.0))
+        const SampleBuffer* sample = StepSequencer::clipSample(clip, channel);
+        if (sample == nullptr || sample->empty() || !(sample->sampleRate() > 0.0))
             continue;
-        const double seconds = static_cast<double>(channel.sample->frames()) / channel.sample->sampleRate();
-        // Capped before the conversion: a sample claiming a tiny rate would
-        // otherwise last longer than int64 ticks hold (undefined behaviour).
-        const double ticks = std::ceil(seconds * ticksPerSecond);
+        if (clip.offsetSteps < 0 || clip.lengthSteps < 0 || !inRange(clip.offsetSteps, 0, ticksPerStep))
+            continue;
+        // At its rate (fitted by resampling) the sample lasts 1/rate as long.
+        const double seconds
+            = static_cast<double>(sample->frames()) / sample->sampleRate() / StepSequencer::clipRate(clip);
+        // What is left of the sample after the clip's offset, and no longer
+        // than the clip when it has a length. Capped before the conversion: a
+        // sample claiming a tiny rate would otherwise last longer than int64
+        // ticks hold (undefined behaviour).
+        double ticks
+            = std::ceil(seconds * ticksPerSecond) - static_cast<double>(clip.offsetSteps * ticksPerStep);
+        if (clip.lengthSteps > 0)
+            ticks
+                = std::min(ticks, static_cast<double>(clip.lengthSteps) * static_cast<double>(ticksPerStep));
+        if (!(ticks > 0.0))
+            continue; // starts past the sample's end: silent
         const auto length
             = static_cast<std::int64_t>(std::min(ticks, static_cast<double>(StepSequencer::kMaxTicks)));
         end = std::max(end, clip.startStep * ticksPerStep + length);

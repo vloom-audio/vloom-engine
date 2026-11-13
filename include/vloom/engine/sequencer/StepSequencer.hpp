@@ -40,8 +40,9 @@ public:
     /// Starts the notes of absolute step `step` (counted from the song
     /// start). Pattern mode: the pattern loops every stepCount steps. Song
     /// mode: the pattern clips covering the step, and the audio clips that
-    /// start on it.
-    void triggerStep(std::int64_t step) noexcept;
+    /// start on it; `framesPerTick` (the tempo now) places an audio clip's
+    /// offset in its sample.
+    void triggerStep(std::int64_t step, double framesPerTick = 0.0) noexcept;
     /// Playback starts (or jumps) to `ticks`: held notes are released (their
     /// ends belong to the old position). Song mode: the audio clips already
     /// under way there start part-way through, `framesPerTick` converting
@@ -50,6 +51,11 @@ public:
     /// were playing first.
     void resumeAt(double ticks, double framesPerTick) noexcept;
 
+    /// The sample an audio clip plays (its own, else its channel's); null: none.
+    [[nodiscard]] static const SampleBuffer* clipSample(
+        const SongAudioClip& clip, const ChannelState& channel) noexcept;
+    /// An audio clip's playback speed (1 when its rate is out of range).
+    [[nodiscard]] static double clipRate(const SongAudioClip& clip) noexcept;
     static constexpr std::int64_t kNoEvent = INT64_MAX;
     /// The furthest tick anything plays at (Transport::kMaxTicks): clips
     /// reaching further are ignored, notes are held at most this long.
@@ -100,7 +106,10 @@ private:
     void playStep(const ChannelState& channel, std::int64_t step) const noexcept;
     /// A clip of the current state whose ticks all stay within kMaxTicks
     /// (ticksPerStep > 0 required). Others are ignored.
-    [[nodiscard]] bool clipInRange(std::int64_t startStep, std::int64_t lengthSteps) const noexcept;
+    [[nodiscard]] bool clipInRange(
+        std::int64_t startStep, std::int64_t lengthSteps, std::int64_t offsetSteps = 0) const noexcept;
+    /// The tick an audio clip stops at (kNoEvent: the sample's end).
+    [[nodiscard]] std::int64_t audioClipEnd(const SongAudioClip& clip) const noexcept;
     /// Starts `note` on `channel`, ending at `end` ticks.
     void playNote(const ChannelState& channel, const Note& note, std::int64_t end) const noexcept;
     /// The audio clip's channel, if it can sound.

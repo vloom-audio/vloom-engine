@@ -119,19 +119,37 @@ struct SongPattern {
 /// `startStep` for `lengthSteps` steps (steps counted from the song start),
 /// repeating the pattern when the clip is longer (SongPattern::stepCount).
 /// Notes starting inside the clip play for their whole length.
+///
+/// `offsetSteps` is where in the pattern the clip starts (a clip cut in two:
+/// the second part goes on where the first stopped). With a repeating
+/// pattern, the position wraps round it.
 struct SongPatternClip {
     int pattern = 0; ///< index into SequencerState::patterns
     std::int64_t startStep = 0;
     std::int64_t lengthSteps = 0;
+    std::int64_t offsetSteps = 0; ///< >= 0
 };
 
 /// A channel's sample placed in the playlist (FL Studio's audio clip): plays
 /// once from `startStep`, at the sample's own speed (tempo does not stretch
 /// it), through the channel like a step would: its volume, pan, mute and
 /// mixer insert.
+///
+/// A clip can show part of its sample (a clip cut in two): it starts
+/// `offsetSteps` into the sample (that far at the current tempo) and, with
+/// `lengthSteps` > 0, fades out after that many steps (Sampler::kReleaseFrames).
+///
+/// Fitting a clip to the song's tempo: `sample` replaces the channel's (e.g.
+/// a copy time-stretched to the tempo, same pitch), and `rate` plays it
+/// faster or slower (resampling: the pitch follows). The offset is counted
+/// in the played sample at that rate.
 struct SongAudioClip {
-    int channel = 0; ///< index into SequencerState::channels; its sample plays
+    int channel = 0; ///< index into SequencerState::channels; it plays through the channel
     std::int64_t startStep = 0;
+    std::int64_t offsetSteps = 0; ///< >= 0
+    std::int64_t lengthSteps = 0; ///< 0: to the sample's end
+    std::shared_ptr<const SampleBuffer> sample; ///< null: the channel's sample
+    double rate = 1.0; ///< playback speed, Sampler::kMinRate .. kMaxRate; anything else plays at 1
 };
 
 /// Immutable snapshot of the channel rack, published with
