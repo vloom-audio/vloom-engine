@@ -331,6 +331,40 @@ TEST_CASE("PCM WAV: 16 and 24 bits, clamped, dithered by choice", "[export][rend
     CHECK(nonZero > 100);
 }
 
+TEST_CASE("An odd-sized data chunk is padded to an even size", "[render]")
+{
+    // Review finding: 24-bit mono with an odd frame count gave an odd data
+    // chunk without the pad byte RIFF requires.
+    TempFolder folder;
+    for (const bool knownLength : {true, false}) {
+        vloom::WavFileWriter writer;
+        vloom::WavFileWriter::Spec spec;
+        spec.channels = 1;
+        spec.format = vloom::WavFormat::Pcm24;
+        spec.dither = false;
+        if (knownLength)
+            spec.frames = 3;
+        std::string error;
+        REQUIRE(writer.open(folder.file("odd.wav"), spec, &error));
+        REQUIRE(writer.write(std::vector<float>{0.25f, -0.25f, 0.5f}, &error));
+        REQUIRE(writer.finish(&error));
+        const auto bytes = bytesOf(folder.file("odd.wav"));
+        CAPTURE(knownLength);
+        REQUIRE(bytes.size() == 44 + 9 + 1); // header, 3 x 3 bytes, pad
+        const auto u32 = [&](std::size_t at) {
+            return static_cast<std::uint32_t>(bytes[at]) | (static_cast<std::uint32_t>(bytes[at + 1]) << 8)
+                | (static_cast<std::uint32_t>(bytes[at + 2]) << 16)
+                | (static_cast<std::uint32_t>(bytes[at + 3]) << 24);
+        };
+        CHECK(u32(4) == bytes.size() - 8); // RIFF size counts the pad
+        CHECK(u32(40) == 9); // the data chunk does not
+        CHECK(bytes.back() == 0);
+        const auto read = vloom::readWavFile(folder.file("odd.wav"));
+        REQUIRE(read.buffer);
+        CHECK(read.buffer->frames() == 3);
+    }
+}
+
 TEST_CASE("A WAV file of unknown length gets its real length in the header", "[render]")
 {
     TempFolder folder;

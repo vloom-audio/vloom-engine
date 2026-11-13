@@ -56,7 +56,7 @@ std::uint64_t maxFrames(int channels, WavFormat format)
 {
     const auto blockAlign
         = static_cast<std::uint64_t>(channels) * static_cast<std::uint64_t>(wavBytesPerSample(format));
-    return (kMaxU32 - headerBytesInRiff(format)) / blockAlign;
+    return (kMaxU32 - headerBytesInRiff(format) - 1) / blockAlign; // 1: a possible pad byte
 }
 
 } // namespace
@@ -90,7 +90,9 @@ std::vector<std::uint8_t> encodeWavHeader(
     std::vector<std::uint8_t> out;
     out.reserve(static_cast<std::size_t>(8 + headerBytesInRiff(format)));
     put(out, "RIFF");
-    putU32(out, static_cast<std::uint32_t>(headerBytesInRiff(format) + dataBytes));
+    // RIFF chunks are word-aligned: an odd data chunk (24-bit mono, odd frame
+    // count) is followed by a pad byte, which the RIFF size counts.
+    putU32(out, static_cast<std::uint32_t>(headerBytesInRiff(format) + dataBytes + (dataBytes & 1)));
     put(out, "WAVE");
 
     put(out, "fmt ");
@@ -273,6 +275,10 @@ bool WavFileWriter::finish(std::string* error)
         abandon();
         return fail(error, "Less audio than the WAV file was opened for");
     }
+    const std::uint64_t dataBytes = written_ * static_cast<std::uint64_t>(spec_.channels)
+        * static_cast<std::uint64_t>(wavBytesPerSample(spec_.format));
+    if (dataBytes % 2 != 0)
+        stream_.put(char{0}); // the pad byte after an odd data chunk
     if (!spec_.frames) {
         // The header was written for 0 frames: now the length is known.
         const std::vector<std::uint8_t> header
@@ -280,6 +286,10 @@ bool WavFileWriter::finish(std::string* error)
         stream_.seekp(0);
         stream_.write(
             reinterpret_cast<const char*>(header.data()), static_cast<std::streamsize>(header.size()));
+    }
+    if (!stream_) { // the pad byte or the final header did not get written
+        abandon();
+        return fail(error, "Failed while writing the WAV file");
     }
     stream_.close();
     if (!stream_) {
