@@ -25,6 +25,7 @@ void Engine::prepare(double sampleRate, int /*maxBlockSize*/)
     // Called while audio is stopped, so touching audio-thread state is safe.
     transport_.prepare(sampleRate);
     metronome_.prepare(sampleRate);
+    sequencer_.setSampleRate(sampleRate);
 
     Command discarded{};
     while (commands_.pop(discarded)) { }
@@ -119,6 +120,14 @@ bool Engine::setMasterPan(float pan)
     return send(Command::Type::SetMasterPan, static_cast<double>(std::clamp(pan, -1.0f, 1.0f)));
 }
 
+bool Engine::setMasterPitch(double cents)
+{
+    if (std::isnan(cents))
+        return true; // ignored, like setMasterGain()
+    return send(
+        Command::Type::SetMasterPitch, std::clamp(cents, -kMaxMasterPitchCents, kMaxMasterPitchCents));
+}
+
 void Engine::applyCommands() noexcept
 {
     Command cmd{};
@@ -145,6 +154,9 @@ void Engine::applyCommands() noexcept
             break;
         case Command::Type::SetMasterPan:
             masterPanTarget_ = static_cast<float>(cmd.value);
+            break;
+        case Command::Type::SetMasterPitch:
+            sequencer_.setPitch(std::exp2(cmd.value / 1200.0));
             break;
         }
     }
@@ -340,13 +352,16 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
     int cursor = 0;
 
     if (transport_.isPlaying() && std::isfinite(transport_.positionTicks())) {
-        // Two event streams, metronome beats and sequencer steps, merged in
-        // time order. Each event fires on the first sample at or after its
-        // exact time: the block is rendered in segments split at the events.
-        // An event within kEpsilon frames of a sample boundary snaps to that
-        // sample, so rounding noise never shifts it. One rule decides both
-        // "later block" and "already played", so an event between the last
-        // sample of one block and the first of the next fires exactly once.
+        // Event streams, metronome beats, sequencer steps, note starts and
+        // note ends, merged in time order. Each event fires on the first
+        // sample at or after its exact time: the block is rendered in
+        // segments split at the events. An event within kEpsilon frames of a
+        // sample boundary snaps to that sample, so rounding noise never
+        // shifts it. One rule decides both "later block" and "already
+        // played", so an event between the last sample of one block and the
+        // first of the next fires exactly once. Note ends are the exception:
+        // one already past (none should be) fires at once, so no note hangs.
+        // At one time, ends go first, so a note can follow the same key.
         constexpr double kEpsilon = 1e-6;
         const double start = transport_.positionTicks();
         // Playback started or jumped (locate): song-mode audio clips already
@@ -359,17 +374,30 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
 
         auto beat = static_cast<std::int64_t>(std::floor(start / kPpq));
         auto step = ticksPerStep > 0 ? static_cast<std::int64_t>(std::floor(start / stepTicks)) : 0;
+        constexpr double kNever = std::numeric_limits<double>::infinity();
+        const auto tickOf = [](std::int64_t event) {
+            return event == StepSequencer::kNoEvent ? kNever : static_cast<double>(event);
+        };
+        std::int64_t noteStart = sequencer_.nextNoteStart(static_cast<std::int64_t>(std::floor(start)));
         for (;;) {
             const double beatTick = static_cast<double>(beat) * kPpq;
-            const double stepTick = ticksPerStep > 0 ? static_cast<double>(step) * stepTicks
-                                                     : std::numeric_limits<double>::infinity();
-            const double tick = std::min(beatTick, stepTick);
+            const double stepTick = ticksPerStep > 0 ? static_cast<double>(step) * stepTicks : kNever;
+            const double startTick = tickOf(noteStart);
+            const std::int64_t noteEnd = sequencer_.nextNoteEnd();
+            const double endTick = tickOf(noteEnd);
+            const double tick = std::min({beatTick, stepTick, startTick, endTick});
+            if (tick == kNever)
+                break;
             const double at = std::ceil(transport_.framesUntil(tick) - kEpsilon); // sample it fires on
             if (at < 0.0) { // fired in an earlier block
+                if (endTick == tick)
+                    sequencer_.endNotes(noteEnd); // overdue: now
                 if (beatTick == tick)
                     ++beat;
                 if (stepTick == tick)
                     ++step;
+                if (startTick == tick)
+                    noteStart = sequencer_.nextNoteStart(noteStart + 1);
                 continue;
             }
             if (at >= static_cast<double>(numFrames))
@@ -378,6 +406,8 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
 
             renderSegment(out, numChannels, cursor, offset - cursor);
             cursor = offset;
+            if (endTick == tick)
+                sequencer_.endNotes(noteEnd);
             if (beatTick == tick) {
                 if (metronomeEnabled_)
                     metronome_.trigger(beat % transport_.beatsPerBar() == 0);
@@ -386,6 +416,10 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
             if (stepTick == tick) {
                 sequencer_.triggerStep(step);
                 ++step;
+            }
+            if (startTick == tick) {
+                sequencer_.startNotes(noteStart);
+                noteStart = sequencer_.nextNoteStart(noteStart + 1);
             }
         }
     }

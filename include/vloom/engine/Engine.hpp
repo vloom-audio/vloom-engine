@@ -52,7 +52,13 @@ public:
     /// clamped; NaN is ignored. Ramps like the gain.
     bool setMasterPan(float pan);
 
+    /// Transposes everything the channel rack plays (steps and notes, not
+    /// audio clips or the preview) by `cents`, clamped to
+    /// ±kMaxMasterPitchCents; sounding notes follow. NaN is ignored.
+    bool setMasterPitch(double cents);
+
     static constexpr float kMaxMasterGain = 2.0f;
+    static constexpr double kMaxMasterPitchCents = 1200.0;
 
     /// Replaces the channel rack (channels, samples, steps) the audio thread
     /// plays, from the next block on. Ringing notes are not cut: keep each
@@ -95,7 +101,16 @@ public:
 
 private:
     struct Command {
-        enum class Type { Play, Stop, Locate, SetTempo, SetMetronome, SetMasterGain, SetMasterPan };
+        enum class Type {
+            Play,
+            Stop,
+            Locate,
+            SetTempo,
+            SetMetronome,
+            SetMasterGain,
+            SetMasterPan,
+            SetMasterPitch
+        };
         Type type;
         double value;
     };

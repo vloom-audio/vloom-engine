@@ -16,6 +16,7 @@ target_sources(vloom_engine PRIVATE
     # dsp — sound generators and processors
     dsp/Metronome.cpp
     dsp/Sampler.cpp
+    dsp/Synth.cpp
 
     # io — hardware audio devices; each backend compiles only on its OS
     io/AlsaBackend.cpp

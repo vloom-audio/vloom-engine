@@ -55,9 +55,11 @@ After each block the engine publishes play state, playhead and tempo to
 - `Transport` stores an *anchor* (ticks at the last tempo change or locate)
   and counts whole frames since then. Position is always derived from those,
   so rounding error never accumulates.
-- Events (metronome clicks and channel-rack steps) are scheduled on the exact
-  sample they fall on: the block is rendered in segments split at each event's
-  offset.
+- Events (metronome clicks, channel-rack steps, note starts and note ends)
+  are scheduled on the exact sample they fall on: the block is rendered in
+  segments split at each event's offset. A note's end is kept by its voice
+  (`Sampler::PlayOptions::releaseAt`, in ticks), so it ends on time even when
+  the pattern loops or is edited meanwhile.
 
 ## Testing
 
@@ -70,7 +72,8 @@ sample-exact results across many block sizes. Rendering must be deterministic.
 1. **M0** device output, transport, metronome, offline render
 2. **M1** pattern / step sequencer, sample playback (drum channel rack), mixer routing
 3. **M1.5** sample preview voice ✅
-4. **M2** MIDI notes, pitched sampler, first built-in synth, master pitch ← *next*
+4. **M2** MIDI notes, pitched sampler, first built-in synth, master pitch ✅
+   (engine side; the app's piano roll and synth panel are next)
 5. **M3** arrangement (patterns on a timeline), song mode (first playback of pattern and audio clips is in), WAV export
 6. **M4** plugin host interface, CLAP hosting
 7. **M5** VST3 hosting, built-in effects, sends, delay compensation

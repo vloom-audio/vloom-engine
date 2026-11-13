@@ -257,3 +257,90 @@ TEST_CASE("A start at or past the end, or before the beginning, is ignored", "[d
     sampler.trigger(&sample, 1.0f, 0.0f, -1);
     CHECK(sampler.activeVoices() == 0);
 }
+
+TEST_CASE("Rate 2 plays every other frame; rate 0.5 interpolates between frames", "[dsp]")
+{
+    const auto sample = ramp(8, 0.0f, 0.1f); // 0 0.1 .. 0.7
+    vloom::Sampler sampler;
+    vloom::Sampler::PlayOptions options;
+    options.rate = 2.0;
+    sampler.play(&sample, options);
+    Output fast(6);
+    sampler.render(fast.ptrs.data(), 2, 0, 6);
+    for (int i = 0; i < 4; ++i)
+        CHECK(fast.left[static_cast<std::size_t>(i)]
+            == Approx(0.2f * static_cast<float>(i) * kCentre).margin(1e-6));
+    CHECK(fast.left[4] == 0.0f); // past the end after four frames
+    CHECK(sampler.activeVoices() == 0);
+
+    options.rate = 0.5;
+    sampler.play(&sample, options);
+    Output slow(8);
+    sampler.render(slow.ptrs.data(), 2, 0, 8);
+    // A straight line stays straight: halfway between 0.1 and 0.2.
+    CHECK(slow.left[3] == Approx(0.15f * kCentre).margin(1e-6));
+    CHECK(slow.left[4] == Approx(0.2f * kCentre).margin(1e-6));
+}
+
+TEST_CASE("A held note sounds until released, then fades over kReleaseFrames", "[dsp]")
+{
+    const auto sample = ramp(10000);
+    vloom::Sampler sampler;
+    vloom::Sampler::PlayOptions options;
+    options.releaseAt = 10;
+    sampler.play(&sample, options);
+    sampler.trigger(&sample); // a one-shot: never released
+    CHECK(sampler.nextRelease() == 10);
+
+    sampler.release(9);
+    CHECK(sampler.nextRelease() == 10); // not yet
+    sampler.release(10);
+    CHECK(sampler.nextRelease() == vloom::Sampler::kNoRelease);
+
+    Output out(vloom::Sampler::kReleaseFrames + 10);
+    sampler.render(out.ptrs.data(), 2, 0, vloom::Sampler::kReleaseFrames + 10);
+    CHECK(sampler.activeVoices() == 1); // the one-shot plays on
+    // The released note: falls from 2 voices' worth to the one-shot's alone.
+    CHECK(out.left[0] == Approx(2.0f * kCentre).margin(0.01f));
+    CHECK(out.left[vloom::Sampler::kReleaseFrames / 2] == Approx(1.5f * kCentre).margin(0.01f));
+    CHECK(out.left[vloom::Sampler::kReleaseFrames + 5] == Approx(kCentre).margin(1e-6));
+}
+
+TEST_CASE("releaseHeld() releases every held note; stopAll() shortens a release", "[dsp]")
+{
+    const auto sample = ramp(10000);
+    vloom::Sampler sampler;
+    vloom::Sampler::PlayOptions options;
+    options.releaseAt = 1000000;
+    sampler.play(&sample, options);
+    sampler.releaseHeld();
+    CHECK(sampler.nextRelease() == vloom::Sampler::kNoRelease);
+    Output out(vloom::Sampler::kReleaseFrames);
+    sampler.render(out.ptrs.data(), 2, 0, 100);
+    sampler.stopAll();
+    sampler.render(out.ptrs.data(), 2, 100, vloom::Sampler::kFadeFrames);
+    CHECK(sampler.activeVoices() == 0);
+    // No jump where the shorter fade takes over.
+    CHECK(std::abs(out.left[100] - out.left[99]) < 0.01f);
+}
+
+TEST_CASE("setPitch() changes the speed of the voices that follow it, live", "[dsp]")
+{
+    const auto sample = ramp(1000, 0.0f, 0.001f);
+    vloom::Sampler sampler;
+    vloom::Sampler::PlayOptions follows;
+    vloom::Sampler::PlayOptions fixed;
+    fixed.followsPitch = false;
+    fixed.pan = -1.0f; // left only
+    follows.pan = 1.0f; // right only
+    sampler.play(&sample, follows);
+    sampler.play(&sample, fixed);
+    sampler.setPitch(2.0);
+    Output out(11);
+    sampler.render(out.ptrs.data(), 2, 0, 11);
+    CHECK(out.left[10] == Approx(0.010f).margin(1e-6));
+    CHECK(out.right[10] == Approx(0.020f).margin(1e-6));
+    CHECK(sampler.pitch() == 2.0);
+    sampler.setPitch(100.0);
+    CHECK(sampler.pitch() == vloom::Sampler::kMaxRate);
+}
