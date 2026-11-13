@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -204,6 +205,23 @@ TEST_CASE("Export refuses what it cannot render right", "[export]")
     options.channels = 6;
     result = vloom::exportSong(folder.file("c.wav"), state, nullptr, 44100.0, options);
     CHECK_FALSE(result.ok);
+
+    // A range far too long is refused up front, not rendered until the file
+    // is full (and the frame count never overflows: review finding).
+    auto fine = song(constant(100));
+    fine.patterns.push_back(pattern({1}));
+    fine.patternClips.push_back({0, 0, 4});
+    options = {};
+    for (const std::int64_t end : {std::numeric_limits<std::int64_t>::max(), std::int64_t{100'000'000'000},
+             std::int64_t{2'000'000'000}}) {
+        options.endTicks = end;
+        const auto started = std::chrono::steady_clock::now();
+        result = vloom::exportSong(folder.file("d.wav"), fine, nullptr, kRate, options);
+        CAPTURE(end);
+        CHECK_FALSE(result.ok);
+        CHECK_FALSE(result.error.empty());
+        CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(2));
+    }
 }
 
 TEST_CASE("Export uses voices of its own", "[export]")

@@ -96,9 +96,16 @@ SongExportResult exportSong(const std::string& path, const SequencerState& song,
     const std::int64_t end = options.endTicks < 0 ? songEndTicks(song, tempo) : options.endTicks;
     if (end <= start)
         return fail("There is nothing to export");
+    if (end > StepSequencer::kMaxTicks)
+        return fail("The range to export is too long");
+    // Refused before rendering: a song too long for a WAV file (4 GiB) would
+    // otherwise only fail once the writer is full.
     const double framesPerTick = sampleRate * 60.0 / (tempo * static_cast<double>(kPpq));
-    const auto bodyFrames
-        = static_cast<std::int64_t>(std::ceil(static_cast<double>(end - start) * framesPerTick));
+    const double body = std::ceil(static_cast<double>(end - start) * framesPerTick);
+    const double wavFrames = 4294967295.0 / (options.channels * wavBytesPerSample(options.format));
+    if (!(body < wavFrames))
+        return fail("The song is too long for a WAV file (4 GiB)");
+    const auto bodyFrames = static_cast<std::int64_t>(body);
     const double tailSeconds
         = std::isfinite(options.maxTailSeconds) ? std::clamp(options.maxTailSeconds, 0.0, 600.0) : 0.0;
     const auto tailFrames = static_cast<std::int64_t>(tailSeconds * sampleRate);
