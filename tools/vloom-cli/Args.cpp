@@ -18,7 +18,8 @@ void printUsage()
     std::puts("usage:\n"
               "  vloom-cli devices\n"
               "  vloom-cli play   [--device N] [--bpm 120] [--seconds 8] [--buffer 256] [channels]\n"
-              "  vloom-cli render <out.wav> [--bpm 120] [--seconds 4] [--rate 48000] [channels]\n"
+              "  vloom-cli render <out.wav> [--bpm 120] [--seconds 4] [--rate 48000]\n"
+              "                   [--format float|pcm16|pcm24] [channels]\n"
               "  vloom-cli --version\n"
               "\n"
               "channels (channel rack, 16th-note steps, the pattern loops):\n"
@@ -112,6 +113,14 @@ std::optional<Args> parseArgs(int argc, char** argv)
                 return std::nullopt;
             }
             args.buffer = *buffer;
+        } else if (arg == "--format" && hasValue) {
+            const char* value = argv[++i];
+            const std::string_view format = value;
+            if (format != "float" && format != "pcm16" && format != "pcm24") {
+                complain("--format", value, "float, pcm16 or pcm24");
+                return std::nullopt;
+            }
+            args.format = std::string(format);
         } else if (arg == "--channel" && hasValue) {
             // The pattern follows the last ':', so Windows paths (C:\...) work.
             const std::string value = argv[++i];

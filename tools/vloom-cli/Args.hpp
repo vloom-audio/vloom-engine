@@ -20,6 +20,7 @@ struct Args {
     int device = -1; ///< output device index, -1 = default
     double bpm = 120.0;
     double seconds = 0.0; ///< 0 = command default
+    std::string format = "float"; ///< render: float, pcm16 or pcm24
     int rate = 48000;
     int buffer = 256;
     std::vector<ChannelArg> channels;

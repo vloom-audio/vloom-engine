@@ -84,9 +84,14 @@ bool renderToWav(
 {
     const std::int64_t totalFrames = offlineRenderFrames(engine, options);
     WavFileWriter writer;
+    WavFileWriter::Spec spec;
+    spec.channels = channelsOf(options);
+    spec.sampleRate = static_cast<int>(std::lround(engine.sampleRate()));
+    spec.format = options.format;
+    spec.dither = options.dither;
+    spec.frames = static_cast<std::uint64_t>(totalFrames);
     // open() refuses a render too long for WAV before anything is rendered.
-    if (!writer.open(path, static_cast<std::uint64_t>(totalFrames), channelsOf(options),
-            static_cast<int>(std::lround(engine.sampleRate())), error))
+    if (!writer.open(path, spec, error))
         return false;
     return renderBlocks(engine, options, totalFrames, [&](std::span<const float> block) {
         return writer.write(block, error);

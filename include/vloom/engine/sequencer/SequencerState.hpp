@@ -109,10 +109,15 @@ struct ChannelState {
 struct SongPattern {
     std::vector<std::vector<std::uint8_t>> steps; ///< non-zero = plays
     std::vector<std::vector<Note>> notes; ///< like ChannelState::notes
+    /// The pattern's length in steps. A clip longer than that repeats the
+    /// pattern (steps and notes) every stepCount steps, like FL Studio's
+    /// pattern clips. 0: no repeat, a step past the end of a row is off.
+    int stepCount = 0;
 };
 
 /// A pattern placed in the playlist: plays its steps and notes from
-/// `startStep` for `lengthSteps` steps (steps counted from the song start).
+/// `startStep` for `lengthSteps` steps (steps counted from the song start),
+/// repeating the pattern when the clip is longer (SongPattern::stepCount).
 /// Notes starting inside the clip play for their whole length.
 struct SongPatternClip {
     int pattern = 0; ///< index into SequencerState::patterns

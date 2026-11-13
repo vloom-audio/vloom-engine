@@ -145,7 +145,7 @@ vloom-engine/
 | **M1** | Step sequencer and sample playback (drum channel rack); mixer routing to inserts | *Done* |
 | **M1.5** | Sample preview voice | *Done* |
 | **M2** | MIDI notes, pitched sampler, first built-in synth, master pitch | *Done* |
-| **M3** | Arrangement (patterns on a timeline), song mode, WAV export | *Next* |
+| **M3** | Arrangement (patterns on a timeline), song mode, WAV export | *In progress* |
 | **M4** | Plugin host interface, CLAP hosting | *Planned* |
 | **M5** | VST3 hosting, built-in effects, sends, delay compensation | *Planned* |
 | **M6** | Audio input and recording, MIDI input | *Planned* |

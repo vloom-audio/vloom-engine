@@ -81,6 +81,21 @@ and the project uses [Semantic Versioning](https://semver.org/).
   (`WavFileWriter`), so a failed write never leaves a broken file.
 
 ### Added
+- Song export (M3): `exportSong()` renders a song into a WAV file faster
+  than real time with an Engine and voices of its own
+  (`copyWithOwnVoices()`), so it can run on a background thread while the
+  live engine plays. It ends at the song's end (`songEndTicks()`: the last
+  pattern or audio clip) plus the tail until the sound dies away (at most
+  `maxTailSeconds`), reports progress and can be cancelled; a cancelled or
+  failed export writes no file. Samples must be loaded at the export rate.
+- WAV files in 16- and 24-bit integer PCM besides 32-bit float (`WavFormat`),
+  clamped to full scale, with optional TPDF dither; `WavFileWriter` takes a
+  `Spec` and also writes files of unknown length (the header gets the real
+  length in `finish()`). `renderToWav()` and `vloom-cli render --format`
+  choose the format.
+- A pattern clip longer than its pattern repeats it (steps and notes) when
+  the pattern's length is given (`SongPattern::stepCount`), like FL Studio.
+- `Transport::kMinBpm` / `kMaxBpm` are public.
 - Piano-roll notes (M2): `Note` (start, length in ticks, MIDI key, velocity)
   in `ChannelState::notes` (pattern mode, looping with the pattern) and
   `SongPattern::notes` (song mode, notes starting inside a pattern clip). A

@@ -7,11 +7,6 @@
 
 namespace vloom {
 
-namespace {
-constexpr double kMinBpm = 10.0;
-constexpr double kMaxBpm = 999.0;
-} // namespace
-
 void Transport::prepare(double sampleRate) noexcept
 {
     reanchor();
