@@ -6,6 +6,7 @@
 #include <atomic>
 #include <bit>
 #include <chrono>
+#include <cmath>
 #include <exception>
 #include <limits>
 #include <system_error>
@@ -14,12 +15,20 @@ namespace vloom {
 
 namespace {
 
+constexpr std::uint16_t kFormatPcm = 1;
 constexpr std::uint16_t kFormatIeeeFloat = 3;
-constexpr std::uint32_t kFmtChunkSize = 18; // WAVEFORMATEX with cbSize = 0
-constexpr std::uint32_t kFactChunkSize = 4;
-// "WAVE" + fmt chunk + fact chunk + data chunk header.
-constexpr std::uint64_t kHeaderBytesInRiff = 4 + (8 + kFmtChunkSize) + (8 + kFactChunkSize) + 8;
 constexpr std::uint64_t kMaxU32 = std::numeric_limits<std::uint32_t>::max();
+
+/// Size of the fmt chunk's body: WAVEFORMATEX with cbSize = 0 for float,
+/// PCMWAVEFORMAT for integers.
+std::uint32_t fmtChunkSize(WavFormat format) { return format == WavFormat::Float32 ? 18 : 16; }
+
+/// Bytes counted by the RIFF size before the samples: "WAVE", the fmt chunk,
+/// the fact chunk (float only: non-PCM data needs it), the data chunk header.
+std::uint64_t headerBytesInRiff(WavFormat format)
+{
+    return 4 + (8 + fmtChunkSize(format)) + (format == WavFormat::Float32 ? 8 + 4 : 0) + 8;
+}
 
 void put(std::vector<std::uint8_t>& out, const char (&tag)[5]) { out.insert(out.end(), tag, tag + 4); }
 
@@ -35,12 +44,6 @@ void putU32(std::vector<std::uint8_t>& out, std::uint32_t value)
         out.push_back(static_cast<std::uint8_t>((value >> shift) & 0xFF));
 }
 
-void appendSamples(std::vector<std::uint8_t>& out, std::span<const float> interleaved)
-{
-    for (const float sample : interleaved)
-        putU32(out, std::bit_cast<std::uint32_t>(sample));
-}
-
 bool fail(std::string* error, const std::string& message)
 {
     if (error)
@@ -48,45 +51,71 @@ bool fail(std::string* error, const std::string& message)
     return false;
 }
 
+/// The most frames a 4 GiB file of this layout holds.
+std::uint64_t maxFrames(int channels, WavFormat format)
+{
+    const auto blockAlign
+        = static_cast<std::uint64_t>(channels) * static_cast<std::uint64_t>(wavBytesPerSample(format));
+    return (kMaxU32 - headerBytesInRiff(format)) / blockAlign;
+}
+
 } // namespace
 
-std::vector<std::uint8_t> encodeWavFloat32Header(std::uint64_t frames, int channels, int sampleRate)
+int wavBytesPerSample(WavFormat format) noexcept
+{
+    switch (format) {
+    case WavFormat::Pcm16:
+        return 2;
+    case WavFormat::Pcm24:
+        return 3;
+    case WavFormat::Float32:
+        break;
+    }
+    return 4;
+}
+
+std::vector<std::uint8_t> encodeWavHeader(
+    std::uint64_t frames, int channels, int sampleRate, WavFormat format)
 {
     if (channels < 1 || channels > kMaxWavChannels || sampleRate <= 0)
         return {};
-    const auto blockAlign = static_cast<std::uint16_t>(channels * 4);
+    const int bytes = wavBytesPerSample(format);
+    const auto blockAlign = static_cast<std::uint16_t>(channels * bytes);
     const std::uint64_t byteRate = static_cast<std::uint64_t>(sampleRate) * blockAlign;
-    if (byteRate > kMaxU32)
-        return {};
-    if (frames > kMaxU32 / blockAlign)
-        return {};
+    if (byteRate > kMaxU32 || frames > maxFrames(channels, format))
+        return {}; // more than 4 GiB would need RF64
     const std::uint64_t dataBytes = frames * blockAlign;
-    if (kHeaderBytesInRiff + dataBytes > kMaxU32)
-        return {}; // would need RF64
+    const bool isFloat = format == WavFormat::Float32;
 
     std::vector<std::uint8_t> out;
-    out.reserve(static_cast<std::size_t>(8 + kHeaderBytesInRiff));
+    out.reserve(static_cast<std::size_t>(8 + headerBytesInRiff(format)));
     put(out, "RIFF");
-    putU32(out, static_cast<std::uint32_t>(kHeaderBytesInRiff + dataBytes));
+    putU32(out, static_cast<std::uint32_t>(headerBytesInRiff(format) + dataBytes));
     put(out, "WAVE");
 
     put(out, "fmt ");
-    putU32(out, kFmtChunkSize);
-    putU16(out, kFormatIeeeFloat);
+    putU32(out, fmtChunkSize(format));
+    putU16(out, isFloat ? kFormatIeeeFloat : kFormatPcm);
     putU16(out, static_cast<std::uint16_t>(channels));
     putU32(out, static_cast<std::uint32_t>(sampleRate));
     putU32(out, static_cast<std::uint32_t>(byteRate));
     putU16(out, blockAlign);
-    putU16(out, 32); // bits per sample
-    putU16(out, 0); // cbSize
-
-    put(out, "fact");
-    putU32(out, kFactChunkSize);
-    putU32(out, static_cast<std::uint32_t>(frames));
+    putU16(out, static_cast<std::uint16_t>(bytes * 8)); // bits per sample
+    if (isFloat) {
+        putU16(out, 0); // cbSize
+        put(out, "fact");
+        putU32(out, 4);
+        putU32(out, static_cast<std::uint32_t>(frames));
+    }
 
     put(out, "data");
     putU32(out, static_cast<std::uint32_t>(dataBytes));
     return out;
+}
+
+std::vector<std::uint8_t> encodeWavFloat32Header(std::uint64_t frames, int channels, int sampleRate)
+{
+    return encodeWavHeader(frames, channels, sampleRate, WavFormat::Float32);
 }
 
 std::vector<std::uint8_t> encodeWavFloat32(std::span<const float> interleaved, int channels, int sampleRate)
@@ -99,7 +128,8 @@ std::vector<std::uint8_t> encodeWavFloat32(std::span<const float> interleaved, i
     if (out.empty())
         return {};
     out.reserve(out.size() + interleaved.size() * 4);
-    appendSamples(out, interleaved);
+    for (const float sample : interleaved)
+        putU32(out, std::bit_cast<std::uint32_t>(sample));
     return out;
 }
 
@@ -118,8 +148,18 @@ void WavFileWriter::abandon() noexcept
 bool WavFileWriter::open(
     const std::string& path, std::uint64_t frames, int channels, int sampleRate, std::string* error)
 {
+    Spec spec;
+    spec.channels = channels;
+    spec.sampleRate = sampleRate;
+    spec.frames = frames;
+    return open(path, spec, error);
+}
+
+bool WavFileWriter::open(const std::string& path, const Spec& spec, std::string* error)
+{
     abandon();
-    const std::vector<std::uint8_t> header = encodeWavFloat32Header(frames, channels, sampleRate);
+    const std::vector<std::uint8_t> header
+        = encodeWavHeader(spec.frames.value_or(0), spec.channels, spec.sampleRate, spec.format);
     if (header.empty())
         return fail(error, "Cannot encode this audio as WAV (bad format, or larger than 4 GiB)");
     try {
@@ -160,26 +200,60 @@ bool WavFileWriter::open(
         abandon();
         return fail(error, "Failed while writing '" + path + "'");
     }
-    framesLeft_ = frames;
-    channels_ = channels;
+    spec_ = spec;
+    written_ = 0;
+    maxFrames_ = spec.frames.value_or(maxFrames(spec.channels, spec.format));
+    noise_ = 0x9E3779B9u;
     return true;
+}
+
+void WavFileWriter::encode(std::span<const float> interleaved, std::vector<std::uint8_t>& out) noexcept
+{
+    if (spec_.format == WavFormat::Float32) {
+        for (const float sample : interleaved)
+            putU32(out, std::bit_cast<std::uint32_t>(sample));
+        return;
+    }
+    const bool is16 = spec_.format == WavFormat::Pcm16;
+    const double scale = is16 ? 32768.0 : 8388608.0;
+    const double top = scale - 1.0;
+    // Uniform in [0, 1) from xorshift32: its top 24 bits.
+    const auto uniform = [this] {
+        noise_ ^= noise_ << 13;
+        noise_ ^= noise_ >> 17;
+        noise_ ^= noise_ << 5;
+        return static_cast<double>(noise_ >> 8) * (1.0 / 16777216.0);
+    };
+    for (const float sample : interleaved) {
+        double value = std::isfinite(sample) ? static_cast<double>(sample) * scale : 0.0;
+        if (spec_.dither)
+            value += uniform() - uniform(); // triangular, +-1 LSB
+        const auto quantised = static_cast<std::int32_t>(std::clamp(std::floor(value + 0.5), -scale, top));
+        const auto bits = static_cast<std::uint32_t>(quantised);
+        out.push_back(static_cast<std::uint8_t>(bits & 0xFF));
+        out.push_back(static_cast<std::uint8_t>((bits >> 8) & 0xFF));
+        if (!is16)
+            out.push_back(static_cast<std::uint8_t>((bits >> 16) & 0xFF));
+    }
 }
 
 bool WavFileWriter::write(std::span<const float> interleaved, std::string* error)
 {
     if (!open_)
         return fail(error, "The WAV file is not open");
-    const auto channels = static_cast<std::size_t>(channels_);
-    if (interleaved.size() % channels != 0 || interleaved.size() / channels > framesLeft_) {
+    const auto channels = static_cast<std::size_t>(spec_.channels);
+    if (interleaved.size() % channels != 0 || interleaved.size() / channels > maxFrames_ - written_) {
         abandon();
-        return fail(error, "More audio than the WAV file was opened for");
+        return fail(error,
+            spec_.frames ? "More audio than the WAV file was opened for"
+                         : "The audio is too long for a WAV file (4 GiB)");
     }
     // Little-endian bytes in pieces, so the buffer stays small.
     std::vector<std::uint8_t> bytes;
     constexpr std::size_t kChunk = 16384;
     for (std::size_t at = 0; at < interleaved.size(); at += kChunk) {
         bytes.clear();
-        appendSamples(bytes, interleaved.subspan(at, std::min(kChunk, interleaved.size() - at)));
+        encode(interleaved.subspan(at, std::min(kChunk, interleaved.size() - at)), bytes);
         stream_.write(
             reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
         if (!stream_) {
@@ -187,7 +261,7 @@ bool WavFileWriter::write(std::span<const float> interleaved, std::string* error
             return fail(error, "Failed while writing the WAV file");
         }
     }
-    framesLeft_ -= interleaved.size() / channels;
+    written_ += interleaved.size() / channels;
     return true;
 }
 
@@ -195,9 +269,17 @@ bool WavFileWriter::finish(std::string* error)
 {
     if (!open_)
         return fail(error, "The WAV file is not open");
-    if (framesLeft_ != 0) {
+    if (spec_.frames && written_ != *spec_.frames) {
         abandon();
         return fail(error, "Less audio than the WAV file was opened for");
+    }
+    if (!spec_.frames) {
+        // The header was written for 0 frames: now the length is known.
+        const std::vector<std::uint8_t> header
+            = encodeWavHeader(written_, spec_.channels, spec_.sampleRate, spec_.format);
+        stream_.seekp(0);
+        stream_.write(
+            reinterpret_cast<const char*>(header.data()), static_cast<std::streamsize>(header.size()));
     }
     stream_.close();
     if (!stream_) {

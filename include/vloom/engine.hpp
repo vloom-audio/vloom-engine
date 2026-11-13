@@ -15,6 +15,7 @@
 #include "vloom/engine/io/AudioDevice.hpp"
 #include "vloom/engine/mixer/MixerState.hpp"
 #include "vloom/engine/render/OfflineRenderer.hpp"
+#include "vloom/engine/render/SongExport.hpp"
 #include "vloom/engine/render/WavWriter.hpp"
 #include "vloom/engine/sample/Resampler.hpp"
 #include "vloom/engine/sample/SampleBuffer.hpp"

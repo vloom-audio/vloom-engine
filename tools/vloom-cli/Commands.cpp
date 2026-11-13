@@ -140,6 +140,9 @@ int render(const Args& args)
 
     OfflineRenderOptions opts;
     opts.seconds = args.seconds > 0.0 ? args.seconds : 4.0;
+    opts.format = args.format == "pcm16" ? WavFormat::Pcm16
+        : args.format == "pcm24"         ? WavFormat::Pcm24
+                                         : WavFormat::Float32;
 
     std::string error;
     if (!renderToWav(engine, args.output, opts, &error)) {

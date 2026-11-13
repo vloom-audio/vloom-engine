@@ -18,6 +18,9 @@ public:
     /// Furthest position locate() accepts (about 16 000 hours at 120 BPM);
     /// keeps tick and frame arithmetic far from overflow.
     static constexpr double kMaxTicks = 1e11;
+    /// setTempo() clamps to this range.
+    static constexpr double kMinBpm = 10.0;
+    static constexpr double kMaxBpm = 999.0;
 
     void prepare(double sampleRate) noexcept;
 

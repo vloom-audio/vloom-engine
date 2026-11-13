@@ -39,6 +39,15 @@ void notesAt(const std::vector<Note>& row, std::int64_t at, std::int64_t span, P
             play(*it);
 }
 
+/// Ticks after which a pattern repeats inside a clip `span` ticks long:
+/// its own length when it has one (SongPattern::stepCount), else the clip's.
+std::int64_t loopTicks(const SongPattern& pattern, std::int64_t span, std::int64_t ticksPerStep) noexcept
+{
+    if (pattern.stepCount <= 0)
+        return span;
+    return std::min(span, static_cast<std::int64_t>(pattern.stepCount) * ticksPerStep);
+}
+
 void sortNotes(std::vector<Note>& notes)
 {
     std::stable_sort(
@@ -98,10 +107,22 @@ std::int64_t StepSequencer::nextNoteStart(std::int64_t from) const noexcept
             const std::int64_t span = clip.lengthSteps * ticksPerStep;
             if (start + span <= from || start >= next)
                 continue; // over already, or nothing in it can come first
-            const auto& rows = current_->patterns[static_cast<std::size_t>(clip.pattern)].notes;
-            for (std::size_t c = 0; c < channels.size() && c < rows.size(); ++c)
-                if (const Note* note = firstPlayable(rows[c], std::max<std::int64_t>(from - start, 0), span))
-                    next = std::min(next, start + note->start);
+            const SongPattern& pattern = current_->patterns[static_cast<std::size_t>(clip.pattern)];
+            const std::int64_t period = loopTicks(pattern, span, ticksPerStep);
+            // Where `from` falls in the clip: which pass of the pattern, and where in it.
+            const std::int64_t into = std::max<std::int64_t>(from - start, 0);
+            const std::int64_t pass = into / period;
+            const std::int64_t local = into - pass * period;
+            for (std::size_t c = 0; c < channels.size() && c < pattern.notes.size(); ++c) {
+                const auto& row = pattern.notes[c];
+                std::int64_t at = kNoEvent;
+                if (const Note* note = firstPlayable(row, local, period))
+                    at = start + pass * period + note->start;
+                else if (const Note* first = firstPlayable(row, 0, period))
+                    at = start + (pass + 1) * period + first->start; // the next pass
+                if (at < start + span) // not past the clip's end
+                    next = std::min(next, at);
+            }
         }
         return next;
     }
@@ -137,9 +158,11 @@ void StepSequencer::startNotes(std::int64_t tick) noexcept
             const std::int64_t span = clip.lengthSteps * ticksPerStep;
             if (tick < start || tick >= start + span)
                 continue;
-            const auto& rows = current_->patterns[static_cast<std::size_t>(clip.pattern)].notes;
-            for (std::size_t c = 0; c < channels.size() && c < rows.size(); ++c)
-                notesAt(rows[c], tick - start, span, [&](const Note& note) { play(channels[c], note); });
+            const SongPattern& pattern = current_->patterns[static_cast<std::size_t>(clip.pattern)];
+            const std::int64_t period = loopTicks(pattern, span, ticksPerStep);
+            const std::int64_t local = (tick - start) % period;
+            for (std::size_t c = 0; c < channels.size() && c < pattern.notes.size(); ++c)
+                notesAt(pattern.notes[c], local, period, [&](const Note& note) { play(channels[c], note); });
         }
         return;
     }
@@ -232,8 +255,12 @@ void StepSequencer::triggerStep(std::int64_t step) noexcept
                 || current_->ticksPerStep <= 0 || !clipInRange(clip.startStep, clip.lengthSteps)
                 || step < clip.startStep || step >= clip.startStep + clip.lengthSteps)
                 continue;
-            const auto& rows = current_->patterns[static_cast<std::size_t>(clip.pattern)].steps;
-            const auto local = static_cast<std::size_t>(step - clip.startStep);
+            const SongPattern& pattern = current_->patterns[static_cast<std::size_t>(clip.pattern)];
+            const auto& rows = pattern.steps;
+            std::int64_t into = step - clip.startStep;
+            if (pattern.stepCount > 0)
+                into %= pattern.stepCount; // the pattern repeats along a longer clip
+            const auto local = static_cast<std::size_t>(into);
             for (std::size_t c = 0; c < channels.size() && c < rows.size(); ++c) {
                 const ChannelState& channel = channels[c];
                 if (channel.muted || channel.voices == nullptr || local >= rows[c].size()

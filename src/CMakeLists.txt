@@ -35,6 +35,7 @@ target_sources(vloom_engine PRIVATE
 
     # render — offline (faster than real time) rendering
     render/OfflineRenderer.cpp
+    render/SongExport.cpp
     render/WavWriter.cpp)
 
 target_include_directories(vloom_engine
