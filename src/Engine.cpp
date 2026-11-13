@@ -2,6 +2,8 @@
 // Copyright (C) 2026 Vloom Audio contributors
 #include "vloom/engine/Engine.hpp"
 
+#include "vloom/engine/sample/SampleBuffer.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -65,6 +67,39 @@ void Engine::collectGarbage()
 {
     sequencer_.collect();
     mixer_.collect();
+    preview_.collect();
+}
+
+void Engine::previewSample(std::shared_ptr<const SampleBuffer> sample, float gain)
+{
+    auto state = std::make_unique<PreviewState>();
+    state->sample = std::move(sample);
+    state->gain = std::isfinite(gain) ? std::clamp(gain, 0.0f, kMaxMasterGain) : 0.0f;
+    preview_.publish(std::move(state));
+}
+
+void Engine::renderPreview(int numFrames) noexcept
+{
+    const PreviewState* state = preview_.acquire();
+    if (state != previewStarted_) {
+        // A new preview (or a stop): the one sounding fades out, the new one
+        // starts at the top of this block.
+        previewSampler_.stopAll();
+        if (state != nullptr && state->sample != nullptr)
+            previewSampler_.trigger(state->sample.get(), state->gain);
+        previewStarted_ = state;
+    }
+    if (stopVoices_)
+        previewSampler_.stopAll(); // the transport's Stop silences the preview too
+
+    std::array<float*, 2> master{buses_[0], buses_[1]};
+    previewSampler_.render(master.data(), 2, 0, numFrames);
+    // A replaced preview's sample is freed (on the control thread) only once
+    // no voice reads it any more, its fade included.
+    preview_.release([this](const PreviewState& old) {
+        return old.sample == nullptr || !previewSampler_.uses(old.sample.get());
+    });
+    previewPlaying_.store(previewSampler_.activeVoices() > 0, std::memory_order_relaxed);
 }
 
 void Engine::setMixerState(std::unique_ptr<const MixerState> state) { mixer_.publish(std::move(state)); }
@@ -314,6 +349,11 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
         // sample of one block and the first of the next fires exactly once.
         constexpr double kEpsilon = 1e-6;
         const double start = transport_.positionTicks();
+        // Playback started or jumped (locate): song-mode audio clips already
+        // under way there start part-way through.
+        if (const double ticksPerSample = transport_.ticksPerSample();
+            ticksPerSample > 0.0 && (!wasRolling_ || std::abs(start - expectedTicks_) > kEpsilon))
+            sequencer_.resumeAt(start, 1.0 / ticksPerSample);
         const int ticksPerStep = sequencer_.ticksPerStep();
         const double stepTicks = static_cast<double>(ticksPerStep);
 
@@ -352,12 +392,15 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
 
     renderSegment(out, numChannels, cursor, numFrames - cursor);
     sequencer_.mix(numFrames, buses_.data(), busUsed_.data());
+    renderPreview(numFrames);
     mixBuses(out, numChannels, numFrames);
     sequencer_.endBlock();
     applyMasterGain(out, numChannels, numFrames);
     sanitizeOutput(out, numChannels, numFrames);
     meterOutput(out, numChannels, numFrames);
     transport_.advance(numFrames);
+    wasRolling_ = transport_.isPlaying();
+    expectedTicks_ = transport_.positionTicks();
     publishStatus();
 }
 

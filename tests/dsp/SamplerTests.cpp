@@ -232,3 +232,28 @@ TEST_CASE("With one voice each trigger cuts the previous note with a fade", "[ds
     CHECK(out.left.back() == Approx(kCentre)); // one note again
     CHECK(sampler.activeVoices() == 1);
 }
+
+TEST_CASE("A sample can start part-way, fading in", "[dsp]")
+{
+    const auto sample = ramp(1000, 0.0f, 0.001f); // frame i holds i / 1000
+    vloom::Sampler sampler;
+    sampler.trigger(&sample, 1.0f, 0.0f, 400);
+    Output out(700);
+    sampler.render(out.ptrs.data(), 2, 0, 700);
+
+    // The first frame is frame 400, nearly silent; after the fade it is exact.
+    CHECK(out.left[0] == Approx(0.4f * kCentre / (vloom::Sampler::kFadeFrames + 1)).margin(1e-5));
+    CHECK(out.left[100] == Approx(0.5f * kCentre).margin(1e-5));
+    CHECK(out.left[599] == Approx(0.999f * kCentre).margin(1e-5));
+    CHECK(out.left[600] == 0.0f); // ended: 600 frames were left
+    CHECK(sampler.activeVoices() == 0);
+}
+
+TEST_CASE("A start at or past the end, or before the beginning, is ignored", "[dsp]")
+{
+    const auto sample = ramp(100);
+    vloom::Sampler sampler;
+    sampler.trigger(&sample, 1.0f, 0.0f, 100);
+    sampler.trigger(&sample, 1.0f, 0.0f, -1);
+    CHECK(sampler.activeVoices() == 0);
+}

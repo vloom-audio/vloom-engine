@@ -13,6 +13,21 @@ and the project uses [Semantic Versioning](https://semver.org/).
   pinned to the commit of its v3.7.1 tag.
 
 ### Added
+- Song mode (`SequencerState::song`): the sequencer plays the playlist instead
+  of looping the pattern. Pattern clips (`SongPatternClip`) trigger the
+  channels with their pattern's steps (`SongPattern`); audio clips
+  (`SongAudioClip`) play their channel's sample once from their step, at its
+  own speed, through the channel (volume, pan, mute, insert). When playback
+  starts or jumps (locate) inside an audio clip, it starts part-way through
+  (`StepSequencer::resumeAt()`). Stop fades the clips out.
+- `Sampler::trigger()` takes a start frame: a sample can start part-way,
+  fading in over `kFadeFrames` so it does not click.
+- Sample preview: `Engine::previewSample()` plays a sample once through the
+  master bus on its own voice, whether or not the transport is running; a new
+  sample replaces the one sounding, null or `stop()` silences it (64-frame
+  fade), and `isPreviewPlaying()` reports it. A replaced sample is freed on the
+  control thread (`collectGarbage()`) only after its voice has faded out; the
+  audio thread does not allocate.
 - `DeviceListWatcher` (`io/AudioDevice`): counts output-device changes as the
   OS reports them (WASAPI endpoint notifications, CoreAudio property
   listeners), so callers list devices only after a change instead of polling,
