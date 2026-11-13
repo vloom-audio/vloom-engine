@@ -81,6 +81,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
   (`WavFileWriter`), so a failed write never leaves a broken file.
 
 ### Added
+- Loop region and stop point (M3): `Engine::setLoop(start, end)` loops
+  `[start, end)` while playing, jumping back on the exact sample, with the
+  events at the loop start firing every pass (song-mode audio clips under
+  way resume part-way, held notes are released, as for a locate);
+  `clearLoop()` turns it off, and loops shorter than `kMinLoopTicks` are
+  ignored. Playing from past the loop end goes on. `Engine::setStopAt(ticks)`
+  stops the transport on the exact sample (e.g. at the song's end), fading
+  sounding notes out. Each block is played in spans split at these
+  boundaries.
 - Song export (M3): `exportSong()` renders a song into a WAV file faster
   than real time with an Engine and voices of its own
   (`copyWithOwnVoices()`), so it can run on a background thread while the

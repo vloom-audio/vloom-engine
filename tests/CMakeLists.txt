@@ -9,6 +9,7 @@ CPMAddPackage(
 # Test files mirror src/: tests/<module>/<Name>Tests.cpp
 add_executable(vloom_engine_tests
     EngineTests.cpp
+    LoopTests.cpp
     PreviewTests.cpp
     RobustnessTests.cpp
     core/SnapshotExchangeTests.cpp

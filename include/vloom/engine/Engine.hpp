@@ -68,6 +68,21 @@ public:
     /// ±kMaxMasterPitchCents; sounding notes follow. NaN is ignored.
     bool setMasterPitch(double cents);
 
+    /// Loops [startTicks, endTicks) while playing: on reaching endTicks the
+    /// position jumps back to startTicks on that exact sample, and events
+    /// there fire again (song-mode audio clips under way resume part-way,
+    /// held notes are released, as for locate()). Playing from at or past
+    /// endTicks goes on without looping. A loop shorter than kMinLoopTicks,
+    /// or non-finite values, turn looping off.
+    bool setLoop(double startTicks, double endTicks);
+    /// Turns looping off.
+    bool clearLoop() { return setLoop(0.0, 0.0); }
+    /// Stops the transport on reaching `ticks`, on that exact sample (e.g.
+    /// the song's end): sounding notes fade out as on stop(). <= 0 or
+    /// non-finite: never. A loop that ends first wins.
+    bool setStopAt(double ticks);
+    static constexpr double kMinLoopTicks = kPpq / 16.0; ///< a 64th note
+
     static constexpr float kMaxMasterGain = 2.0f;
     static constexpr double kMaxMasterPitchCents = 1200.0;
 
@@ -126,13 +141,19 @@ private:
             SetMetronome,
             SetMasterGain,
             SetMasterPan,
-            SetMasterPitch
+            SetMasterPitch,
+            SetLoop,
+            SetStopAt
         };
         Type type;
         double value;
+        double value2 = 0.0;
     };
 
-    bool send(Command::Type type, double value = 0.0);
+    bool send(Command::Type type, double value = 0.0, double value2 = 0.0);
+    /// Runs the event scheduler over [spanStart, spanStart + spanFrames) of
+    /// the block, the transport standing at spanStart; renders that span.
+    void playSpan(float* const* out, int numChannels, int spanStart, int spanFrames) noexcept;
     void applyCommands() noexcept;
     void publishStatus() noexcept;
     void applyMasterGain(float* const* out, int numChannels, int numFrames) noexcept;
@@ -178,6 +199,10 @@ private:
     int stepTicksUsed_ = 0; ///< the ticks per step nextStep_ counts in
     std::int64_t noteFrom_ = 0; ///< note starts before this tick are done
     bool metronomeEnabled_ = true;
+    // audio thread: the loop region (off when loopEnd_ <= loopStart_) and the stop point (<= 0: none)
+    double loopStart_ = 0.0;
+    double loopEnd_ = 0.0;
+    double stopAt_ = 0.0;
     float masterGainTarget_ = 1.0f; ///< audio thread: latest requested gain
     float masterPanTarget_ = 0.0f; ///< audio thread: latest requested balance
     /// audio thread: per-channel gain at the end of the last block (ramp start)
