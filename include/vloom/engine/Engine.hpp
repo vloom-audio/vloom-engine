@@ -4,6 +4,7 @@
 
 #include "vloom/engine/core/SpscQueue.hpp"
 #include "vloom/engine/dsp/Metronome.hpp"
+#include "vloom/engine/dsp/Sampler.hpp"
 #include "vloom/engine/mixer/MixerState.hpp"
 #include "vloom/engine/sequencer/StepSequencer.hpp"
 #include "vloom/engine/time/Transport.hpp"
@@ -63,9 +64,20 @@ public:
     /// Replaces the mixer inserts' volume and pan (mute and solo folded into
     /// the gain by the host), from the next block on; changes ramp.
     void setMixerState(std::unique_ptr<const MixerState> state);
+    /// Plays `sample` once from its start on the master bus (after the master
+    /// volume), whether or not the transport plays: a browser preview. A new
+    /// preview replaces the one sounding, which fades out; null stops it.
+    /// The sample must be at the engine's rate (sample/Resampler). Stop
+    /// (stop()) silences it too.
+    void previewSample(std::shared_ptr<const SampleBuffer> sample, float gain = 1.0f);
 
     // ---- status (any thread)
     [[nodiscard]] bool isPlaying() const noexcept { return playing_.load(std::memory_order_relaxed); }
+    /// True while a preview (previewSample()) is sounding, its fade included.
+    [[nodiscard]] bool isPreviewPlaying() const noexcept
+    {
+        return previewPlaying_.load(std::memory_order_relaxed);
+    }
     [[nodiscard]] double positionTicks() const noexcept { return position_.load(std::memory_order_relaxed); }
     [[nodiscard]] double tempo() const noexcept { return tempo_.load(std::memory_order_relaxed); }
     [[nodiscard]] double sampleRate() const noexcept { return transport_.sampleRate(); }
@@ -101,12 +113,23 @@ private:
     void processBlock(float* const* out, int numChannels, int numFrames) noexcept;
     /// Inserts (volume, pan, meters) into the master bus, the master bus into `out`.
     void mixBuses(float* const* out, int numChannels, int numFrames) noexcept;
+    /// Starts a newly published preview and adds the preview into the master bus.
+    void renderPreview(int numFrames) noexcept;
+
+    /// What the preview voice plays; one per previewSample() call.
+    struct PreviewState {
+        std::shared_ptr<const SampleBuffer> sample; ///< null: stop
+        float gain = 1.0f;
+    };
 
     SpscQueue<Command, 256> commands_;
     Transport transport_;
     Metronome metronome_;
     StepSequencer sequencer_;
     SnapshotExchange<MixerState> mixer_;
+    SnapshotExchange<PreviewState> preview_;
+    Sampler previewSampler_{1}; ///< audio thread: one voice (plus the sampler's fade slots)
+    const PreviewState* previewStarted_ = nullptr; ///< audio thread: the preview last triggered
     /// audio thread: stereo bus per insert, 0 = master bus; kMaxBlockFrames each
     std::vector<float> busMemory_;
     std::array<float*, 2 * (kMaxInserts + 1)> buses_{};
@@ -125,6 +148,7 @@ private:
     std::atomic<bool> playing_{false};
     std::atomic<double> position_{0.0};
     std::atomic<double> tempo_{120.0};
+    std::atomic<bool> previewPlaying_{false};
     std::atomic<float> cpuLoad_{0.0f};
     std::array<std::atomic<float>, 2> outputPeak_{}; ///< left, right; see takeOutputPeak()
 };

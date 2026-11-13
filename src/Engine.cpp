@@ -2,6 +2,8 @@
 // Copyright (C) 2026 Vloom Audio contributors
 #include "vloom/engine/Engine.hpp"
 
+#include "vloom/engine/sample/SampleBuffer.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -65,6 +67,39 @@ void Engine::collectGarbage()
 {
     sequencer_.collect();
     mixer_.collect();
+    preview_.collect();
+}
+
+void Engine::previewSample(std::shared_ptr<const SampleBuffer> sample, float gain)
+{
+    auto state = std::make_unique<PreviewState>();
+    state->sample = std::move(sample);
+    state->gain = std::isfinite(gain) ? std::clamp(gain, 0.0f, kMaxMasterGain) : 0.0f;
+    preview_.publish(std::move(state));
+}
+
+void Engine::renderPreview(int numFrames) noexcept
+{
+    const PreviewState* state = preview_.acquire();
+    if (state != previewStarted_) {
+        // A new preview (or a stop): the one sounding fades out, the new one
+        // starts at the top of this block.
+        previewSampler_.stopAll();
+        if (state != nullptr && state->sample != nullptr)
+            previewSampler_.trigger(state->sample.get(), state->gain);
+        previewStarted_ = state;
+    }
+    if (stopVoices_)
+        previewSampler_.stopAll(); // the transport's Stop silences the preview too
+
+    std::array<float*, 2> master{buses_[0], buses_[1]};
+    previewSampler_.render(master.data(), 2, 0, numFrames);
+    // A replaced preview's sample is freed (on the control thread) only once
+    // no voice reads it any more, its fade included.
+    preview_.release([this](const PreviewState& old) {
+        return old.sample == nullptr || !previewSampler_.uses(old.sample.get());
+    });
+    previewPlaying_.store(previewSampler_.activeVoices() > 0, std::memory_order_relaxed);
 }
 
 void Engine::setMixerState(std::unique_ptr<const MixerState> state) { mixer_.publish(std::move(state)); }
@@ -357,6 +392,7 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
     applyMasterGain(out, numChannels, numFrames);
     sanitizeOutput(out, numChannels, numFrames);
     meterOutput(out, numChannels, numFrames);
+    renderPreview(numFrames);
     transport_.advance(numFrames);
     publishStatus();
 }
