@@ -3,8 +3,7 @@
 //
 // Replaces the global operator new / delete for the test binary, aligned
 // forms included (alignas(64) types such as SpscQueue use them), so tests
-// can count allocations. The nothrow forms call these in every standard
-// library we build with.
+// can count allocations, nothrow forms included.
 #include "support/Allocations.hpp"
 
 #include <algorithm>
@@ -86,4 +85,43 @@ void operator delete(void* p, std::align_val_t) noexcept { freeAligned(p); }
 void operator delete[](void* p, std::align_val_t) noexcept { freeAligned(p); }
 void operator delete(void* p, std::size_t, std::align_val_t) noexcept { freeAligned(p); }
 void operator delete[](void* p, std::size_t, std::align_val_t) noexcept { freeAligned(p); }
+// The nothrow forms too: the standard library calls them directly (e.g.
+// std::stable_sort's buffer) and frees with the plain forms above, so they
+// must come from the same allocator (AddressSanitizer checks that).
+void* operator new(std::size_t size, const std::nothrow_t&) noexcept
+{
+    try {
+        return allocate(size);
+    } catch (...) {
+        return nullptr;
+    }
+}
+void* operator new[](std::size_t size, const std::nothrow_t&) noexcept
+{
+    try {
+        return allocate(size);
+    } catch (...) {
+        return nullptr;
+    }
+}
+void operator delete(void* p, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete[](void* p, const std::nothrow_t&) noexcept { std::free(p); }
+void* operator new(std::size_t size, std::align_val_t alignment, const std::nothrow_t&) noexcept
+{
+    try {
+        return allocateAligned(size, alignment);
+    } catch (...) {
+        return nullptr;
+    }
+}
+void* operator new[](std::size_t size, std::align_val_t alignment, const std::nothrow_t&) noexcept
+{
+    try {
+        return allocateAligned(size, alignment);
+    } catch (...) {
+        return nullptr;
+    }
+}
+void operator delete(void* p, std::align_val_t, const std::nothrow_t&) noexcept { freeAligned(p); }
+void operator delete[](void* p, std::align_val_t, const std::nothrow_t&) noexcept { freeAligned(p); }
 #endif
