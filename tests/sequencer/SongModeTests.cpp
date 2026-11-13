@@ -68,6 +68,14 @@ float peak(const std::vector<float>& audio, std::size_t from, std::size_t to)
     return p;
 }
 
+/// A pattern whose channel 0 plays `row`.
+vloom::SongPattern stepPattern(std::vector<std::uint8_t> row)
+{
+    vloom::SongPattern pattern;
+    pattern.steps.push_back(std::move(row));
+    return pattern;
+}
+
 /// One channel playing `sample`; song mode with the given clips.
 std::unique_ptr<vloom::SequencerState> song(
     std::shared_ptr<const vloom::SampleBuffer> channelSample = nullptr)
@@ -88,7 +96,7 @@ TEST_CASE("Song mode plays a pattern clip where it is placed", "[song]")
     vloom::Engine engine;
     prepare(engine);
     auto state = song(constant(1000));
-    state->patterns.push_back({{{1, 0, 0, 0}}}); // channel 0: step 0
+    state->patterns.push_back(stepPattern({1, 0, 0, 0})); // channel 0: step 0
     state->patternClips.push_back({0, 4, 4}); // steps 4 .. 7
     engine.setSequencerState(std::move(state));
     engine.play();
@@ -122,7 +130,7 @@ TEST_CASE("Pattern mode ignores the playlist", "[song]")
     auto state = song(constant(3000));
     state->song = false;
     state->audioClips.push_back({0, 0});
-    state->patterns.push_back({{{1}}});
+    state->patterns.push_back(stepPattern({1}));
     state->patternClips.push_back({0, 0, 16});
     engine.setSequencerState(std::move(state));
     engine.play();
@@ -202,7 +210,7 @@ TEST_CASE("Song mode does not allocate on the audio thread", "[song]")
     vloom::Engine engine;
     prepare(engine);
     auto state = song(constant(500));
-    state->patterns.push_back({{{1, 0, 1, 0}}});
+    state->patterns.push_back(stepPattern({1, 0, 1, 0}));
     state->patternClips.push_back({0, 0, 64});
     for (int i = 0; i < 8; ++i)
         state->audioClips.push_back({0, i * 3});

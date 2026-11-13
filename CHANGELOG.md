@@ -13,6 +13,26 @@ and the project uses [Semantic Versioning](https://semver.org/).
   pinned to the commit of its v3.7.1 tag.
 
 ### Added
+- Piano-roll notes (M2): `Note` (start, length in ticks, MIDI key, velocity)
+  in `ChannelState::notes` (pattern mode, looping with the pattern) and
+  `SongPattern::notes` (song mode, notes starting inside a pattern clip). A
+  note starts on its exact sample, is held for its length, then released
+  over `Sampler::kReleaseFrames`; a jump (locate) releases held notes. The
+  key plays the channel's sample relative to `ChannelState::rootKey`.
+- Pitched sampler: `Sampler::play()` with `PlayOptions` (rate, held notes
+  via `releaseAt`, `release()`, `nextRelease()`, `releaseHeld()`); rates
+  other than 1 read the sample with 4-point Hermite interpolation, rate 1
+  stays bit-exact. `setPitch()` scales the voices that follow it, live.
+- First built-in synth (`dsp/Synth`): polyphonic subtractive synth with one
+  oscillator per voice (sine, triangle, polyBLEP saw and square), a linear
+  ADSR envelope and a resonant TPT state-variable low-pass. A channel picks
+  it with `ChannelState::instrument = Instrument::Synth` and sets its sound
+  in `ChannelState::synth` (`SynthSettings`, live); steps play its root key
+  for one step, notes their key. `ChannelVoices` keeps a sampler and a synth,
+  so switching instrument lets ringing notes finish.
+- Master pitch: `Engine::setMasterPitch(cents)`, ±1200 cents, transposes
+  steps and notes (sounding ones too) but not audio clips, which stay in
+  time with the song, or the preview.
 - Song mode (`SequencerState::song`): the sequencer plays the playlist instead
   of looping the pattern. Pattern clips (`SongPatternClip`) trigger the
   channels with their pattern's steps (`SongPattern`); audio clips

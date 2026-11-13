@@ -3,10 +3,12 @@
 #pragma once
 
 #include "vloom/engine/dsp/Sampler.hpp"
+#include "vloom/engine/dsp/Synth.hpp"
 #include "vloom/engine/mixer/MixerState.hpp"
 #include "vloom/engine/sample/SampleBuffer.hpp"
 #include "vloom/engine/time/MusicalTime.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -22,12 +24,37 @@ class ChannelVoices {
 public:
     explicit ChannelVoices(int polyphony = Sampler::kDefaultVoices)
         : sampler(polyphony)
+        , synth(polyphony)
         , left(kMaxBlockFrames, 0.0f)
         , right(kMaxBlockFrames, 0.0f)
     {
     }
 
     Sampler sampler;
+    Synth synth;
+
+    // Both instruments at once: a channel switched from one to the other
+    // lets the first one's notes ring out.
+    [[nodiscard]] int activeVoices() const noexcept { return sampler.activeVoices() + synth.activeVoices(); }
+    [[nodiscard]] std::int64_t nextRelease() const noexcept
+    {
+        return std::min(sampler.nextRelease(), synth.nextRelease());
+    }
+    void release(std::int64_t upTo) noexcept
+    {
+        sampler.release(upTo);
+        synth.release(upTo);
+    }
+    void releaseHeld() noexcept
+    {
+        sampler.releaseHeld();
+        synth.releaseHeld();
+    }
+    void stopAll() noexcept
+    {
+        sampler.stopAll();
+        synth.stopAll();
+    }
 
     // ---- audio thread
     std::uint64_t renderedPass = 0; ///< avoids rendering it twice in one pass
@@ -38,8 +65,30 @@ public:
     StereoGain applied{}; ///< gain at the end of the last block: the next ramp starts there
 };
 
+/// A piano-roll note. Times are in ticks (kPpq per quarter note) from the
+/// start of its pattern.
+struct Note {
+    static constexpr int kMinKey = 0;
+    static constexpr int kMaxKey = 127;
+    static constexpr int kMiddleC = 60; ///< MIDI note 60 (C5 in FL Studio's naming)
+
+    std::int64_t start = 0; ///< from 0 to the pattern's length (excluded)
+    std::int64_t length = 0; ///< > 0; may reach past the pattern's end
+    int key = kMiddleC; ///< MIDI note number, kMinKey .. kMaxKey
+    float velocity = 100.0f / 128.0f; ///< 0 .. 1; scales the note's gain linearly
+};
+
+/// What a channel plays its steps and notes with.
+enum class Instrument : std::uint8_t {
+    Sampler, ///< its sample (Sampler)
+    Synth, ///< the built-in synth (Synth), with ChannelState::synth
+};
+
 /// One channel of the channel rack, as the audio thread sees it.
 struct ChannelState {
+    Instrument instrument = Instrument::Sampler;
+    /// Instrument::Synth: its sound. A step plays rootKey for one step.
+    SynthSettings synth;
     std::shared_ptr<const SampleBuffer> sample; ///< at the engine's sample rate (sample/SampleLoader)
     std::shared_ptr<ChannelVoices> voices; ///< required to sound; keep it across edits
     float gain = 1.0f; ///< channel volume, linear 0 .. 4; changes ramp over one block, ringing notes too
@@ -47,16 +96,24 @@ struct ChannelState {
     int insert = 0; ///< mixer insert it plays into, 1 .. kMaxInserts; 0 (or out of range) = the master
     bool muted = false; ///< no new notes; ringing ones finish
     std::vector<std::uint8_t> steps; ///< non-zero = the step plays; shorter than stepCount = off
+    /// Pattern mode's piano roll, any order. A note is held for its length,
+    /// then released; it plays the sample at its key relative to rootKey
+    /// (one semitone = a 2^(1/12) speed change). Steps play at rootKey.
+    /// Notes out of range (start, length, key) are skipped.
+    std::vector<Note> notes;
+    int rootKey = Note::kMiddleC; ///< the key the sample plays unchanged at
 };
 
-/// One pattern's steps for song mode: [channel][step], non-zero = plays.
-/// A channel missing here, or a step past the end of its row, is off.
+/// One pattern for song mode, [channel][...]. A channel missing here, or a
+/// step past the end of its row, is off.
 struct SongPattern {
-    std::vector<std::vector<std::uint8_t>> steps;
+    std::vector<std::vector<std::uint8_t>> steps; ///< non-zero = plays
+    std::vector<std::vector<Note>> notes; ///< like ChannelState::notes
 };
 
-/// A pattern placed in the playlist: plays its steps from `startStep` for
-/// `lengthSteps` steps (steps counted from the song start).
+/// A pattern placed in the playlist: plays its steps and notes from
+/// `startStep` for `lengthSteps` steps (steps counted from the song start).
+/// Notes starting inside the clip play for their whole length.
 struct SongPatternClip {
     int pattern = 0; ///< index into SequencerState::patterns
     std::int64_t startStep = 0;

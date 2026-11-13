@@ -37,12 +37,30 @@ public:
     /// mode: the pattern clips covering the step, and the audio clips that
     /// start on it.
     void triggerStep(std::int64_t step) noexcept;
-    /// Song mode: playback starts (or jumps) to `ticks`, between steps or on
-    /// one: the audio clips already under way there start part-way through,
-    /// `framesPerTick` converting the distance. Clips starting exactly at
-    /// `ticks` are left to triggerStep(). The channels of the audio clips
-    /// fade out what they were playing first.
+    /// Playback starts (or jumps) to `ticks`: held notes are released (their
+    /// ends belong to the old position). Song mode: the audio clips already
+    /// under way there start part-way through, `framesPerTick` converting
+    /// the distance; clips starting exactly at `ticks` are left to
+    /// triggerStep(). The channels of the audio clips fade out what they
+    /// were playing first.
     void resumeAt(double ticks, double framesPerTick) noexcept;
+
+    static constexpr std::int64_t kNoEvent = INT64_MAX;
+    /// The first tick at or after `from` (counted from the song start, like
+    /// steps) where a note starts; kNoEvent if none.
+    [[nodiscard]] std::int64_t nextNoteStart(std::int64_t from) const noexcept;
+    /// Starts the notes starting at `tick`. Each is held until endNotes()
+    /// reaches its end.
+    void startNotes(std::int64_t tick) noexcept;
+    /// The earliest tick a sounding note ends at; kNoEvent if none.
+    [[nodiscard]] std::int64_t nextNoteEnd() const noexcept;
+    /// Releases the notes ending at or before `upTo`.
+    void endNotes(std::int64_t upTo) noexcept;
+    /// Speed factor of everything but audio clips (the master pitch), live;
+    /// 1 = none.
+    void setPitch(double ratio) noexcept { pitch_ = ratio; }
+    /// The output rate, for the synth. Call while audio is stopped.
+    void setSampleRate(double sampleRate) noexcept { sampleRate_ = sampleRate; }
     /// Renders every channel's voices into its own buffer at
     /// [startFrame, startFrame + numFrames), including channels already
     /// removed whose notes are still fading.
@@ -67,6 +85,17 @@ private:
     const SequencerState* current_ = nullptr; ///< audio thread
     std::uint64_t pass_ = 0; ///< audio thread: render() calls so far
     std::uint64_t block_ = 0; ///< audio thread: mix() calls so far
+    double pitch_ = 1.0; ///< audio thread
+    double sampleRate_ = 48000.0;
+    /// Plays one step of `channel` (absolute `step`): its sample, or on a
+    /// synth its root key for one step.
+    void playStep(const ChannelState& channel, std::int64_t step) const noexcept;
+    /// Calls `visit(channel, note, absoluteStart)` for every playable note of
+    /// the current state that starts at or after `from`: in pattern mode the
+    /// next occurrence of each note, in song mode each note of each clip.
+    template <typename Visit> void forEachNote(std::int64_t from, Visit&& visit) const noexcept;
+    /// Starts `note` on `channel`, ending at `end` ticks.
+    void playNote(const ChannelState& channel, const Note& note, std::int64_t end) const noexcept;
     /// The audio clip's channel, if it can sound.
     [[nodiscard]] const ChannelState* clipChannel(const SongAudioClip& clip) const noexcept;
 };

@@ -11,6 +11,7 @@
 #include "vloom/engine/core/Version.hpp"
 #include "vloom/engine/dsp/Metronome.hpp"
 #include "vloom/engine/dsp/Sampler.hpp"
+#include "vloom/engine/dsp/Synth.hpp"
 #include "vloom/engine/io/AudioDevice.hpp"
 #include "vloom/engine/mixer/MixerState.hpp"
 #include "vloom/engine/render/OfflineRenderer.hpp"

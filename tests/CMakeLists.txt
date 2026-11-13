@@ -13,12 +13,14 @@ add_executable(vloom_engine_tests
     core/SnapshotExchangeTests.cpp
     core/SpscQueueTests.cpp
     dsp/SamplerTests.cpp
+    dsp/SynthTests.cpp
     io/AudioDeviceTests.cpp
     mixer/MixerTests.cpp
     render/WavWriterTests.cpp
     sample/ResamplerTests.cpp
     sample/SampleLoaderTests.cpp
     sample/WavReaderTests.cpp
+    sequencer/NoteTests.cpp
     sequencer/SongModeTests.cpp
     sequencer/StepSequencerTests.cpp
     time/MusicalTimeTests.cpp
