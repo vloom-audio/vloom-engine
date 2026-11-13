@@ -98,17 +98,21 @@ SongExportResult exportSong(const std::string& path, const SequencerState& song,
         return fail("There is nothing to export");
     if (end > StepSequencer::kMaxTicks)
         return fail("The range to export is too long");
-    // Refused before rendering: a song too long for a WAV file (4 GiB) would
-    // otherwise only fail once the writer is full.
     const double framesPerTick = sampleRate * 60.0 / (tempo * static_cast<double>(kPpq));
     const double body = std::ceil(static_cast<double>(end - start) * framesPerTick);
-    const double wavFrames = 4294967295.0 / (options.channels * wavBytesPerSample(options.format));
-    if (!(body < wavFrames))
-        return fail("The song is too long for a WAV file (4 GiB)");
-    const auto bodyFrames = static_cast<std::int64_t>(body);
     const double tailSeconds
         = std::isfinite(options.maxTailSeconds) ? std::clamp(options.maxTailSeconds, 0.0, 600.0) : 0.0;
-    const auto tailFrames = static_cast<std::int64_t>(tailSeconds * sampleRate);
+    const double tail = std::floor(tailSeconds * sampleRate);
+    // Refused before rendering: a song that could not fit a WAV file (4 GiB,
+    // header included), even with its whole possible tail, would otherwise
+    // only fail once the writer is full, after a long render.
+    constexpr double kHeaderBytes = 64.0; // more than either layout's header
+    const double wavFrames
+        = (4294967295.0 - kHeaderBytes) / (options.channels * wavBytesPerSample(options.format));
+    if (!(body + tail < wavFrames))
+        return fail("The song is too long for a WAV file (4 GiB)");
+    const auto bodyFrames = static_cast<std::int64_t>(body);
+    const auto tailFrames = static_cast<std::int64_t>(tail);
     const auto silentEnough = static_cast<std::int64_t>(0.05 * sampleRate);
     const float threshold
         = std::isfinite(options.silenceThreshold) ? std::max(options.silenceThreshold, 0.0f) : 0.0f;

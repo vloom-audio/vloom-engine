@@ -222,6 +222,20 @@ TEST_CASE("Export refuses what it cannot render right", "[export]")
         CHECK_FALSE(result.error.empty());
         CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(2));
     }
+
+    // The possible tail counts too: a song that fits a 16-bit mono file only
+    // without its tail is refused up front (review finding).
+    options = {};
+    options.format = vloom::WavFormat::Pcm16;
+    options.channels = 1;
+    options.maxTailSeconds = 600.0;
+    const double fitFrames = (4294967295.0 - 64.0) / 2.0; // mono 16-bit
+    const double ticksPerFrame = 120.0 / 60.0 * vloom::kPpq / kRate;
+    options.endTicks = static_cast<std::int64_t>((fitFrames - 600.0 * kRate / 2.0) * ticksPerFrame);
+    const auto started = std::chrono::steady_clock::now();
+    result = vloom::exportSong(folder.file("e.wav"), fine, nullptr, kRate, options);
+    CHECK_FALSE(result.ok);
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(2));
 }
 
 TEST_CASE("Export uses voices of its own", "[export]")
