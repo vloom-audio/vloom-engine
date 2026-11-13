@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Vloom Audio contributors
 #include "vloom/engine/dsp/Metronome.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <numbers>
 
@@ -15,7 +16,7 @@ constexpr double kNormalHz = 1000.0;
 
 void Metronome::prepare(double sampleRate) noexcept
 {
-    sampleRate_ = sampleRate > 0.0 ? sampleRate : 48000.0;
+    sampleRate_ = std::isfinite(sampleRate) && sampleRate > 0.0 ? std::min(sampleRate, 768000.0) : 48000.0;
     length_ = static_cast<int>(kClickSeconds * sampleRate_);
     // Decay to about -60 dB (x0.001) over the click length.
     decay_ = static_cast<float>(std::pow(0.001, 1.0 / static_cast<double>(length_)));

@@ -3,16 +3,18 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![C++ Standard](https://img.shields.io/badge/C%2B%2B-20-brightgreen.svg)](#requirements)
 [![Platforms](https://img.shields.io/badge/Platforms-macOS%20|%20Linux%20|%20Windows-lightgrey.svg)](#quick-start)
-[![Status: M1](https://img.shields.io/badge/Status-M1%20(Channel%20Rack)-orange.svg)](#roadmap)
+[![Status: M2](https://img.shields.io/badge/Status-M2%20(Notes%20%26%20Synth)-orange.svg)](#roadmap)
 
 The real-time audio engine behind [VloomDAW](https://github.com/vloom-audio/VloomDAW).
 A plain **C++20** library with no UI dependency, so it can be tested headless and
 reused by other Vloom Audio tools.
 
-> **Current milestone: M1 — channel rack.** Plays WAV samples from a step
-> sequencer, sample-accurately alongside the metronome, and mixes each channel
-> into one of up to 125 insert buses. Outputs through each OS's own audio API,
-> renders offline to WAV, and ships the `vloom-cli` developer tool.
+> **Milestones M1–M2 done: channel rack, notes and a built-in synth.** Plays
+> WAV samples and piano-roll notes (pitched sampler or the built-in synth)
+> from a step sequencer or a playlist, sample-accurately alongside the
+> metronome, and mixes each channel into one of up to 125 insert buses.
+> Outputs through each OS's own audio API, renders offline to WAV, and ships
+> the `vloom-cli` developer tool. Next: M3, arrangement and WAV export.
 
 ---
 
@@ -41,6 +43,11 @@ reused by other Vloom Audio tools.
 - **Mixer routing (M1)**: each channel plays into an insert bus (or straight
   into the master) with its own volume and pan; inserts have volume, pan and a
   peak meter. Level changes ramp over one block, so they do not click.
+- **Notes and synth (M2)**: piano-roll notes held for their length, a pitched
+  sampler (4-point Hermite) and a polyphonic subtractive synth (polyBLEP
+  oscillators, ADSR, resonant low-pass); master pitch ±1200 cents.
+- **Song mode and preview (M1.5)**: the playlist plays pattern and audio
+  clips; a separate voice previews samples from a browser.
 
 ---
 
@@ -108,7 +115,7 @@ vloom-engine/
 ├── include/vloom/engine/     # Public API (what VloomDAW may include)
 │   ├── Engine.hpp            # The engine: process(), play / stop / tempo control
 │   ├── core/                 # SpscQueue, SnapshotExchange, version info
-│   ├── dsp/                  # Sound generators and processors (Metronome, Sampler)
+│   ├── dsp/                  # Sound generators and processors (Metronome, Sampler, Synth)
 │   ├── io/                   # Hardware audio devices (WASAPI, CoreAudio, ALSA)
 │   ├── mixer/                # Insert settings and the pan law
 │   ├── render/               # Offline rendering, WAV writer
@@ -125,7 +132,7 @@ vloom-engine/
 │   ├── architecture.md       # Modules, threads, control flow, time
 │   ├── coding-guidelines.md  # C++ conventions and real-time rules
 │   └── getting-started.md    # Machine setup (macOS, Linux, Windows)
-└── scripts/                  # Developer scripts (format.sh)
+└── scripts/                  # Developer scripts (format.sh, check_commit_messages.sh)
 ```
 
 ---
@@ -136,9 +143,9 @@ vloom-engine/
 |:---:|---|:---:|
 | **M0** | Audio device output, transport, metronome, offline WAV render, CLI | *Done* |
 | **M1** | Step sequencer and sample playback (drum channel rack); mixer routing to inserts | *Done* |
-| **M1.5** | Sample preview voice | *Next* |
-| **M2** | MIDI notes, pitched sampler, first built-in synth, master pitch | *Planned* |
-| **M3** | Arrangement (patterns on a timeline), song mode, WAV export | *Planned* |
+| **M1.5** | Sample preview voice | *Done* |
+| **M2** | MIDI notes, pitched sampler, first built-in synth, master pitch | *Done* |
+| **M3** | Arrangement (patterns on a timeline), song mode, WAV export | *Next* |
 | **M4** | Plugin host interface, CLAP hosting | *Planned* |
 | **M5** | VST3 hosting, built-in effects, sends, delay compensation | *Planned* |
 | **M6** | Audio input and recording, MIDI input | *Planned* |

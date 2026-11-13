@@ -10,6 +10,7 @@ CPMAddPackage(
 add_executable(vloom_engine_tests
     EngineTests.cpp
     PreviewTests.cpp
+    RobustnessTests.cpp
     core/SnapshotExchangeTests.cpp
     core/SpscQueueTests.cpp
     dsp/SamplerTests.cpp

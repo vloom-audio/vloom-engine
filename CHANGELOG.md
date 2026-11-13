@@ -12,6 +12,74 @@ and the project uses [Semantic Versioning](https://semver.org/).
   pinned SHA-256 (a cached copy that does not match is fetched again), and Catch2 is
   pinned to the commit of its v3.7.1 tag.
 
+### Fixed (engine audit)
+- A tempo change while playing could fire a beat, step or note start twice,
+  or skip it: the scheduler now carries each stream's next event over between
+  blocks instead of working it out afresh from the position.
+- Asking for the same preview sample again and again (17 times) left old
+  preview states undrained, after which previews could no longer be changed
+  or stopped. A preview asked for in the same block as Stop now plays.
+- macOS: after the output device was lost, `stop()` left the audio unit
+  running and `start()` reported success while playing silence; `start()`
+  now fails until the device is reopened. Property listeners are block-based
+  on a private queue that is drained on removal, so no notification can run
+  into a destroyed backend or watcher.
+- Voice stealing cut a voice outright when more notes than fade slots
+  started at once; the quietest fading voice is now replaced, and there are
+  8 fade slots instead of 4 (Sampler and Synth).
+- Integer overflow from out-of-range clip positions and note lengths: clips
+  reaching past `StepSequencer::kMaxTicks` are ignored, notes are held at
+  most that long.
+- `Engine::prepare()` clamps the sample rate to 8–768 kHz (non-finite:
+  48 kHz); the synth's to 1–768 kHz, keeping its filter range valid.
+- `renderInterleaved()` / `renderToWav()` render nothing for a negative or
+  non-finite length; `renderToWav()` refuses a render too long for WAV
+  before rendering and streams it block by block. The WAV header's byte rate
+  is checked for overflow.
+- `loadSample()` no longer throws (invalid UTF-8 paths, out of memory), and
+  refuses to grow a file more than 16 times (or past 64 MB) by resampling a
+  very low-rate file up to the engine's rate.
+- An exception from an `AudioDevice` callback silences that block instead of
+  ending the program.
+- `Engine::prepare()` no longer throws away commands queued while the device
+  was gone (a Stop or Locate pressed meanwhile now counts), and silences every
+  voice: after a sample-rate change, notes no longer go on reading samples
+  made for the old rate (out of tune). `sampleRate()` and `beatsPerBar()` are
+  atomic, as "any thread" getters must be.
+- Playing from less than a frame past an audio clip's start no longer starts
+  it twice (+6 dB).
+- macOS: the device "alive" listener shares only the flags it sets, not the
+  backend, and `start()` no longer reports running on a device lost while it
+  started.
+- Voice stealing weighs a fading voice's gain (velocity), not only how far
+  its fade has gone.
+- `WavFileWriter` uses a temporary name of its own (no clash between two
+  writers or with a user's file) and checks up front that an existing target
+  can be replaced. `renderInterleaved()` caps block size, channels and the
+  buffer it holds instead of throwing.
+- `toBarBeatTick()` and `Metronome::prepare()` handle NaN and infinite input
+  without undefined behaviour.
+- `vloom-cli` validates its numbers (`--rate`, `--seconds`, `--bpm`,
+  `--device`, `--buffer`): a rate outside 8–768 kHz used to load samples for
+  one rate and play them at another.
+
+### Security / CI
+- CI's token is read-only (`permissions: contents: read`) and checkouts do
+  not keep it (`persist-credentials: false`).
+- The `asan` preset stops on undefined behaviour (`-fno-sanitize-recover=all`)
+  instead of printing it and passing; `VLOOM_SANITIZER` with MSVC warns that
+  it is ignored.
+- The test allocation counter also counts aligned `operator new`, so
+  `alignas` types cannot allocate on the audio thread unnoticed.
+
+### Changed
+- `Engine::setSequencerState()` and `StepSequencer::publish()` take a
+  `std::unique_ptr<SequencerState>`: notes are sorted by start on the control
+  thread so the audio thread finds the next one by binary search (notes may
+  still be given in any order).
+- WAV files are written to `<path>.part` and renamed into place when complete
+  (`WavFileWriter`), so a failed write never leaves a broken file.
+
 ### Added
 - Piano-roll notes (M2): `Note` (start, length in ticks, MIDI key, velocity)
   in `ChannelState::notes` (pattern mode, looping with the pattern) and

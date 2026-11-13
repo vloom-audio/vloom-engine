@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Vloom Audio contributors
 //
-// Replaces the global (unaligned) operator new / delete for the test binary
-// so tests can count allocations. Aligned new keeps the library version.
+// Replaces the global operator new / delete for the test binary, aligned
+// forms included (alignas(64) types such as SpscQueue use them), so tests
+// can count allocations, nothrow forms included.
 #include "support/Allocations.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdlib>
 #include <new>
+#if defined(_WIN32)
+#include <malloc.h>
+#endif
 
 #if defined(__has_feature)
 #if __has_feature(address_sanitizer)
@@ -34,6 +39,31 @@ thread_local long long allocations = 0;
         return p;
     throw std::bad_alloc();
 }
+
+[[maybe_unused]] void* allocateAligned(std::size_t size, std::align_val_t alignment)
+{
+    ++allocations;
+    const auto align = static_cast<std::size_t>(alignment);
+    // aligned_alloc wants a size that is a multiple of the alignment.
+    const std::size_t rounded = (std::max<std::size_t>(size, 1) + align - 1) / align * align;
+#if defined(_WIN32)
+    void* p = _aligned_malloc(rounded, align);
+#else
+    void* p = std::aligned_alloc(align, rounded);
+#endif
+    if (p != nullptr)
+        return p;
+    throw std::bad_alloc();
+}
+
+[[maybe_unused]] void freeAligned(void* p) noexcept
+{
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
 } // namespace
 
 long long vloom::test::allocationsOnThisThread() noexcept { return allocations; }
@@ -46,4 +76,52 @@ void operator delete(void* p) noexcept { std::free(p); }
 void operator delete[](void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+void* operator new(std::size_t size, std::align_val_t alignment) { return allocateAligned(size, alignment); }
+void* operator new[](std::size_t size, std::align_val_t alignment)
+{
+    return allocateAligned(size, alignment);
+}
+void operator delete(void* p, std::align_val_t) noexcept { freeAligned(p); }
+void operator delete[](void* p, std::align_val_t) noexcept { freeAligned(p); }
+void operator delete(void* p, std::size_t, std::align_val_t) noexcept { freeAligned(p); }
+void operator delete[](void* p, std::size_t, std::align_val_t) noexcept { freeAligned(p); }
+// The nothrow forms too: the standard library calls them directly (e.g.
+// std::stable_sort's buffer) and frees with the plain forms above, so they
+// must come from the same allocator (AddressSanitizer checks that).
+void* operator new(std::size_t size, const std::nothrow_t&) noexcept
+{
+    try {
+        return allocate(size);
+    } catch (...) {
+        return nullptr;
+    }
+}
+void* operator new[](std::size_t size, const std::nothrow_t&) noexcept
+{
+    try {
+        return allocate(size);
+    } catch (...) {
+        return nullptr;
+    }
+}
+void operator delete(void* p, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete[](void* p, const std::nothrow_t&) noexcept { std::free(p); }
+void* operator new(std::size_t size, std::align_val_t alignment, const std::nothrow_t&) noexcept
+{
+    try {
+        return allocateAligned(size, alignment);
+    } catch (...) {
+        return nullptr;
+    }
+}
+void* operator new[](std::size_t size, std::align_val_t alignment, const std::nothrow_t&) noexcept
+{
+    try {
+        return allocateAligned(size, alignment);
+    } catch (...) {
+        return nullptr;
+    }
+}
+void operator delete(void* p, std::align_val_t, const std::nothrow_t&) noexcept { freeAligned(p); }
+void operator delete[](void* p, std::align_val_t, const std::nothrow_t&) noexcept { freeAligned(p); }
 #endif

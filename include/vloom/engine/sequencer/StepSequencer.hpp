@@ -21,8 +21,13 @@ namespace vloom {
 class StepSequencer {
 public:
     // ---- control thread
-    void publish(std::unique_ptr<const SequencerState> state) { exchange_.publish(std::move(state)); }
+    /// Sorts the notes by start (the audio thread searches them), then hands
+    /// the state over.
+    void publish(std::unique_ptr<SequencerState> state);
     std::size_t collect() { return exchange_.collect(); }
+    /// Silences every voice of the current and draining states at once.
+    /// Only while the audio thread is stopped (Engine::prepare()).
+    void resetVoices() noexcept;
 
     // ---- audio thread
     /// Picks up a newly published state. Call at the start of every block.
@@ -46,6 +51,9 @@ public:
     void resumeAt(double ticks, double framesPerTick) noexcept;
 
     static constexpr std::int64_t kNoEvent = INT64_MAX;
+    /// The furthest tick anything plays at (Transport::kMaxTicks): clips
+    /// reaching further are ignored, notes are held at most this long.
+    static constexpr std::int64_t kMaxTicks = 100'000'000'000;
     /// The first tick at or after `from` (counted from the song start, like
     /// steps) where a note starts; kNoEvent if none.
     [[nodiscard]] std::int64_t nextNoteStart(std::int64_t from) const noexcept;
@@ -90,10 +98,9 @@ private:
     /// Plays one step of `channel` (absolute `step`): its sample, or on a
     /// synth its root key for one step.
     void playStep(const ChannelState& channel, std::int64_t step) const noexcept;
-    /// Calls `visit(channel, note, absoluteStart)` for every playable note of
-    /// the current state that starts at or after `from`: in pattern mode the
-    /// next occurrence of each note, in song mode each note of each clip.
-    template <typename Visit> void forEachNote(std::int64_t from, Visit&& visit) const noexcept;
+    /// A clip of the current state whose ticks all stay within kMaxTicks
+    /// (ticksPerStep > 0 required). Others are ignored.
+    [[nodiscard]] bool clipInRange(std::int64_t startStep, std::int64_t lengthSteps) const noexcept;
     /// Starts `note` on `channel`, ending at `end` ticks.
     void playNote(const ChannelState& channel, const Note& note, std::int64_t end) const noexcept;
     /// The audio clip's channel, if it can sound.

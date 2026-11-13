@@ -17,7 +17,7 @@ namespace {
 
 /// Builds the channel rack from --channel options, loading every sample at
 /// `sampleRate`. Null (with a message printed) on bad input.
-std::unique_ptr<const SequencerState> buildRack(const Args& args, double sampleRate)
+std::unique_ptr<SequencerState> buildRack(const Args& args, double sampleRate)
 {
     auto state = std::make_unique<SequencerState>();
     int longest = 0;
@@ -133,7 +133,8 @@ int render(const Args& args)
 
     Engine engine;
     engine.prepare(args.rate, 512);
-    if (!setUp(engine, args, args.rate))
+    // Samples are resampled to the rate the engine really runs at.
+    if (!setUp(engine, args, engine.sampleRate()))
         return 1;
     engine.play();
 

@@ -43,7 +43,7 @@ vloom::ChannelState channel(std::shared_ptr<const vloom::SampleBuffer> sample,
     return c;
 }
 
-std::unique_ptr<const vloom::SequencerState> rack(std::vector<vloom::ChannelState> channels)
+std::unique_ptr<vloom::SequencerState> rack(std::vector<vloom::ChannelState> channels)
 {
     auto state = std::make_unique<vloom::SequencerState>();
     state->channels = std::move(channels);

@@ -4,6 +4,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstdint>
 #include <new>
 
 // The "does not allocate" tests are only worth something if the counter sees
@@ -27,4 +28,20 @@ TEST_CASE("The allocation counter sees operator new and new[]", "[support]")
     ::operator delete(one);
     ::operator delete[](many);
     CHECK(counter.count() == 2); // freeing is not counted
+}
+
+TEST_CASE("The allocation counter sees aligned operator new too", "[support]")
+{
+    // Audit finding: alignas(64) types (SpscQueue) went through the library's
+    // aligned new, which the counter did not replace.
+    if (!vloom::test::allocationCountingEnabled())
+        SKIP("operator new is not replaceable in this build (AddressSanitizer on Windows)");
+    const vloom::test::AllocationCounter counter;
+    void* one = ::operator new(10, std::align_val_t{64});
+    CHECK(reinterpret_cast<std::uintptr_t>(one) % 64 == 0);
+    void* many = ::operator new[](100, std::align_val_t{128});
+    CHECK(reinterpret_cast<std::uintptr_t>(many) % 128 == 0);
+    CHECK(counter.count() == 2);
+    ::operator delete(one, std::align_val_t{64});
+    ::operator delete[](many, std::align_val_t{128});
 }

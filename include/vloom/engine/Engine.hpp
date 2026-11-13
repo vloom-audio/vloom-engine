@@ -33,6 +33,17 @@ public:
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
 
+    static constexpr double kMinSampleRate = 8000.0;
+    static constexpr double kMaxSampleRate = 768000.0;
+
+    /// `sampleRate` is clamped to kMinSampleRate .. kMaxSampleRate; a
+    /// non-finite one means 48 kHz. Silences every voice (the preview too):
+    /// samples loaded for another rate must be replaced by the host, with a
+    /// new setSequencerState(). Commands queued meanwhile are applied.
+    ///
+    /// ChannelVoices belong to one Engine: an offline render (export) while
+    /// the device plays needs its own Engine and its own ChannelVoices. Keep
+    /// the Engine alive as long as any ChannelVoices it played.
     void prepare(double sampleRate, int maxBlockSize);
 
     /// Renders numFrames of non-interleaved audio into `out`. Blocks longer
@@ -63,7 +74,7 @@ public:
     /// Replaces the channel rack (channels, samples, steps) the audio thread
     /// plays, from the next block on. Ringing notes are not cut: keep each
     /// channel's ChannelVoices across states (docs/adr/0005).
-    void setSequencerState(std::unique_ptr<const SequencerState> state);
+    void setSequencerState(std::unique_ptr<SequencerState> state);
     /// Frees states the audio thread has finished with. Call it regularly
     /// from the control thread (a UI timer); setSequencerState() does too.
     void collectGarbage();
@@ -86,8 +97,14 @@ public:
     }
     [[nodiscard]] double positionTicks() const noexcept { return position_.load(std::memory_order_relaxed); }
     [[nodiscard]] double tempo() const noexcept { return tempo_.load(std::memory_order_relaxed); }
-    [[nodiscard]] double sampleRate() const noexcept { return transport_.sampleRate(); }
-    [[nodiscard]] int beatsPerBar() const noexcept { return transport_.beatsPerBar(); }
+    [[nodiscard]] double sampleRate() const noexcept
+    {
+        return sampleRateStatus_.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] int beatsPerBar() const noexcept
+    {
+        return beatsPerBarStatus_.load(std::memory_order_relaxed);
+    }
     /// Smoothed share of each block's real-time budget that process() used:
     /// 0 = idle, 1 = the whole block (audio starts to drop out above that).
     [[nodiscard]] float cpuLoad() const noexcept { return cpuLoad_.load(std::memory_order_relaxed); }
@@ -155,6 +172,11 @@ private:
     bool stopVoices_ = false; ///< audio thread: a Stop command arrived this block
     bool wasRolling_ = false; ///< audio thread: the transport played in the last block
     double expectedTicks_ = 0.0; ///< audio thread: where the last block left the position
+    // audio thread: the next event of each stream, carried over between blocks
+    std::int64_t nextBeat_ = 0;
+    std::int64_t nextStep_ = 0;
+    int stepTicksUsed_ = 0; ///< the ticks per step nextStep_ counts in
+    std::int64_t noteFrom_ = 0; ///< note starts before this tick are done
     bool metronomeEnabled_ = true;
     float masterGainTarget_ = 1.0f; ///< audio thread: latest requested gain
     float masterPanTarget_ = 0.0f; ///< audio thread: latest requested balance
@@ -166,6 +188,8 @@ private:
     std::atomic<bool> previewPlaying_{false};
     std::atomic<double> position_{0.0};
     std::atomic<double> tempo_{120.0};
+    std::atomic<double> sampleRateStatus_{48000.0};
+    std::atomic<int> beatsPerBarStatus_{4};
     std::atomic<float> cpuLoad_{0.0f};
     std::array<std::atomic<float>, 2> outputPeak_{}; ///< left, right; see takeOutputPeak()
 };

@@ -42,7 +42,14 @@ struct AudioDevice::Impl {
         int done = 0;
         while (done < numFrames) {
             const int block = std::min(numFrames - done, kMaxBlockFrames);
-            self->callback(self->channelPtrs.data(), channels, block);
+            try {
+                self->callback(self->channelPtrs.data(), channels, block);
+            } catch (...) {
+                // An exception must not unwind into the OS's audio thread (or
+                // end the program from it): this block is silent instead.
+                for (int ch = 0; ch < channels; ++ch)
+                    std::fill_n(self->channelPtrs[static_cast<std::size_t>(ch)], block, 0.0f);
+            }
             float* dst = interleaved + static_cast<std::size_t>(done) * static_cast<std::size_t>(numChannels);
             for (int i = 0; i < block; ++i) {
                 for (int ch = 0; ch < channels; ++ch)

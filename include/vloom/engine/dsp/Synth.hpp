@@ -51,7 +51,8 @@ public:
     explicit Synth(int maxVoices = kDefaultVoices);
 
     [[nodiscard]] int maxVoices() const noexcept { return maxVoices_; }
-    /// The output rate (default 48 kHz). Sounding voices keep their pitch.
+    /// The output rate (default 48 kHz), clamped to 1 kHz .. 768 kHz.
+    /// Sounding voices keep their pitch.
     void setSampleRate(double sampleRate) noexcept;
     /// Silences every voice at once.
     void reset() noexcept;
@@ -101,7 +102,7 @@ private:
         std::uint64_t age = 0;
     };
 
-    static constexpr int kFadeSlots = 4;
+    static constexpr int kFadeSlots = 8;
 
     int maxVoices_;
     double sampleRate_ = 48000.0;

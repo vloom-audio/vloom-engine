@@ -9,11 +9,15 @@
 #if defined(__APPLE__)
 
 #include <AudioToolbox/AudioToolbox.h>
+#include <Block.h>
 #include <CoreAudio/CoreAudio.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <dispatch/dispatch.h>
+#include <functional>
+#include <memory>
 #include <string>
 
 namespace vloom::io {
@@ -71,37 +75,75 @@ int outputChannels(AudioDeviceID device)
     return channels;
 }
 
-/// Listens to the system object for the device list and the default output.
-/// CoreAudio calls the listener on its own notification thread.
-class CoreAudioDeviceListSubscription final : public DeviceListSubscription {
+/// A CoreAudio property listener that can be removed safely. The function-
+/// pointer listener API does not wait for a call already running on the HAL
+/// notification thread, so removing it while the object goes away could call
+/// into freed memory. Here the listener is a block on a private serial queue:
+/// remove() takes it off, then drains the queue, so once it returns no call
+/// is running or will start. Never call remove() (or destroy the listener)
+/// from inside its own callback: draining would wait for itself.
+class PropertyListener {
 public:
-    explicit CoreAudioDeviceListSubscription(std::function<void()> onChange)
-        : onChange_(std::move(onChange))
+    PropertyListener() = default;
+    PropertyListener(const PropertyListener&) = delete;
+    PropertyListener& operator=(const PropertyListener&) = delete;
+    ~PropertyListener() { remove(); }
+
+    /// Calls `onChange` (on the private queue) whenever `where` of `object` changes.
+    bool add(AudioObjectID object, const AudioObjectPropertyAddress& where, std::function<void()> onChange)
     {
-        for (const AudioObjectPropertyAddress& where : kWatched)
-            AudioObjectAddPropertyListener(kAudioObjectSystemObject, &where, &changed, this);
+        remove();
+        queue_ = dispatch_queue_create("audio.vloom.property-listener", DISPATCH_QUEUE_SERIAL);
+        if (queue_ == nullptr)
+            return false;
+        const std::function<void()> call = std::move(onChange);
+        block_ = Block_copy(^(UInt32, const AudioObjectPropertyAddress*) { call(); });
+        object_ = object;
+        where_ = where;
+        added_ = AudioObjectAddPropertyListenerBlock(object_, &where_, queue_, block_) == noErr;
+        if (!added_)
+            remove();
+        return added_;
     }
-    ~CoreAudioDeviceListSubscription() override
+
+    void remove() noexcept
     {
-        for (const AudioObjectPropertyAddress& where : kWatched)
-            AudioObjectRemovePropertyListener(kAudioObjectSystemObject, &where, &changed, this);
+        if (added_) {
+            AudioObjectRemovePropertyListenerBlock(object_, &where_, queue_, block_);
+            dispatch_sync(queue_, ^{}); // a call already under way finishes first
+            added_ = false;
+        }
+        if (block_ != nullptr) {
+            Block_release(block_);
+            block_ = nullptr;
+        }
+        if (queue_ != nullptr) {
+            dispatch_release(queue_);
+            queue_ = nullptr;
+        }
     }
 
 private:
-    static constexpr AudioObjectPropertyAddress kWatched[] = {
-        {kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
-        {kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal,
-            kAudioObjectPropertyElementMain},
-    };
+    AudioObjectID object_ = kAudioObjectUnknown;
+    AudioObjectPropertyAddress where_{};
+    dispatch_queue_t queue_ = nullptr;
+    AudioObjectPropertyListenerBlock block_ = nullptr;
+    bool added_ = false;
+};
 
-    static OSStatus changed(AudioObjectID /*object*/, UInt32 /*count*/,
-        const AudioObjectPropertyAddress* /*addresses*/, void* self)
+/// Listens to the system object for the device list and the default output.
+class CoreAudioDeviceListSubscription final : public DeviceListSubscription {
+public:
+    explicit CoreAudioDeviceListSubscription(const std::function<void()>& onChange)
     {
-        static_cast<CoreAudioDeviceListSubscription*>(self)->onChange_();
-        return noErr;
+        devices_.add(kAudioObjectSystemObject, address(kAudioHardwarePropertyDevices), onChange);
+        defaultOutput_.add(
+            kAudioObjectSystemObject, address(kAudioHardwarePropertyDefaultOutputDevice), onChange);
     }
 
-    std::function<void()> onChange_;
+private:
+    PropertyListener devices_;
+    PropertyListener defaultOutput_;
 };
 
 class CoreAudioBackend final : public AudioBackend {
@@ -110,7 +152,7 @@ public:
 
     std::unique_ptr<DeviceListSubscription> watchDeviceList(std::function<void()> onChange) override
     {
-        return std::make_unique<CoreAudioDeviceListSubscription>(std::move(onChange));
+        return std::make_unique<CoreAudioDeviceListSubscription>(onChange);
     }
 
     std::vector<BackendDeviceInfo> listOutputDevices() override
@@ -216,10 +258,12 @@ public:
         }
 
         // Unplugged devices report "not alive": then isRunning() turns false.
-        lost_.store(false);
+        live_->lost.store(false);
         device_ = device;
-        const auto alive = address(kAudioDevicePropertyDeviceIsAlive);
-        AudioObjectAddPropertyListener(device_, &alive, &CoreAudioBackend::aliveChanged, this);
+        // The listener shares only the flags, never `this`: a notification
+        // the HAL hands to the queue late cannot reach a destroyed backend.
+        aliveListener_.add(device, address(kAudioDevicePropertyDeviceIsAlive),
+            [live = live_, device] { checkAlive(*live, device); });
 
         info.sampleRate = static_cast<int>(sampleRate);
         info.channels = channels;
@@ -233,29 +277,43 @@ public:
             error = "Audio device is not open";
             return false;
         }
-        if (AudioOutputUnitStart(unit_) != noErr) {
-            error = "Could not start the audio device";
+        if (live_->lost.load()) {
+            // Like WASAPI and ALSA: a lost device stays lost until reopened.
+            error = "The audio device was disconnected";
             return false;
         }
-        running_.store(true);
+        if (!unitStarted_) {
+            if (AudioOutputUnitStart(unit_) != noErr) {
+                error = "Could not start the audio device";
+                return false;
+            }
+            unitStarted_ = true;
+        }
+        live_->running.store(true);
+        if (live_->lost.load()) { // lost between the check above and now
+            live_->running.store(false);
+            error = "The audio device was disconnected";
+            return false;
+        }
         return true;
     }
 
     void stop() noexcept override
     {
         // AudioOutputUnitStop waits for a running render callback to return.
-        if (unit_ != nullptr && running_.load())
+        // Whether the unit runs is tracked apart from `running`, which the
+        // "alive" listener clears when the device is lost: the unit must
+        // still be stopped then.
+        if (unit_ != nullptr && unitStarted_)
             AudioOutputUnitStop(unit_);
-        running_.store(false);
+        unitStarted_ = false;
+        live_->running.store(false);
     }
 
     void close() noexcept override
     {
-        if (device_ != kAudioObjectUnknown) {
-            const auto alive = address(kAudioDevicePropertyDeviceIsAlive);
-            AudioObjectRemovePropertyListener(device_, &alive, &CoreAudioBackend::aliveChanged, this);
-            device_ = kAudioObjectUnknown;
-        }
+        aliveListener_.remove(); // no listener call runs after this
+        device_ = kAudioObjectUnknown;
         stop();
         if (unit_ != nullptr) {
             AudioUnitUninitialize(unit_);
@@ -264,7 +322,7 @@ public:
         }
     }
 
-    [[nodiscard]] bool isRunning() const noexcept override { return running_.load(); }
+    [[nodiscard]] bool isRunning() const noexcept override { return live_->running.load(); }
 
 private:
     // CoreAudio's real-time I/O thread.
@@ -274,7 +332,7 @@ private:
         auto* backend = static_cast<CoreAudioBackend*>(self);
         if (buffers == nullptr || buffers->mNumberBuffers < 1 || buffers->mBuffers[0].mData == nullptr)
             return noErr;
-        if (backend->lost_.load(std::memory_order_relaxed)) {
+        if (backend->live_->lost.load(std::memory_order_relaxed)) {
             // The device is gone and the unit may have moved to another
             // output on its own: stay silent until the host reopens one.
             std::memset(buffers->mBuffers[0].mData, 0, buffers->mBuffers[0].mDataByteSize);
@@ -285,29 +343,34 @@ private:
         return noErr;
     }
 
-    // CoreAudio's notification thread.
-    static OSStatus aliveChanged(
-        AudioObjectID device, UInt32 /*count*/, const AudioObjectPropertyAddress* /*addresses*/, void* self)
+    // The "alive" listener's queue.
+    /// What the "alive" listener and the backend share.
+    struct LiveState {
+        std::atomic<bool> lost{false};
+        std::atomic<bool> running{false};
+    };
+
+    static void checkAlive(LiveState& live, AudioDeviceID device) noexcept
     {
         UInt32 alive = 1;
         UInt32 size = sizeof(alive);
         const auto where = address(kAudioDevicePropertyDeviceIsAlive);
         // A device already removed may not answer at all: that is lost too.
         if (AudioObjectGetPropertyData(device, &where, 0, nullptr, &size, &alive) != noErr || alive == 0) {
-            auto* backend = static_cast<CoreAudioBackend*>(self);
-            backend->lost_.store(true);
-            backend->running_.store(false);
+            live.lost.store(true);
+            live.running.store(false);
         }
-        return noErr;
     }
 
+    PropertyListener aliveListener_; ///< removed in close(), before the members it touches go
+    bool unitStarted_ = false; ///< control thread: AudioOutputUnitStart() succeeded, not stopped yet
+
     AudioDeviceID device_ = kAudioObjectUnknown;
-    std::atomic<bool> lost_{false}; ///< set by the "alive" listener
+    std::shared_ptr<LiveState> live_ = std::make_shared<LiveState>();
     AudioComponentInstance unit_ = nullptr;
     RenderFn render_ = nullptr;
     void* user_ = nullptr;
     int channels_ = 2;
-    std::atomic<bool> running_{false};
 };
 
 } // namespace

@@ -34,6 +34,8 @@ struct AudioDeviceConfig {
 /// If the device is lost while running (unplugged), isRunning() turns false.
 class AudioDevice {
 public:
+    /// Runs on the real-time audio thread. It should not throw; if it does,
+    /// that block is silent.
     using Callback = std::function<void(float* const* out, int numChannels, int numFrames)>;
 
     /// Largest block the callback will ever receive.
