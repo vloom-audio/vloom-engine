@@ -44,7 +44,27 @@ void Engine::prepare(double sampleRate, int /*maxBlockSize*/)
     publishStatus();
 }
 
-bool Engine::send(Command::Type type, double value) { return commands_.push(Command{type, value}); }
+bool Engine::send(Command::Type type, double value, double value2)
+{
+    return commands_.push(Command{type, value, value2});
+}
+
+bool Engine::setLoop(double startTicks, double endTicks)
+{
+    if (!std::isfinite(startTicks) || !std::isfinite(endTicks))
+        return send(Command::Type::SetLoop, 0.0, 0.0); // off
+    const double start = std::clamp(startTicks, 0.0, Transport::kMaxTicks);
+    const double end = std::clamp(endTicks, 0.0, Transport::kMaxTicks);
+    if (end - start < kMinLoopTicks)
+        return send(Command::Type::SetLoop, 0.0, 0.0); // too short to loop: off
+    return send(Command::Type::SetLoop, start, end);
+}
+
+bool Engine::setStopAt(double ticks)
+{
+    const double at = std::isfinite(ticks) && ticks > 0.0 ? std::min(ticks, Transport::kMaxTicks) : 0.0;
+    return send(Command::Type::SetStopAt, at);
+}
 
 bool Engine::play() { return send(Command::Type::Play); }
 bool Engine::stop() { return send(Command::Type::Stop); }
@@ -176,6 +196,13 @@ void Engine::applyCommands() noexcept
             break;
         case Command::Type::SetMasterPitch:
             sequencer_.setPitch(std::exp2(cmd.value / 1200.0));
+            break;
+        case Command::Type::SetLoop:
+            loopStart_ = cmd.value;
+            loopEnd_ = cmd.value2;
+            break;
+        case Command::Type::SetStopAt:
+            stopAt_ = cmd.value;
             break;
         }
     }
@@ -357,17 +384,8 @@ void Engine::mixBuses(float* const* out, int numChannels, int numFrames) noexcep
     busUsed_[0] = false;
 }
 
-void Engine::processBlock(float* const* out, int numChannels, int numFrames) noexcept
+void Engine::playSpan(float* const* out, int numChannels, int spanStart, int spanFrames) noexcept
 {
-    stopVoices_ = false;
-    applyCommands();
-    sequencer_.beginBlock();
-    if (stopVoices_)
-        sequencer_.stopAll();
-
-    for (int ch = 0; ch < numChannels; ++ch)
-        std::memset(out[ch], 0, sizeof(float) * static_cast<std::size_t>(numFrames));
-
     int cursor = 0;
 
     if (transport_.isPlaying() && std::isfinite(transport_.positionTicks())) {
@@ -448,11 +466,11 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
                     continue;
                 at = static_cast<double>(cursor);
             }
-            if (at >= static_cast<double>(numFrames))
+            if (at >= static_cast<double>(spanFrames))
                 break; // a later block
             const int offset = static_cast<int>(at);
 
-            renderSegment(out, numChannels, cursor, offset - cursor);
+            renderSegment(out, numChannels, spanStart + cursor, offset - cursor);
             cursor = offset;
             if (fireEnd)
                 sequencer_.endNotes(noteEnd);
@@ -474,12 +492,75 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
         // Notes are looked up afresh each block, so the next search starts
         // where this block ends: a note added behind the playhead meanwhile
         // must not fire late. The pending start, if any, is never skipped.
-        const double lastFrame = start + (static_cast<double>(numFrames - 1) + kEpsilon) * ticksPerSample;
+        const double lastFrame = start + (static_cast<double>(spanFrames - 1) + kEpsilon) * ticksPerSample;
         const auto future = static_cast<std::int64_t>(std::floor(lastFrame)) + 1;
         noteFrom_ = std::max(noteFrom_, std::min(noteStart, future));
     }
 
-    renderSegment(out, numChannels, cursor, numFrames - cursor);
+    renderSegment(out, numChannels, spanStart + cursor, spanFrames - cursor);
+}
+
+void Engine::processBlock(float* const* out, int numChannels, int numFrames) noexcept
+{
+    stopVoices_ = false;
+    applyCommands();
+    sequencer_.beginBlock();
+    if (stopVoices_)
+        sequencer_.stopAll();
+
+    for (int ch = 0; ch < numChannels; ++ch)
+        std::memset(out[ch], 0, sizeof(float) * static_cast<std::size_t>(numFrames));
+
+    // The block is played in spans that end where the loop jumps back or
+    // the transport stops, each on its exact sample. A jump looks like a
+    // locate to the scheduler (the next span is "jumped"): streams start
+    // afresh at the loop start, audio clips resume part-way, held notes end.
+    constexpr double kEpsilon = 1e-6; // as in playSpan()
+    for (int done = 0; done < numFrames;) {
+        int span = numFrames - done;
+        bool loopBack = false;
+        bool stopHere = false;
+        if (transport_.isPlaying() && std::isfinite(transport_.positionTicks())) {
+            const double position = transport_.positionTicks();
+            constexpr double kNone = std::numeric_limits<double>::infinity();
+            // The sample each boundary falls on, by the scheduler's rule. Only
+            // a boundary still ahead counts: playing from past a loop's end
+            // goes on.
+            const double toLoop = loopEnd_ > loopStart_ && position < loopEnd_
+                ? std::ceil(transport_.framesUntil(loopEnd_) - kEpsilon)
+                : kNone;
+            const double toStop = stopAt_ > 0.0 && position < stopAt_
+                ? std::ceil(transport_.framesUntil(stopAt_) - kEpsilon)
+                : kNone;
+            if (toStop <= toLoop && toStop <= static_cast<double>(span)) {
+                span = static_cast<int>(std::max(toStop, 0.0));
+                stopHere = true;
+            } else if (toLoop <= static_cast<double>(span)) {
+                // At least one frame, so every pass of a loop moves on.
+                span = static_cast<int>(std::max(toLoop, 1.0));
+                loopBack = true;
+            }
+        }
+
+        playSpan(out, numChannels, done, span);
+        transport_.advance(span);
+        wasRolling_ = transport_.isPlaying();
+        expectedTicks_ = transport_.positionTicks();
+        done += span;
+
+        if (stopHere) {
+            transport_.stop(); // the rest of the block renders the notes fading out
+            sequencer_.stopAll();
+            // Stopped: the next play() is a fresh start, even when the stop
+            // fell on the block's last frame and no span runs after it.
+            wasRolling_ = false;
+        } else if (loopBack) {
+            // expectedTicks_ is the loop end, the position now the loop start:
+            // the next span sees a jump.
+            transport_.locate(loopStart_);
+        }
+    }
+
     sequencer_.mix(numFrames, buses_.data(), busUsed_.data());
     renderPreview(numFrames);
     mixBuses(out, numChannels, numFrames);
@@ -487,9 +568,6 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
     applyMasterGain(out, numChannels, numFrames);
     sanitizeOutput(out, numChannels, numFrames);
     meterOutput(out, numChannels, numFrames);
-    transport_.advance(numFrames);
-    wasRolling_ = transport_.isPlaying();
-    expectedTicks_ = transport_.positionTicks();
     publishStatus();
 }
 

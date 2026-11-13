@@ -74,9 +74,8 @@ sample-exact results across many block sizes. Rendering must be deterministic.
 3. **M1.5** sample preview voice ✅
 4. **M2** MIDI notes, pitched sampler, first built-in synth, master pitch ✅
    (engine side; the app's piano roll and synth panel are next)
-5. **M3** arrangement (patterns on a timeline), song mode, WAV export ← *in progress*
-   (song mode, pattern clips repeating their pattern, whole-song export to
-   float / 16 / 24-bit WAV are in; a loop region is next)
-6. **M4** plugin host interface, CLAP hosting
+5. **M3** arrangement (patterns on a timeline), song mode, loop region, WAV export ✅
+   (engine side; the app's export dialog and loop markers are next)
+6. **M4** plugin host interface, CLAP hosting ← *next*
 7. **M5** VST3 hosting, built-in effects, sends, delay compensation
 8. **M6** audio input and recording, MIDI input
