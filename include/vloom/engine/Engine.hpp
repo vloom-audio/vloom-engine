@@ -138,6 +138,8 @@ private:
     std::array<bool, kMaxInserts + 1> insertSounding_{}; ///< audio thread: the insert had sound last block
     std::array<std::array<std::atomic<float>, 2>, kMaxInserts + 1> insertPeak_{};
     bool stopVoices_ = false; ///< audio thread: a Stop command arrived this block
+    bool wasRolling_ = false; ///< audio thread: the transport played in the last block
+    double expectedTicks_ = 0.0; ///< audio thread: where the last block left the position
     bool metronomeEnabled_ = true;
     float masterGainTarget_ = 1.0f; ///< audio thread: latest requested gain
     float masterPanTarget_ = 0.0f; ///< audio thread: latest requested balance
@@ -146,9 +148,9 @@ private:
     float smoothedLoad_ = 0.0f; ///< audio thread
 
     std::atomic<bool> playing_{false};
+    std::atomic<bool> previewPlaying_{false};
     std::atomic<double> position_{0.0};
     std::atomic<double> tempo_{120.0};
-    std::atomic<bool> previewPlaying_{false};
     std::atomic<float> cpuLoad_{0.0f};
     std::array<std::atomic<float>, 2> outputPeak_{}; ///< left, right; see takeOutputPeak()
 };

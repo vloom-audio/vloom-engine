@@ -71,7 +71,7 @@ sample-exact results across many block sizes. Rendering must be deterministic.
 2. **M1** pattern / step sequencer, sample playback (drum channel rack), mixer routing
 3. **M1.5** sample preview voice ✅
 4. **M2** MIDI notes, pitched sampler, first built-in synth, master pitch ← *next*
-5. **M3** arrangement (patterns on a timeline), song mode, WAV export
+5. **M3** arrangement (patterns on a timeline), song mode (first playback of pattern and audio clips is in), WAV export
 6. **M4** plugin host interface, CLAP hosting
 7. **M5** VST3 hosting, built-in effects, sends, delay compensation
 8. **M6** audio input and recording, MIDI input

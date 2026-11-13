@@ -49,13 +49,46 @@ struct ChannelState {
     std::vector<std::uint8_t> steps; ///< non-zero = the step plays; shorter than stepCount = off
 };
 
+/// One pattern's steps for song mode: [channel][step], non-zero = plays.
+/// A channel missing here, or a step past the end of its row, is off.
+struct SongPattern {
+    std::vector<std::vector<std::uint8_t>> steps;
+};
+
+/// A pattern placed in the playlist: plays its steps from `startStep` for
+/// `lengthSteps` steps (steps counted from the song start).
+struct SongPatternClip {
+    int pattern = 0; ///< index into SequencerState::patterns
+    std::int64_t startStep = 0;
+    std::int64_t lengthSteps = 0;
+};
+
+/// A channel's sample placed in the playlist (FL Studio's audio clip): plays
+/// once from `startStep`, at the sample's own speed (tempo does not stretch
+/// it), through the channel like a step would: its volume, pan, mute and
+/// mixer insert.
+struct SongAudioClip {
+    int channel = 0; ///< index into SequencerState::channels; its sample plays
+    std::int64_t startStep = 0;
+};
+
 /// Immutable snapshot of the channel rack, published with
 /// Engine::setSequencerState(). Build a new one for every edit; samples and
 /// voices are shared between snapshots, so copies are cheap.
+///
+/// Pattern mode (song = false) loops the channels' own `steps` every
+/// stepCount steps. Song mode plays the playlist instead: the pattern clips
+/// trigger the channels with their pattern's steps, the audio clips play
+/// their samples; nothing loops.
 struct SequencerState {
     std::vector<ChannelState> channels;
-    int stepCount = 16; ///< pattern length in steps; the pattern loops
+    int stepCount = 16; ///< pattern length in steps; the pattern loops (pattern mode)
     int ticksPerStep = kPpq / 4; ///< 16th notes
+
+    bool song = false;
+    std::vector<SongPattern> patterns; ///< song mode
+    std::vector<SongPatternClip> patternClips; ///< song mode
+    std::vector<SongAudioClip> audioClips; ///< song mode
 };
 
 } // namespace vloom

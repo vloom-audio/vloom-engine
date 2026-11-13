@@ -349,6 +349,11 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
         // sample of one block and the first of the next fires exactly once.
         constexpr double kEpsilon = 1e-6;
         const double start = transport_.positionTicks();
+        // Playback started or jumped (locate): song-mode audio clips already
+        // under way there start part-way through.
+        if (const double ticksPerSample = transport_.ticksPerSample();
+            ticksPerSample > 0.0 && (!wasRolling_ || std::abs(start - expectedTicks_) > kEpsilon))
+            sequencer_.resumeAt(start, 1.0 / ticksPerSample);
         const int ticksPerStep = sequencer_.ticksPerStep();
         const double stepTicks = static_cast<double>(ticksPerStep);
 
@@ -387,13 +392,15 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
 
     renderSegment(out, numChannels, cursor, numFrames - cursor);
     sequencer_.mix(numFrames, buses_.data(), busUsed_.data());
+    renderPreview(numFrames);
     mixBuses(out, numChannels, numFrames);
     sequencer_.endBlock();
     applyMasterGain(out, numChannels, numFrames);
     sanitizeOutput(out, numChannels, numFrames);
     meterOutput(out, numChannels, numFrames);
-    renderPreview(numFrames);
     transport_.advance(numFrames);
+    wasRolling_ = transport_.isPlaying();
+    expectedTicks_ = transport_.positionTicks();
     publishStatus();
 }
 

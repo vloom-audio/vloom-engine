@@ -2,6 +2,8 @@
 // Copyright (C) 2026 Vloom Audio contributors
 #include "vloom/engine/sequencer/StepSequencer.hpp"
 
+#include <cmath>
+
 namespace vloom {
 
 void StepSequencer::beginBlock() noexcept { current_ = exchange_.acquire(); }
@@ -20,6 +22,28 @@ void StepSequencer::triggerStep(std::int64_t step) noexcept
 {
     if (current_ == nullptr || current_->stepCount <= 0 || step < 0)
         return;
+    if (current_->song) {
+        const auto& channels = current_->channels;
+        for (const SongPatternClip& clip : current_->patternClips) {
+            if (step < clip.startStep || step >= clip.startStep + clip.lengthSteps || clip.pattern < 0
+                || static_cast<std::size_t>(clip.pattern) >= current_->patterns.size())
+                continue;
+            const auto& rows = current_->patterns[static_cast<std::size_t>(clip.pattern)].steps;
+            const auto local = static_cast<std::size_t>(step - clip.startStep);
+            for (std::size_t c = 0; c < channels.size() && c < rows.size(); ++c) {
+                const ChannelState& channel = channels[c];
+                if (channel.muted || channel.voices == nullptr || local >= rows[c].size()
+                    || rows[c][local] == 0)
+                    continue;
+                channel.voices->sampler.trigger(channel.sample.get());
+            }
+        }
+        for (const SongAudioClip& clip : current_->audioClips)
+            if (clip.startStep == step)
+                if (const ChannelState* channel = clipChannel(clip))
+                    channel->voices->sampler.trigger(channel->sample.get());
+        return;
+    }
     const auto index = static_cast<std::size_t>(step % current_->stepCount);
     for (const ChannelState& channel : current_->channels) {
         if (channel.muted || channel.voices == nullptr || index >= channel.steps.size()
@@ -27,6 +51,35 @@ void StepSequencer::triggerStep(std::int64_t step) noexcept
             continue;
         // Volume and pan are applied to the whole channel in mix(), live.
         channel.voices->sampler.trigger(channel.sample.get());
+    }
+}
+
+const ChannelState* StepSequencer::clipChannel(const SongAudioClip& clip) const noexcept
+{
+    if (current_ == nullptr || clip.channel < 0
+        || static_cast<std::size_t>(clip.channel) >= current_->channels.size())
+        return nullptr;
+    const ChannelState& channel = current_->channels[static_cast<std::size_t>(clip.channel)];
+    return channel.muted || channel.voices == nullptr || channel.sample == nullptr ? nullptr : &channel;
+}
+
+void StepSequencer::resumeAt(double ticks, double framesPerTick) noexcept
+{
+    if (current_ == nullptr || !current_->song || current_->ticksPerStep <= 0 || !(framesPerTick > 0.0))
+        return;
+    // Whatever the clips' channels were playing belongs to the old position.
+    for (const SongAudioClip& clip : current_->audioClips)
+        if (const ChannelState* channel = clipChannel(clip))
+            channel->voices->sampler.stopAll();
+    for (const SongAudioClip& clip : current_->audioClips) {
+        const ChannelState* channel = clipChannel(clip);
+        if (channel == nullptr)
+            continue;
+        const double start = static_cast<double>(clip.startStep) * current_->ticksPerStep;
+        if (start >= ticks)
+            continue; // starts later, or right here: triggerStep() starts it
+        const auto offset = static_cast<std::int64_t>(std::floor((ticks - start) * framesPerTick));
+        channel->voices->sampler.trigger(channel->sample.get(), 1.0f, 0.0f, offset); // ignored past the end
     }
 }
 
