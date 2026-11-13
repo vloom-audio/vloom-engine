@@ -9,6 +9,7 @@ CPMAddPackage(
 # Test files mirror src/: tests/<module>/<Name>Tests.cpp
 add_executable(vloom_engine_tests
     EngineTests.cpp
+    PreviewTests.cpp
     core/SnapshotExchangeTests.cpp
     core/SpscQueueTests.cpp
     dsp/SamplerTests.cpp
@@ -18,6 +19,7 @@ add_executable(vloom_engine_tests
     sample/ResamplerTests.cpp
     sample/SampleLoaderTests.cpp
     sample/WavReaderTests.cpp
+    sequencer/SongModeTests.cpp
     sequencer/StepSequencerTests.cpp
     time/MusicalTimeTests.cpp
     time/TransportTests.cpp

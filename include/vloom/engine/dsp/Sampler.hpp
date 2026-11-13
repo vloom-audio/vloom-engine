@@ -37,10 +37,14 @@ public:
     /// Silences every voice.
     void reset() noexcept;
 
-    /// Starts `sample` from its beginning. `gain` is linear; `pan` is -1
-    /// (left) .. +1 (right): constant power for mono samples, balance for
-    /// stereo ones. A null or empty sample is ignored.
-    void trigger(const SampleBuffer* sample, float gain = 1.0f, float pan = 0.0f) noexcept;
+    /// Starts `sample` from frame `startFrame` (0: its beginning). `gain` is
+    /// linear; `pan` is -1 (left) .. +1 (right): constant power for mono
+    /// samples, balance for stereo ones. A null or empty sample, or a start
+    /// at or past its end, is ignored. A start inside the sample (playback
+    /// resumed in the middle of a playlist clip) fades in over kFadeFrames so
+    /// it does not click.
+    void trigger(const SampleBuffer* sample, float gain = 1.0f, float pan = 0.0f,
+        std::int64_t startFrame = 0) noexcept;
 
     /// Adds every voice into `out[ch][startFrame .. startFrame + numFrames)`.
     /// Mono samples go to both of the first two channels; channels after the
@@ -62,6 +66,7 @@ private:
         float gainRight = 0.0f;
         bool fading = false; ///< fading out (stolen or stopped)
         int fadeLeft = 0; ///< while fading: frames to go
+        int fadeInLeft = 0; ///< frames of fade-in to go (started inside the sample)
         std::uint64_t age = 0; ///< trigger order, to find the oldest
     };
 

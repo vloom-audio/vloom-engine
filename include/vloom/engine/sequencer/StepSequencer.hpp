@@ -33,8 +33,16 @@ public:
     /// Ticks per step of the current state; 0 when there is none (nothing to schedule).
     [[nodiscard]] int ticksPerStep() const noexcept;
     /// Starts the notes of absolute step `step` (counted from the song
-    /// start; the pattern loops every stepCount steps).
+    /// start). Pattern mode: the pattern loops every stepCount steps. Song
+    /// mode: the pattern clips covering the step, and the audio clips that
+    /// start on it.
     void triggerStep(std::int64_t step) noexcept;
+    /// Song mode: playback starts (or jumps) to `ticks`, between steps or on
+    /// one: the audio clips already under way there start part-way through,
+    /// `framesPerTick` converting the distance. Clips starting exactly at
+    /// `ticks` are left to triggerStep(). The channels of the audio clips
+    /// fade out what they were playing first.
+    void resumeAt(double ticks, double framesPerTick) noexcept;
     /// Renders every channel's voices into its own buffer at
     /// [startFrame, startFrame + numFrames), including channels already
     /// removed whose notes are still fading.
@@ -44,7 +52,7 @@ public:
     /// insert (`buses[2 * insert]`, `buses[2 * insert + 1]`, insert 0 = the
     /// master bus) and clears the buffer. Marks the buses it wrote in `used`.
     void mix(int numFrames, float* const* buses, bool* used) noexcept;
-    /// Fades out every note (transport stop).
+    /// Fades out every note and audio clip (transport stop).
     void stopAll() noexcept;
 
 private:
@@ -59,6 +67,8 @@ private:
     const SequencerState* current_ = nullptr; ///< audio thread
     std::uint64_t pass_ = 0; ///< audio thread: render() calls so far
     std::uint64_t block_ = 0; ///< audio thread: mix() calls so far
+    /// The audio clip's channel, if it can sound.
+    [[nodiscard]] const ChannelState* clipChannel(const SongAudioClip& clip) const noexcept;
 };
 
 } // namespace vloom

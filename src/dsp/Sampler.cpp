@@ -22,9 +22,10 @@ void Sampler::reset() noexcept
     triggers_ = 0;
 }
 
-void Sampler::trigger(const SampleBuffer* sample, float gain, float pan) noexcept
+void Sampler::trigger(const SampleBuffer* sample, float gain, float pan, std::int64_t startFrame) noexcept
 {
-    if (sample == nullptr || sample->empty() || !std::isfinite(gain) || !std::isfinite(pan))
+    if (sample == nullptr || sample->empty() || !std::isfinite(gain) || !std::isfinite(pan) || startFrame < 0
+        || startFrame >= sample->frames())
         return;
     pan = std::clamp(pan, -1.0f, 1.0f);
     gain = std::max(gain, 0.0f);
@@ -60,6 +61,8 @@ void Sampler::trigger(const SampleBuffer* sample, float gain, float pan) noexcep
     Voice voice;
     voice.sample = sample;
     voice.age = ++triggers_;
+    voice.position = startFrame;
+    voice.fadeInLeft = startFrame > 0 ? kFadeFrames : 0;
     if (sample->channels() == 1) {
         // Constant power: -3 dB per side in the centre.
         const double angle = (static_cast<double>(pan) + 1.0) * std::numbers::pi / 4.0;
@@ -99,8 +102,11 @@ void Sampler::renderVoice(
     for (int i = 0; i < frames; ++i) {
         const std::int64_t at = v.position + i;
         // Linear fade from just under 1 down to just over 0.
-        const float fade
+        float fade
             = v.fading ? static_cast<float>(v.fadeLeft - i) / static_cast<float>(kFadeFrames + 1) : 1.0f;
+        if (i < v.fadeInLeft) // rising from just over 0
+            fade *= static_cast<float>(kFadeFrames - v.fadeInLeft + i + 1)
+                / static_cast<float>(kFadeFrames + 1);
         if (outRight == nullptr) {
             // Mono output: sum both sides.
             outLeft[i] += 0.5f * (left[at] * v.gainLeft + right[at] * v.gainRight) * fade;
@@ -111,6 +117,7 @@ void Sampler::renderVoice(
     }
 
     v.position += frames;
+    v.fadeInLeft = std::max(0, v.fadeInLeft - frames);
     if (v.fading)
         v.fadeLeft -= frames;
     if (v.position >= s.frames() || (v.fading && v.fadeLeft <= 0))
