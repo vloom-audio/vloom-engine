@@ -36,6 +36,7 @@ std::int64_t songEndTicks(const SequencerState& song, double tempo)
         return 0;
     const std::int64_t ticksPerStep = song.ticksPerStep;
     if (!song.song)
+        // int x int: at most about 4.6e18, inside int64.
         return song.stepCount > 0 ? static_cast<std::int64_t>(song.stepCount) * ticksPerStep : 0;
 
     std::int64_t end = 0;
@@ -56,7 +57,11 @@ std::int64_t songEndTicks(const SequencerState& song, double tempo)
         if (channel.sample == nullptr || channel.sample->empty() || !(channel.sample->sampleRate() > 0.0))
             continue;
         const double seconds = static_cast<double>(channel.sample->frames()) / channel.sample->sampleRate();
-        const auto length = static_cast<std::int64_t>(std::ceil(seconds * ticksPerSecond));
+        // Capped before the conversion: a sample claiming a tiny rate would
+        // otherwise last longer than int64 ticks hold (undefined behaviour).
+        const double ticks = std::ceil(seconds * ticksPerSecond);
+        const auto length
+            = static_cast<std::int64_t>(std::min(ticks, static_cast<double>(StepSequencer::kMaxTicks)));
         end = std::max(end, clip.startStep * ticksPerStep + length);
     }
     return end;

@@ -45,6 +45,8 @@ std::int64_t loopTicks(const SongPattern& pattern, std::int64_t span, std::int64
 {
     if (pattern.stepCount <= 0)
         return span;
+    // stepCount and ticksPerStep are both int: their product (at most about
+    // 4.6e18) always fits int64.
     return std::min(span, static_cast<std::int64_t>(pattern.stepCount) * ticksPerStep);
 }
 

@@ -104,6 +104,12 @@ TEST_CASE("The song ends with its last pattern or audio clip", "[export]")
     CHECK(vloom::songEndTicks(vloom::SequencerState{}, 120.0) == 16 * 240);
     state.ticksPerStep = 0;
     CHECK(vloom::songEndTicks(state, 120.0) == 0);
+
+    // A sample claiming a tiny rate lasts "forever": capped, never overflowed
+    // (review finding).
+    auto odd = song(constant(1000, 1.0f, 1e-300));
+    odd.audioClips.push_back({0, 0});
+    CHECK(vloom::songEndTicks(odd, 120.0) == static_cast<std::int64_t>(1e11));
 }
 
 TEST_CASE("An export sounds exactly like the live engine", "[export]")
