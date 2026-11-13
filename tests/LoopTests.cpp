@@ -23,7 +23,6 @@ namespace {
 
 constexpr double kRate = 48000.0;
 // 120 BPM: a step (240 ticks) is 6000 frames, a tick 25 frames.
-constexpr std::int64_t kStepFrames = 6000;
 constexpr double kStepTicks = 240.0;
 
 std::shared_ptr<const vloom::SampleBuffer> constant(int frames, float value = 1.0f)
