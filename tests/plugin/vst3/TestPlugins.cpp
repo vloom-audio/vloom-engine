@@ -91,17 +91,27 @@ public:
     }
     tresult PLUGIN_API getRoutingInfo(RoutingInfo&, RoutingInfo&) override { return kResultFalse; }
     tresult PLUGIN_API activateBus(MediaType, BusDirection, int32, TBool) override { return kResultOk; }
-    tresult PLUGIN_API setActive(TBool) override { return kResultOk; }
+    tresult PLUGIN_API setActive(TBool state) override
+    {
+        // Like a strict plugin: activation needs arrangements, then setup.
+        if (state == 0) {
+            arranged_ = false;
+            setUp_ = false;
+            return kResultOk;
+        }
+        return arranged_ && setUp_ ? kResultOk : kResultFalse;
+    }
 
     tresult PLUGIN_API setBusArrangements(
         SpeakerArrangement* inputs, int32 numIns, SpeakerArrangement* outputs, int32 numOuts) override
     {
-        if (numIns != audioInputs_ || numOuts != 1)
-            return kResultFalse;
+        if (setUp_ || numIns != audioInputs_ || numOuts != 1)
+            return kResultFalse; // arrangements come before setupProcessing
         for (int32 i = 0; i < numIns; ++i)
             if (inputs[i] != SpeakerArr::kStereo)
                 return kResultFalse;
-        return outputs[0] == SpeakerArr::kStereo ? kResultOk : kResultFalse;
+        arranged_ = outputs[0] == SpeakerArr::kStereo;
+        return arranged_ ? kResultOk : kResultFalse;
     }
     tresult PLUGIN_API getBusArrangement(BusDirection, int32 index, SpeakerArrangement& arr) override
     {
@@ -114,13 +124,19 @@ public:
     {
         return size == kSample32 ? kResultOk : kResultFalse;
     }
-    tresult PLUGIN_API setupProcessing(ProcessSetup&) override { return kResultOk; }
+    tresult PLUGIN_API setupProcessing(ProcessSetup&) override
+    {
+        setUp_ = true;
+        return kResultOk;
+    }
     tresult PLUGIN_API setProcessing(TBool) override { return kResultOk; }
     uint32 PLUGIN_API getTailSamples() override { return 0; }
 
 protected:
     int32 audioInputs_;
     int32 eventInputs_;
+    bool arranged_ = false;
+    bool setUp_ = false;
 };
 
 class Level final : public ProcessorBase, public IEditController {

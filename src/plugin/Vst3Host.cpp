@@ -677,10 +677,11 @@ public:
     bool activate(double sampleRate, int maxBlockFrames) override
     {
         deactivate();
+        // VST 3 order: bus arrangements, then setupProcessing, then setActive.
+        if (!configureBuses(maxBlockFrames))
+            return false;
         vst::ProcessSetup setup{vst::kRealtime, vst::kSample32, maxBlockFrames, sampleRate};
         if (processor_->setupProcessing(setup) != kResultOk)
-            return false;
-        if (!configureBuses(maxBlockFrames))
             return false;
         sampleRate_ = sampleRate;
         if (component_->setActive(true) != kResultOk)
