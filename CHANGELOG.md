@@ -102,6 +102,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
   (`WavFileWriter`), so a failed write never leaves a broken file.
 
 ### Added
+- WAV loop tempo: `parseWavLoopInfo()` / `readWavLoopInfo(path)` read the
+  ACID chunk that sample libraries and DAWs write into loops. It gives the
+  tempo, the length in beats, and whether the file is a one-shot.
+  - `readWavLoopInfo()` walks only the chunk headers and never reads the
+    audio.
+  - Every value is bounds-checked.
 - Latency that changes while a plugin runs is compensated (ADR 0007):
   - `Engine::updatePluginLatency()` reads every insert effect's latency
     again. If one changed, it publishes the mixer state again, lined up for

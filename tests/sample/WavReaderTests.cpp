@@ -374,3 +374,112 @@ TEST_CASE("Huge float samples are clamped before they become float", "[sample]")
     REQUIRE(r32.buffer);
     CHECK(r32.buffer->channel(0)[0] == 1024.0f);
 }
+
+namespace {
+
+/// An ACID chunk body: flags, root note, two unknowns, beats, meter, tempo.
+Bytes acidBody(std::uint32_t flags, std::uint32_t beats, float tempo)
+{
+    Bytes b;
+    putU32(b, flags);
+    putU16(b, 60); // root note
+    putU16(b, 0x8000);
+    putU32(b, 0); // unknown float
+    putU32(b, beats);
+    putU16(b, 4); // meter denominator
+    putU16(b, 4); // meter numerator
+    putU32(b, std::bit_cast<std::uint32_t>(tempo));
+    return b;
+}
+
+/// A short 16-bit mono WAV with `extra` chunks between fmt and data.
+Bytes loopWav(const Bytes& extra)
+{
+    Bytes chunks;
+    putChunk(chunks, "fmt ", fmtBody(1, 1, 44100, 16));
+    chunks.insert(chunks.end(), extra.begin(), extra.end());
+    putChunk(chunks, "data", Bytes(8, 0));
+    return riff(chunks);
+}
+
+} // namespace
+
+TEST_CASE("A WAV loop's ACID chunk gives its tempo and beats", "[sample][loop]")
+{
+    Bytes extra;
+    putChunk(extra, "LIST", Bytes(5, 'x')); // odd: padded
+    putChunk(extra, "acid", acidBody(0, 8, 140.0f));
+    const auto info = vloom::parseWavLoopInfo(loopWav(extra));
+    REQUIRE(info.has_value());
+    CHECK(info->tempo == 140.0);
+    CHECK(info->beats == 8);
+    CHECK_FALSE(info->oneShot);
+
+    // The audio still decodes as before.
+    CHECK(vloom::decodeWav(loopWav(extra)).buffer.has_value());
+}
+
+TEST_CASE("A WAV loop's ACID chunk is checked like any other input", "[sample][loop]")
+{
+    CHECK_FALSE(vloom::parseWavLoopInfo(loopWav({})).has_value()); // no chunk
+    CHECK_FALSE(vloom::parseWavLoopInfo(Bytes{}).has_value());
+    CHECK_FALSE(vloom::parseWavLoopInfo(Bytes(12, 0)).has_value()); // not RIFF
+
+    Bytes shortChunk;
+    putChunk(shortChunk, "acid", Bytes(10, 0));
+    CHECK_FALSE(vloom::parseWavLoopInfo(loopWav(shortChunk)).has_value());
+
+    // Declares 24 bytes, but the file ends first.
+    Bytes cut = loopWav({});
+    putTag(cut, "acid");
+    putU32(cut, 24);
+    cut.insert(cut.end(), 6, 0);
+    CHECK_FALSE(vloom::parseWavLoopInfo(cut).has_value());
+
+    // Out-of-range or non-finite tempos and absurd beat counts read as "not given".
+    for (const float tempo : {0.0f, 5.0f, 5000.0f, std::numeric_limits<float>::quiet_NaN(),
+             std::numeric_limits<float>::infinity()}) {
+        Bytes extra;
+        putChunk(extra, "acid", acidBody(1, 0xFFFFFFFFu, tempo));
+        const auto info = vloom::parseWavLoopInfo(loopWav(extra));
+        REQUIRE(info.has_value());
+        CHECK(info->tempo == 0.0);
+        CHECK(info->beats == 0);
+        CHECK(info->oneShot);
+    }
+}
+
+TEST_CASE("A WAV file's loop information is read without its audio", "[sample][loop]")
+{
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path folder
+        = std::filesystem::temp_directory_path() / ("vloom_wavloop_" + std::to_string(stamp));
+    std::filesystem::create_directories(folder);
+    const auto write = [&](const std::string& name, const Bytes& bytes) {
+        const std::string path = (folder / name).string();
+        std::ofstream(path, std::ios::binary)
+            .write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        return path;
+    };
+
+    // After a large data chunk, as sample libraries write it.
+    Bytes chunks;
+    putChunk(chunks, "fmt ", fmtBody(1, 2, 44100, 16));
+    putChunk(chunks, "data", Bytes(44100 * 4, 0));
+    putChunk(chunks, "acid", acidBody(0, 32, 128.5f));
+    const auto info = vloom::readWavLoopInfo(write("loop.wav", riff(chunks)));
+    REQUIRE(info.has_value());
+    CHECK(info->tempo == 128.5);
+    CHECK(info->beats == 32);
+
+    CHECK_FALSE(vloom::readWavLoopInfo(write("plain.wav", loopWav({}))).has_value());
+    CHECK_FALSE(vloom::readWavLoopInfo(write("junk.wav", Bytes(40, 7))).has_value());
+    Bytes huge = loopWav({});
+    putTag(huge, "LIST");
+    putU32(huge, 0xFFFFFFF0u); // runs past the end
+    CHECK_FALSE(vloom::readWavLoopInfo(write("huge.wav", huge)).has_value());
+    CHECK_FALSE(vloom::readWavLoopInfo((folder / "missing.wav").string()).has_value());
+
+    std::error_code ec;
+    std::filesystem::remove_all(folder, ec);
+}

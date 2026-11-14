@@ -43,4 +43,20 @@ struct WavReadResult {
 /// Reads and decodes a WAV file at `path` (UTF-8). Not for the audio thread.
 [[nodiscard]] WavReadResult readWavFile(const std::string& path, const WavReadLimits& limits = {});
 
+/// What a loop file says about its own tempo: the ACID chunk sample
+/// libraries and DAWs (ACID, FL Studio, Ableton) write into WAV loops.
+struct WavLoopInfo {
+    double tempo = 0.0; ///< beats per minute; 0 if the chunk gives none in 20 .. 999
+    int beats = 0; ///< the loop's length in beats; 0 if not given
+    bool oneShot = false; ///< marked as a one-shot, not a loop
+};
+
+/// The loop information in the WAV bytes' ACID chunk, if there is one.
+/// Only the chunk headers are walked, bounds-checked like decodeWav().
+[[nodiscard]] std::optional<WavLoopInfo> parseWavLoopInfo(std::span<const std::uint8_t> bytes);
+
+/// The same for the file at `path` (UTF-8), reading only the chunk headers
+/// and the ACID chunk, not the audio. Not for the audio thread.
+[[nodiscard]] std::optional<WavLoopInfo> readWavLoopInfo(const std::string& path);
+
 } // namespace vloom

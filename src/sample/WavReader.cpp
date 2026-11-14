@@ -133,7 +133,79 @@ float decodeSample(std::span<const std::uint8_t> b, std::size_t at, const Format
     }
 }
 
+constexpr std::uint64_t kAcidSize = 24; ///< flags, root note, 2 unknown, beats, meter, tempo
+constexpr double kMinLoopTempo = 20.0;
+constexpr double kMaxLoopTempo = 999.0;
+constexpr std::uint32_t kMaxLoopBeats = 1u << 20;
+
+/// The fields of an ACID chunk body (at least kAcidSize bytes).
+WavLoopInfo parseAcid(std::span<const std::uint8_t> body)
+{
+    WavLoopInfo info;
+    const std::uint32_t flags = u32(body, 0);
+    info.oneShot = (flags & 1u) != 0;
+    const std::uint32_t beats = u32(body, 12);
+    info.beats = beats <= kMaxLoopBeats ? static_cast<int>(beats) : 0;
+    const double tempo = static_cast<double>(std::bit_cast<float>(u32(body, 20)));
+    info.tempo = std::isfinite(tempo) && tempo >= kMinLoopTempo && tempo <= kMaxLoopTempo ? tempo : 0.0;
+    return info;
+}
+
 } // namespace
+
+std::optional<WavLoopInfo> parseWavLoopInfo(std::span<const std::uint8_t> bytes)
+{
+    if (bytes.size() < 12 || !tagIs(bytes, 0, "RIFF") || !tagIs(bytes, 8, "WAVE"))
+        return std::nullopt;
+    const std::uint64_t end = bytes.size();
+    std::uint64_t at = 12;
+    while (at + 8 <= end) {
+        const auto chunk = static_cast<std::size_t>(at);
+        const std::uint64_t size = u32(bytes, chunk + 4);
+        const std::uint64_t body = at + 8;
+        if (tagIs(bytes, chunk, "acid"))
+            return size >= kAcidSize && end - body >= kAcidSize
+                ? std::optional(parseAcid(bytes.subspan(static_cast<std::size_t>(body), kAcidSize)))
+                : std::nullopt;
+        at = body + size + (size & 1);
+    }
+    return std::nullopt;
+}
+
+std::optional<WavLoopInfo> readWavLoopInfo(const std::string& path)
+{
+    std::filesystem::path file;
+    try {
+        file = std::filesystem::path(std::u8string(path.begin(), path.end()));
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+    std::ifstream stream(file, std::ios::binary);
+    if (!stream)
+        return std::nullopt;
+    std::array<std::uint8_t, 12> header{};
+    if (!stream.read(reinterpret_cast<char*>(header.data()), header.size()) || !tagIs(header, 0, "RIFF")
+        || !tagIs(header, 8, "WAVE"))
+        return std::nullopt;
+    // Chunk by chunk, seeking past each body: the audio is never read.
+    for (int chunks = 0; chunks < 4096; ++chunks) {
+        std::array<std::uint8_t, 8> head{};
+        if (!stream.read(reinterpret_cast<char*>(head.data()), head.size()))
+            return std::nullopt;
+        const std::uint64_t size = u32(head, 4);
+        if (tagIs(head, 0, "acid")) {
+            if (size < kAcidSize)
+                return std::nullopt;
+            std::array<std::uint8_t, kAcidSize> body{};
+            if (!stream.read(reinterpret_cast<char*>(body.data()), body.size()))
+                return std::nullopt;
+            return parseAcid(body);
+        }
+        if (!stream.seekg(static_cast<std::streamoff>(size + (size & 1)), std::ios::cur))
+            return std::nullopt;
+    }
+    return std::nullopt;
+}
 
 WavReadResult decodeWav(std::span<const std::uint8_t> bytes, const WavReadLimits& limits)
 {
