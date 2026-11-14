@@ -4,7 +4,7 @@
 
 #include <vloom/engine/Engine.hpp>
 #include <vloom/engine/mixer/MixerState.hpp>
-#include <vloom/engine/plugin/GainProcessor.hpp>
+#include <vloom/engine/plugin/BuiltinProcessors.hpp>
 #include <vloom/engine/plugin/PluginInstance.hpp>
 #include <vloom/engine/render/OfflineRenderer.hpp>
 #include <vloom/engine/sequencer/SequencerState.hpp>
@@ -27,6 +27,17 @@ using Catch::Approx;
 namespace {
 
 constexpr double kRate = 48000.0;
+
+// The built-in gain ("vloom.gain", from vloom-dsp): parameter 0, -60 .. +12 dB.
+constexpr std::uint32_t kGain = 0;
+constexpr double kGainMinDb = -60.0;
+
+std::unique_ptr<vloom::AudioProcessor> makeGain()
+{
+    auto gain = vloom::createBuiltinProcessor("vloom.gain");
+    REQUIRE(gain != nullptr);
+    return gain;
+}
 constexpr float kCentre = 0.70710678f; // a mono sample in the centre: -3 dB per side
 
 /// A test processor: adds `level` to every sample (a tone generator that
@@ -149,27 +160,27 @@ std::vector<float> runOnes(vloom::PluginInstance& plugin, int frames)
 
 } // namespace
 
-TEST_CASE("The built-in gain ramps to a new value over one block", "[plugin]")
+TEST_CASE("The built-in gain glides to a new value", "[plugin]")
 {
-    vloom::PluginInstance gain(std::make_unique<vloom::GainProcessor>());
+    vloom::PluginInstance gain(makeGain());
     REQUIRE(gain.activate(kRate, 256));
     CHECK(gain.processor().info().id == "vloom.gain");
     REQUIRE(gain.processor().parameters().size() == 1);
 
     CHECK(runOnes(gain, 64).back() == Approx(1.0f)); // 0 dB
-    REQUIRE(gain.setParameter(vloom::GainProcessor::kGain, -6.0));
-    const auto ramp = runOnes(gain, 100);
+    REQUIRE(gain.setParameter(kGain, -6.0));
+    const auto ramp = runOnes(gain, 300); // the glide is 5 ms: 240 frames
     CHECK(ramp.front() < 1.0f);
-    CHECK(ramp.front() > 0.5f); // ramped, not a jump
+    CHECK(ramp.front() > 0.99f); // a glide, not a jump
     CHECK(ramp.back() == Approx(0.501187f).margin(1e-5));
     CHECK(runOnes(gain, 10).front() == Approx(0.501187f).margin(1e-5)); // and stays
 
     // Its state is the gain.
-    const auto saved = gain.processor().saveState();
-    vloom::GainProcessor other;
-    REQUIRE(other.loadState(saved));
-    CHECK(other.gainDb() == Approx(-6.0));
-    CHECK_FALSE(other.loadState(std::vector<std::uint8_t>(3, 0)));
+    vloom::PluginInstance other(makeGain());
+    REQUIRE(other.processor().loadState(gain.processor().saveState()));
+    REQUIRE(other.activate(kRate, 256));
+    CHECK(runOnes(other, 4).front() == Approx(0.501187f).margin(1e-5)); // no glide from 0 dB
+    CHECK_FALSE(other.processor().loadState(std::vector<std::uint8_t>(3, 0)));
 }
 
 TEST_CASE("An inactive, refused or bypassed processor passes audio through", "[plugin]")
@@ -226,8 +237,8 @@ TEST_CASE("An insert's effects process what is routed to it", "[plugin][mixer]")
     vloom::Engine engine;
     prepare(engine);
     engine.setSequencerState(rackInto(2));
-    auto gain = instance(std::make_unique<vloom::GainProcessor>());
-    REQUIRE(gain->setParameter(vloom::GainProcessor::kGain, vloom::GainProcessor::kMinDb)); // silent
+    auto gain = instance(makeGain());
+    REQUIRE(gain->setParameter(kGain, kGainMinDb)); // silent
     engine.setMixerState(withEffects(2, {gain}));
     engine.play();
     auto audio = render(engine, 0.1);
@@ -237,7 +248,7 @@ TEST_CASE("An insert's effects process what is routed to it", "[plugin][mixer]")
     CHECK(loudest == 0.0f);
 
     // Back to 0 dB: the channel as it is.
-    REQUIRE(gain->setParameter(vloom::GainProcessor::kGain, 0.0));
+    REQUIRE(gain->setParameter(kGain, 0.0));
     audio = render(engine, 0.1);
     CHECK(audio[(2000) * 2] == Approx(kCentre).margin(1e-4));
 }
@@ -299,15 +310,15 @@ TEST_CASE("Effects do not allocate on the audio thread", "[plugin]")
     vloom::Engine engine;
     prepare(engine);
     engine.setSequencerState(rackInto(1));
-    auto gain = instance(std::make_unique<vloom::GainProcessor>());
-    engine.setMixerState(withEffects(1, {gain, nullptr, instance(std::make_unique<vloom::GainProcessor>())}));
+    auto gain = instance(makeGain());
+    engine.setMixerState(withEffects(1, {gain, nullptr, instance(makeGain())}));
     engine.play();
     std::vector<float> l(256), r(256);
     std::array<float*, 2> out{l.data(), r.data()};
     long long onAudioThread = 0;
     for (int block = 0; block < 200; ++block) {
         if (block % 10 == 0)
-            gain->setParameter(vloom::GainProcessor::kGain, -0.1 * block); // control side: outside the count
+            gain->setParameter(kGain, -0.1 * block); // control side: outside the count
         const vloom::test::AllocationCounter counter;
         engine.process(out.data(), 2, 256);
         onAudioThread += counter.count();

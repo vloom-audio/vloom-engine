@@ -19,6 +19,7 @@ add_executable(vloom_engine_tests
     io/AudioDeviceTests.cpp
     mixer/MixerTests.cpp
     mixer/RoutingTests.cpp
+    plugin/BuiltinProcessorsTests.cpp
     plugin/ClapHostTests.cpp
     plugin/PluginHostTests.cpp
     plugin/Vst3HostTests.cpp

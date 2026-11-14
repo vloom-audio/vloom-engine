@@ -59,9 +59,14 @@ reused by other Vloom Audio tools.
 - CMake ≥ 3.22 and Git
 - A C++20 compiler: Apple Clang 15+ (macOS), GCC 12+ (Linux), MSVC 2022 (Windows)
 - Linux only: the ALSA headers (`libasound2-dev` on Debian/Ubuntu, `alsa-lib-devel` on Fedora)
-- The test framework (`Catch2`) is downloaded and pinned by CMake through
-  [CPM](https://github.com/cpm-cmake/CPM.cmake); the engine itself has no
-  third-party runtime dependency (`cmake/Dependencies.cmake`).
+- Dependencies are downloaded and pinned by CMake through
+  [CPM](https://github.com/cpm-cmake/CPM.cmake) (`cmake/Dependencies.cmake`):
+  - the test framework (`Catch2`);
+  - the CLAP and VST 3 plugin headers;
+  - [vloom-dsp](https://github.com/vloom-audio/vloom-dsp), our own DSP library
+    behind the built-in effects.
+
+  The engine has no other runtime dependency.
 
 ---
 

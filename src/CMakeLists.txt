@@ -33,10 +33,10 @@ target_sources(vloom_engine PRIVATE
 
     # plugin — hosted processors behind one interface (ADR 0006)
     plugin/ClapHost.cpp
-    plugin/GainProcessor.cpp
     plugin/PluginFiles.cpp
     plugin/PluginInstance.cpp
     plugin/Vst3Host.cpp
+    plugin/builtin/BuiltinProcessors.cpp
 
     # mixer — inserts, routes and delay compensation (ADR 0007)
     mixer/MixerGraph.cpp
@@ -59,6 +59,8 @@ vloom_set_warnings(vloom_engine)
 find_package(Threads REQUIRED)
 # CLAP headers; loading .clap files needs the dynamic loader (dl on Linux).
 target_link_libraries(vloom_engine PRIVATE Threads::Threads vloom_clap_headers vloom_vst3_interfaces ${CMAKE_DL_LIBS})
+# Built-in effects: their DSP comes from vloom-dsp (ADR 0008).
+target_link_libraries(vloom_engine PRIVATE vloom::dsp)
 
 if(WIN32)
     # WASAPI: COM (ole32) and the MMCSS "Pro Audio" thread class (avrt).

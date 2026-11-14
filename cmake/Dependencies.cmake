@@ -56,3 +56,13 @@ if(WIN32)
 elseif(APPLE)
     target_link_libraries(vloom_vst3_interfaces PUBLIC "-framework CoreFoundation")
 endif()
+
+# vloom-dsp (MIT) — the sound of the built-in effects and instruments
+# (docs/adr/0008). Our own library, in its own repository so it can also ship
+# as stand-alone plugins. Pinned to a commit; only the library is built (its
+# tests are on only when it is the top-level project).
+CPMAddPackage(
+    NAME vloom_dsp
+    GITHUB_REPOSITORY vloom-audio/vloom-dsp
+    GIT_TAG 29235d9841f8415c0f833b897645bb9e541d1296
+    GIT_SHALLOW FALSE)
