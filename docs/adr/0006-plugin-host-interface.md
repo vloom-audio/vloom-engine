@@ -68,6 +68,35 @@ may still be processing it, and never on the audio thread.
    which the host only does once the audio thread stopped using the plugin.
    `clapSearchPaths()` and `findClapFiles()` find installed plugins (the
    CLAP spec's directories, after `CLAP_PATH`).
+8. **VST 3 is the second format** (`plugin/Vst3Host`, M5).
+   - **What it is built on.** Only Steinberg's interface headers are used
+     (`vst3_pluginterfaces`, MIT since VST 3.8). The engine implements the
+     host side itself rather than taking the SDK's hosting helpers.
+   - **Loading.** `Vst3Library` loads a .vst3 once per process. That is a
+     bundle directory, using the binary for this OS and architecture, or a
+     single file. It runs the module's entry function (`InitDll`,
+     `bundleEntry` or `ModuleEntry`) and lists the classes of the "Audio
+     Module Class" category.
+   - **Plugin ids.** A plugin's id is its class id as 32 hex digits. Its
+     kind comes from the sub-categories: "Instrument" makes it an
+     instrument.
+   - **Creating a plugin.** `create()` makes the component and its edit
+     controller. That is the same object, or a separate class that is
+     initialised and connected both ways through `IConnectionPoint`. The
+     host then gives the controller the component's state.
+   - **Buses.** At activation the adapter asks for 32-bit stereo main
+     buses, sizes a buffer for every bus, and activates the main buses and
+     the event input.
+   - **Processing.** Parameters arrive as normalized values (0..1) in fixed
+     parameter queues, notes in a fixed event list, and the transport in a
+     `ProcessContext`. An instrument without audio inputs adds to the
+     channel; an effect replaces the audio.
+   - **Reset.** VST 3 has no reset, so `reset()` ends every held note in the
+     next block.
+   - **State.** `saveState()` stores the component's and the controller's
+     state together.
+   - **Finding plugins.** `vst3SearchPaths()` and `findVst3Files()` look in
+     Steinberg's directories, after `VST3_PATH`.
 
 ## Alternatives considered
 
@@ -91,10 +120,13 @@ may still be processing it, and never on the audio thread.
   event lists).
 - A plugin that blocks or crashes in `process()` still takes the audio
   thread with it; out-of-process hosting is the remedy if that proves common.
-- Loading a .clap runs third-party code with the host's rights. The engine
+- Loading a .clap or a .vst3 runs third-party code with the host's rights. The engine
   loads only the paths the host gives it; the app decides what to trust
   (installed plugin folders, the user's choice).
 - Not yet: CLAP host extensions (params rescan, latency changes, GUI,
   note ports, thread-check), `request_restart` (recorded, not acted on),
   plugin output events, sidechain and extra ports (given silence), the
   master pitch on plugin instruments. These follow as plugins need them.
+  The VST 3 adapter has no editor (`IPlugView`) yet. It ignores
+  `restartComponent()` except to note latency changes, and it does not
+  read the plugin's output parameter changes or events.

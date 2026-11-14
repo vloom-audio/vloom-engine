@@ -96,6 +96,21 @@ and the project uses [Semantic Versioning](https://semver.org/).
   (`WavFileWriter`), so a failed write never leaves a broken file.
 
 ### Added
+- **VST 3 hosting (M5, ADR 0006):** `plugin/Vst3Host`.
+  - **Loading:** `Vst3Library::open()` loads a .vst3, as a bundle or a
+    single file, and lists its audio plugins as effects or instruments.
+  - **Creating:** `create()` wraps a plugin in an `AudioProcessor`. The
+    component and edit controller can be one object or two connected
+    objects.
+  - **Processing:** stereo main buses, normalized parameter changes, notes
+    on the event input, the transport as a `ProcessContext`, latency, and
+    state.
+  - **Finding plugins:** `vst3SearchPaths()` and `findVst3Files()` (with
+    `VST3_PATH`).
+  - **Dependency:** Steinberg's `vst3_pluginterfaces` v3.8.1_build_84 (MIT),
+    pinned to its commit. Only the interfaces are used, not the SDK.
+  - **Internal:** the CLAP and VST 3 hosts now share library loading and the
+    plugin file search (`src/plugin/PluginFiles`).
 - Mixer routing and plugin delay compensation (M5, ADR 0007):
   - `InsertState::output` plays an insert into the master, into another
     insert, or nowhere.

@@ -15,9 +15,9 @@ reused by other Vloom Audio tools.
 > alongside the metronome, with a loop region, and mixes each channel into one
 > of up to 125 insert buses. Outputs through each OS's own audio API, exports
 > songs to float / 16 / 24-bit WAV, and ships the `vloom-cli` developer tool.
-> Hosts CLAP plugins: effects on mixer inserts, instruments on channels
-> (ADR 0006). Inserts route into each other with sends, and plugin latency
-> is compensated (ADR 0007). Next: VST3 hosting and built-in effects.
+> Hosts CLAP and VST 3 plugins: effects on mixer inserts, instruments on
+> channels (ADR 0006). Inserts route into each other with sends, and plugin
+> latency is compensated (ADR 0007). Next: built-in effects.
 
 ---
 
