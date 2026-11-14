@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Vloom Audio contributors
+#include "support/Allocations.hpp"
+
 #include <vloom/engine/plugin/BuiltinProcessors.hpp>
 
 #include <catch2/catch_approx.hpp>
@@ -152,4 +154,35 @@ TEST_CASE("A built-in loaded before activation starts at its state", "[plugin][b
     REQUIRE(gain->loadState(stateOf({{kGain, -6.0}})));
     REQUIRE(gain->activate(kRate, 512));
     CHECK(runOnes(*gain, 1).front() == Approx(kMinus6Db).margin(1e-5)); // no glide
+}
+
+TEST_CASE("A built-in does not allocate on the audio thread", "[plugin][builtin]")
+{
+    auto gain = activeGain();
+    std::vector<float> left(512, 1.0f);
+    std::vector<float> right(512, 1.0f);
+    std::array<float*, 2> channels{left.data(), right.data()};
+    const std::array events{
+        vloom::ParameterEvent{10, kGain, -6.0},
+        vloom::ParameterEvent{200, kGain, 3.0},
+        vloom::ParameterEvent{300, kGain, std::numeric_limits<double>::quiet_NaN()},
+        vloom::ParameterEvent{400, 42, 1.0},
+    };
+    vloom::ProcessContext context;
+    context.channels = channels.data();
+    context.numChannels = 2;
+    context.numFrames = 512;
+
+    long long allocations = 0;
+    for (int block = 0; block < 50; ++block) {
+        if (block % 10 == 5) // control thread: outside the count
+            REQUIRE(gain->loadState(stateOf({{kGain, -0.5 * block}})));
+        context.parameters = block % 2 == 0 ? std::span<const vloom::ParameterEvent>(events)
+                                            : std::span<const vloom::ParameterEvent>();
+        const vloom::test::AllocationCounter counter;
+        gain->process(context); // block splits, a pending loadState(), glides
+        gain->reset();
+        allocations += counter.count();
+    }
+    CHECK(allocations == 0);
 }
