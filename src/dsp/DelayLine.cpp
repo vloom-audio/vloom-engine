@@ -22,12 +22,28 @@ void DelayLine::resize(int maxDelay, int numChannels)
 void DelayLine::process(float* const* channels, int numChannels, int numFrames, int delay) noexcept
 {
     delay = std::clamp(delay, 0, maxDelay_);
-    if (delay == 0 || numFrames <= 0 || size_ == 0) {
+    if (numFrames <= 0 || size_ == 0) {
         pending_ = 0;
         return;
     }
     numChannels = std::min(numChannels, channels_);
     const std::size_t mask = size_ - 1;
+    if (delay == 0) {
+        // Passed through untouched, but remembered: if the delay grows
+        // again, it reads what really came before, not older sound.
+        for (int ch = 0; ch < numChannels; ++ch) {
+            float* ring = buffer_.data() + static_cast<std::size_t>(ch) * size_;
+            const float* in = channels[ch];
+            std::size_t w = write_;
+            for (int i = 0; i < numFrames; ++i) {
+                ring[w] = in[i];
+                w = (w + 1) & mask;
+            }
+        }
+        write_ = (write_ + static_cast<std::size_t>(numFrames)) & mask;
+        pending_ = 0;
+        return;
+    }
     const auto lag = static_cast<std::size_t>(delay);
     int lastSound = -1; // last frame of the input that was not silent
     for (int ch = 0; ch < numChannels; ++ch) {

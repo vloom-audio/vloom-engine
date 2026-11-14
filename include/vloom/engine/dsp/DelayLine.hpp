@@ -26,7 +26,8 @@ public:
 
     /// Delays `numFrames` of `channels` (at most numChannels given to the
     /// constructor) in place by `delay` frames, clamped to 0 .. maxDelay().
-    /// A delay of 0 passes the audio through untouched.
+    /// A delay of 0 passes the audio through untouched (and keeps it, so a
+    /// later longer delay continues from it).
     void process(float* const* channels, int numChannels, int numFrames, int delay) noexcept;
     /// Forgets what it holds.
     void clear() noexcept;

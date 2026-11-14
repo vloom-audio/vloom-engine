@@ -152,6 +152,21 @@ TEST_CASE("A delay line delays by whole frames and knows when it is empty", "[mi
     line.process(channels, 1, 6, 0); // no delay: untouched
     CHECK(block == std::vector<float>(6, 2.0f));
 
+    // N, then 0, then M frames: the M-frame delay reads what came during the
+    // 0 delay, not what was left over from N.
+    vloom::DelayLine changing(8, 1);
+    std::vector<float> ones(6, 1.0f);
+    float* one[1] = {ones.data()};
+    changing.process(one, 1, 6, 6); // 6 ones go in
+    std::vector<float> twos(6, 2.0f);
+    float* two[1] = {twos.data()};
+    changing.process(two, 1, 6, 0); // 6 twos pass through
+    CHECK(twos == std::vector<float>(6, 2.0f));
+    std::vector<float> zeros(6, 0.0f);
+    float* zero[1] = {zeros.data()};
+    changing.process(zero, 1, 6, 3);
+    CHECK(zeros == std::vector<float>{2, 2, 2, 0, 0, 0});
+
     vloom::DelayLine shortLine(4, 1);
     block.assign(6, 0.0f);
     block[0] = 1.0f;
