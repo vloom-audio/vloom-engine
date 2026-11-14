@@ -11,3 +11,4 @@
   - [0005 Immutable snapshots for state the audio thread reads](adr/0005-state-snapshots-for-the-audio-thread.md)
   - [0006 Plugin host interface](adr/0006-plugin-host-interface.md)
   - [0007 Mixer routing and delay compensation](adr/0007-mixer-routing-and-delay-compensation.md)
+  - [0008 Built-in processors from vloom-dsp](adr/0008-built-in-processors-from-vloom-dsp.md)

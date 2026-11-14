@@ -6,6 +6,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **Breaking:** `plugin/GainProcessor` is removed. Use
+  `createBuiltinProcessor("vloom.gain")` instead; the id and parameter 0
+  (dB) stay the same. A change now glides over 5 ms rather than over the
+  block it arrives in.
+
 ### Security
 - Supply chain: GitHub Actions are pinned to commit SHAs (checkout v7.0.1, cache
   v6.1.0; Dependabot keeps them current), the CPM.cmake download is checked against a
@@ -96,6 +102,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
   (`WavFileWriter`), so a failed write never leaves a broken file.
 
 ### Added
+- Built-in processors from vloom-dsp (M5, ADR 0008):
+  - The engine pulls in vloom-dsp (MIT, our own DSP library) with CPM,
+    pinned to a commit, and links it privately.
+  - `plugin/BuiltinProcessors`: `builtinProcessors()` lists the built-ins
+    and `createBuiltinProcessor(id)` makes one.
+  - One adapter wraps every vloom-dsp effect as an `AudioProcessor`. It
+    applies parameter changes at their frame, clamps values and ignores NaN.
+  - The state format is shared by every built-in ("VLB1" plus id/value
+    pairs), and unknown ids are skipped.
 - **VST 3 hosting (M5, ADR 0006):** `plugin/Vst3Host`.
   - **Loading:** `Vst3Library::open()` loads a .vst3, as a bundle or a
     single file, and lists its audio plugins as effects or instruments.
@@ -139,7 +154,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   activates the hosted effects again at the new rate. An inactive or
   bypassed processor passes audio through.
 - Built-in effect `plugin/GainProcessor` ("vloom.gain", -60 .. +12 dB,
-  ramped): the first `AudioProcessor`.
+  ramped): the first `AudioProcessor`. Replaced in M5 by
+  `createBuiltinProcessor("vloom.gain")` (ADR 0008).
 - CLAP hosting (M4, ADR 0006): `plugin/ClapHost` loads .clap files
   (`ClapLibrary::open()`, once per file), lists their plugins (effect or
   instrument) and creates them as `AudioProcessor`s with parameters, state,
