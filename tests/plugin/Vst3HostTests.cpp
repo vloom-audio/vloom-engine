@@ -141,6 +141,14 @@ TEST_CASE("A VST 3 effect: parameters, processing, state and latency", "[plugin]
     CHECK_FALSE(other->processor().loadState(std::vector<std::uint8_t>{1, 2, 3}));
 }
 
+TEST_CASE("The host's state stream refuses positions out of range", "[plugin][vst3]")
+{
+    // The Keys plugin's getState() tries overflowing and huge seeks and a
+    // write past the stream's cap; it fails the save unless all are refused.
+    auto keys = load("Keys");
+    CHECK_FALSE(keys->processor().saveState().empty());
+}
+
 TEST_CASE("A VST 3 effect on an insert", "[plugin][vst3][mixer]")
 {
     vloom::Engine engine;

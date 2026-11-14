@@ -317,9 +317,12 @@ public:
     tresult PLUGIN_API restartComponent(int32) override { return kResultOk; }
 };
 
-/// A byte stream in memory, for state.
+/// A byte stream in memory, for state. Positions come from the plugin:
+/// they are checked, and the stream never grows past kMaxSize.
 class MemoryStream final : public Steinberg::IBStream {
 public:
+    static constexpr std::int64_t kMaxSize = std::int64_t{1} << 30; ///< 1 GiB
+
     MemoryStream() = default;
     explicit MemoryStream(std::span<const std::uint8_t> data)
         : data_(data.begin(), data.end())
@@ -355,8 +358,15 @@ public:
         if (numBytes < 0)
             return kInvalidArgument;
         const auto n = static_cast<std::size_t>(numBytes);
-        if (position_ + n > data_.size())
-            data_.resize(position_ + n);
+        if (static_cast<std::int64_t>(position_) + numBytes > kMaxSize)
+            return kResultFalse;
+        if (position_ + n > data_.size()) {
+            try {
+                data_.resize(position_ + n);
+            } catch (...) { // never through the plugin's C ABI
+                return Steinberg::kOutOfMemory;
+            }
+        }
         if (n > 0)
             std::memcpy(data_.data() + position_, buffer, n);
         position_ += n;
@@ -371,9 +381,11 @@ public:
             base = static_cast<std::int64_t>(position_);
         else if (mode == kIBSeekEnd)
             base = static_cast<std::int64_t>(data_.size());
-        const std::int64_t to = base + pos;
-        if (to < 0)
+        // Both are within 0 .. kMaxSize, so this neither overflows nor
+        // reaches a position the stream could not grow to.
+        if (pos < -base || pos > kMaxSize - base)
             return kInvalidArgument;
+        const std::int64_t to = base + pos;
         position_ = static_cast<std::size_t>(to);
         if (result != nullptr)
             *result = to;

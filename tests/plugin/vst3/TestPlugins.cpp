@@ -252,7 +252,25 @@ public:
         return kResultOk;
     }
     tresult PLUGIN_API setState(IBStream*) override { return kResultOk; }
-    tresult PLUGIN_API getState(IBStream*) override { return kResultOk; }
+    /// Probes the host's stream with positions a careless or hostile
+    /// plugin might give: all must be refused. Saves nothing.
+    tresult PLUGIN_API getState(IBStream* state) override
+    {
+        if (state == nullptr)
+            return kResultFalse;
+        int64 at = 0;
+        const bool refused = state->seek(0x7FFFFFFFFFFFFFFF, IBStream::kIBSeekSet, &at) != kResultOk
+            && state->seek(-1, IBStream::kIBSeekSet, &at) != kResultOk
+            && state->seek(int64{1} << 40, IBStream::kIBSeekCur, &at) != kResultOk;
+        if (!refused || state->seek(0, IBStream::kIBSeekSet, &at) != kResultOk)
+            return kResultFalse;
+        state->seek((int64{1} << 30) - 1, IBStream::kIBSeekSet, &at); // allowed, at the cap
+        char byte = 1;
+        int32 written = 0;
+        if (state->write(&byte, 2, &written) == kResultOk) // would pass the cap
+            return kResultFalse;
+        return state->seek(0, IBStream::kIBSeekSet, &at); // and leave it empty
+    }
     uint32 PLUGIN_API getLatencySamples() override { return 0; }
 
     tresult PLUGIN_API connect(IConnectionPoint* other) override
