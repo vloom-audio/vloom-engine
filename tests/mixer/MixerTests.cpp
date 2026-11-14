@@ -50,6 +50,15 @@ std::unique_ptr<vloom::SequencerState> rack(std::vector<vloom::ChannelState> cha
     return state;
 }
 
+/// An insert with `gain` and `pan`, no effects.
+vloom::InsertState level(float gain, float pan)
+{
+    vloom::InsertState state;
+    state.gain = gain;
+    state.pan = pan;
+    return state;
+}
+
 std::unique_ptr<const vloom::MixerState> mixer(std::vector<vloom::InsertState> inserts)
 {
     auto state = std::make_unique<vloom::MixerState>();
@@ -82,7 +91,7 @@ TEST_CASE("A channel plays through the insert it is routed to", "[mixer]")
     vloom::Engine engine;
     prepare(engine);
     engine.setSequencerState(rack({channel(constant(48000), std::make_shared<vloom::ChannelVoices>(), 3)}));
-    engine.setMixerState(mixer({{}, {}, {0.5f, 0.0f}})); // insert 3 at half volume
+    engine.setMixerState(mixer({{}, {}, level(0.5f, 0.0f)})); // insert 3 at half volume
     engine.play();
     const auto audio = render(engine, 0.1);
     CHECK(left(audio, 0) == Approx(0.5f * kCentre));
@@ -98,7 +107,7 @@ TEST_CASE("Inserts are panned and silenced by their gain", "[mixer]")
     prepare(engine);
     engine.setSequencerState(rack({channel(constant(48000), std::make_shared<vloom::ChannelVoices>(), 1),
         channel(constant(48000), std::make_shared<vloom::ChannelVoices>(), 2)}));
-    engine.setMixerState(mixer({{1.0f, 1.0f}, {0.0f, 0.0f}})); // 1: hard right, 2: muted
+    engine.setMixerState(mixer({level(1.0f, 1.0f), level(0.0f, 0.0f)})); // 1: hard right, 2: muted
     engine.play();
     const auto audio = render(engine, 0.05);
     CHECK(left(audio, 10) == Approx(0.0f).margin(1e-7));
@@ -160,7 +169,7 @@ TEST_CASE("Mixing through inserts does not allocate", "[mixer]")
     for (int i = 0; i < 8; ++i)
         channels.push_back(channel(constant(3000), std::make_shared<vloom::ChannelVoices>(), i % 4));
     engine.setSequencerState(rack(std::move(channels)));
-    engine.setMixerState(mixer({{0.8f, -0.2f}, {1.0f, 0.5f}, {0.3f, 0.0f}}));
+    engine.setMixerState(mixer({level(0.8f, -0.2f), level(1.0f, 0.5f), level(0.3f, 0.0f)}));
     engine.play();
     std::vector<float> l(256), r(256);
     std::array<float*, 2> out{l.data(), r.data()};

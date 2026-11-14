@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <clap/clap.h>
 #include <cstring>
+#include <iterator>
 
 namespace {
 
