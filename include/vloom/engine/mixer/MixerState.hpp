@@ -29,7 +29,7 @@ struct InsertState {
     /// the engine's rate and kMaxBlockFrames) before publishing the state; a
     /// null entry or an inactive instance is skipped. An insert with effects
     /// is processed every block, so their tails ring out.
-    std::vector<std::shared_ptr<PluginInstance>> effects;
+    std::vector<std::shared_ptr<PluginInstance>> effects{}; // defaulted: {gain, pan} stays warning-free
 };
 
 /// Immutable snapshot of the mixer, published with Engine::setMixerState().
