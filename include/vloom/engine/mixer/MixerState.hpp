@@ -2,8 +2,11 @@
 // Copyright (C) 2026 Vloom Audio contributors
 #pragma once
 
+#include "vloom/engine/plugin/PluginInstance.hpp"
+
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <vector>
 
 namespace vloom {
@@ -21,6 +24,12 @@ inline constexpr int kMaxBlockFrames = 4096;
 struct InsertState {
     float gain = 1.0f; ///< linear, 0 .. 4
     float pan = 0.0f; ///< balance, -1 (left) .. +1 (right)
+    /// The insert's effect chain, processed in order before gain and pan
+    /// (ADR 0006). Activate each instance (PluginInstance::activate() with
+    /// the engine's rate and kMaxBlockFrames) before publishing the state; a
+    /// null entry or an inactive instance is skipped. An insert with effects
+    /// is processed every block, so their tails ring out.
+    std::vector<std::shared_ptr<PluginInstance>> effects;
 };
 
 /// Immutable snapshot of the mixer, published with Engine::setMixerState().

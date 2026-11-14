@@ -15,7 +15,7 @@ reused by other Vloom Audio tools.
 > alongside the metronome, with a loop region, and mixes each channel into one
 > of up to 125 insert buses. Outputs through each OS's own audio API, exports
 > songs to float / 16 / 24-bit WAV, and ships the `vloom-cli` developer tool.
-> Next: M4, plugin hosting (CLAP).
+> Next: M4, plugin hosting: the interface is in (ADR 0006); CLAP hosting next.
 
 ---
 
@@ -147,7 +147,7 @@ vloom-engine/
 | **M1.5** | Sample preview voice | *Done* |
 | **M2** | MIDI notes, pitched sampler, first built-in synth, master pitch | *Done* |
 | **M3** | Arrangement (patterns on a timeline), song mode, loop region, WAV export | *Done* |
-| **M4** | Plugin host interface, CLAP hosting | *Next* |
+| **M4** | Plugin host interface ✅, CLAP hosting | *In progress* |
 | **M5** | VST3 hosting, built-in effects, sends, delay compensation | *Planned* |
 | **M6** | Audio input and recording, MIDI input | *Planned* |
 

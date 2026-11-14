@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Vloom Audio contributors
 #include "vloom/engine/Engine.hpp"
 
+#include "vloom/engine/plugin/PluginInstance.hpp"
 #include "vloom/engine/sample/SampleBuffer.hpp"
 
 #include <algorithm>
@@ -12,6 +13,14 @@
 #include <limits>
 
 namespace vloom {
+
+namespace {
+
+/// Inserts a mixer state does not list play at unity. Built at start-up: a
+/// function-local static would be built (and allocate) on the audio thread.
+const InsertState kUnityInsert{};
+
+} // namespace
 
 Engine::Engine()
     : busMemory_(static_cast<std::size_t>(2 * (kMaxInserts + 1) * kMaxBlockFrames), 0.0f)
@@ -36,6 +45,13 @@ void Engine::prepare(double sampleRate, int /*maxBlockSize*/)
     sequencer_.resetVoices();
     previewSampler_.reset();
     wasRolling_ = false;
+
+    // Hosted effects run at the new rate from now on (ADR 0006).
+    if (const MixerState* mixer = mixer_.current())
+        for (const InsertState& insert : mixer->inserts)
+            for (const auto& effect : insert.effects)
+                if (effect != nullptr)
+                    effect->activate(sampleRate, kMaxBlockFrames);
 
     // Commands sent while the device was gone (Stop, Locate ...) still count.
     applyCommands();
@@ -325,16 +341,21 @@ void Engine::process(float* const* out, int numChannels, int numFrames) noexcept
 void Engine::mixBuses(float* const* out, int numChannels, int numFrames) noexcept
 {
     const MixerState* state = mixer_.acquire();
+    const TransportInfo transport{transport_.isPlaying(), transport_.tempo(), transport_.positionTicks()};
     float* masterLeft = buses_[0];
     float* masterRight = buses_[1];
     const float n = static_cast<float>(numFrames);
     for (int insert = 1; insert <= kMaxInserts; ++insert) {
         const auto index = static_cast<std::size_t>(insert);
-        const InsertState settings
-            = state != nullptr && index <= state->inserts.size() ? state->inserts[index - 1] : InsertState{};
+        // By reference: copying would copy the effect chain (allocation and
+        // reference counting on the audio thread).
+        const InsertState& settings
+            = state != nullptr && index <= state->inserts.size() ? state->inserts[index - 1] : kUnityInsert;
         const StereoGain target = balance(settings.gain, settings.pan);
         StereoGain& applied = insertApplied_[index];
-        if (!busUsed_[index]) {
+        // Effects run even on silence: a reverb or delay tail goes on.
+        const bool hasEffects = !settings.effects.empty();
+        if (!busUsed_[index] && !hasEffects) {
             applied = target; // silent: nothing to ramp
             insertSounding_[index] = false;
             continue;
@@ -345,6 +366,9 @@ void Engine::mixBuses(float* const* out, int numChannels, int numFrames) noexcep
         busUsed_[index] = false;
         float* left = buses_[2 * index];
         float* right = buses_[2 * index + 1];
+        for (const auto& effect : settings.effects)
+            if (effect != nullptr)
+                effect->process(left, right, numFrames, transport);
         const float stepLeft = (target.left - applied.left) / n;
         const float stepRight = (target.right - applied.right) / n;
         float peakLeft = 0.0f;

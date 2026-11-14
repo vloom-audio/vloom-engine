@@ -30,6 +30,10 @@ target_sources(vloom_engine PRIVATE
     sample/SampleLoader.cpp
     sample/WavReader.cpp
 
+    # plugin — hosted processors behind one interface (ADR 0006)
+    plugin/GainProcessor.cpp
+    plugin/PluginInstance.cpp
+
     # sequencer — the channel rack: steps that trigger samples
     sequencer/StepSequencer.cpp
 
