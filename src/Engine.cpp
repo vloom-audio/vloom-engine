@@ -465,7 +465,10 @@ void Engine::mixInsert(
         float* targetLeft = buses_[2 * to];
         float* targetRight = buses_[2 * to + 1];
         busUsed_[to] = true;
-        if (route.delay == 0) {
+        // A route that never had a delay adds straight in. One that had keeps
+        // going through its line even at 0, so the line stays current and
+        // reports itself idle.
+        if (route.delay == 0 && state.line.maxDelay() == 0) {
             for (int i = 0; i < numFrames; ++i) {
                 const float g = from + step * static_cast<float>(i + 1);
                 targetLeft[i] += sourceLeft[i] * g;

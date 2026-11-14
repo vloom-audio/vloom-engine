@@ -14,6 +14,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <memory>
 #include <vector>
@@ -366,4 +367,40 @@ TEST_CASE("Routing and compensation do not allocate on the audio thread", "[mixe
     for (int i = 0; i < 50; ++i)
         engine.process(out, 2, 256);
     CHECK(counter.count() == 0);
+}
+
+TEST_CASE("Removing latency from a live graph neither hangs nor replays a delay", "[mixer][pdc]")
+{
+    constexpr int kLatency = 300;
+    const auto withLatency = [](bool latency) {
+        auto state = mixer(2);
+        if (latency)
+            state->inserts[0].effects.push_back(latent(kLatency)); // delays the route 2 -> master
+        return state;
+    };
+    vloom::Engine engine;
+    prepare(engine);
+    engine.setSequencerState(rack(click(), {2}));
+    engine.setMixerState(withLatency(true));
+    engine.play();
+    std::vector<float> left(64);
+    std::vector<float> right(64);
+    float* out[2] = {left.data(), right.data()};
+    float heard = 0.0f;
+    const auto run = [&](int blocks) {
+        for (int b = 0; b < blocks; ++b) {
+            engine.process(out, 2, 64);
+            for (const float s : left)
+                heard = std::max(heard, std::abs(s));
+        }
+    };
+    run(1); // the click is inside the route's delay now
+    engine.setMixerState(withLatency(false)); // the route's delay drops to 0
+    run(20);
+    engine.setMixerState(withLatency(true)); // and comes back
+    run(20);
+    // The click was cut when the delay went (it had not come out yet); it
+    // must not come back with the delay.
+    CHECK(heard == 0.0f);
+    CHECK(engine.latencyFrames() == kLatency);
 }
