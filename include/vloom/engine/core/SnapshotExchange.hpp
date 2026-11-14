@@ -53,6 +53,19 @@ public:
         collect();
     }
 
+    /// Calls `fn(const T&)` for every snapshot the audio thread may play:
+    /// the current one, the draining ones and the one published but not
+    /// picked up yet. Only while the audio thread is stopped (e.g. to
+    /// prepare what they hold for a new sample rate).
+    template <typename Fn> void forEachSnapshot(Fn&& fn) const
+    {
+        if (current_ != nullptr)
+            fn(*current_);
+        forEachDraining(fn);
+        if (const T* next = pending_.load(std::memory_order_acquire))
+            fn(*next);
+    }
+
     /// Deletes the snapshots the audio thread has finished with. Call it
     /// regularly (publish() does too). Returns how many were deleted.
     std::size_t collect()

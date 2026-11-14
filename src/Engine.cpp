@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Vloom Audio contributors
 #include "vloom/engine/Engine.hpp"
 
+#include "vloom/engine/plugin/PluginInstance.hpp"
 #include "vloom/engine/sample/SampleBuffer.hpp"
 
 #include <algorithm>
@@ -12,6 +13,14 @@
 #include <limits>
 
 namespace vloom {
+
+namespace {
+
+/// Inserts a mixer state does not list play at unity. Built at start-up: a
+/// function-local static would be built (and allocate) on the audio thread.
+const InsertState kUnityInsert{};
+
+} // namespace
 
 Engine::Engine()
     : busMemory_(static_cast<std::size_t>(2 * (kMaxInserts + 1) * kMaxBlockFrames), 0.0f)
@@ -36,6 +45,17 @@ void Engine::prepare(double sampleRate, int /*maxBlockSize*/)
     sequencer_.resetVoices();
     previewSampler_.reset();
     wasRolling_ = false;
+
+    // Hosted effects run at the new rate from now on (ADR 0006).
+    // Every state the audio thread may play, the one published but not
+    // picked up yet included.
+    mixer_.forEachSnapshot([&](const MixerState& mixer) {
+        for (const InsertState& insert : mixer.inserts)
+            for (const auto& effect : insert.effects)
+                if (effect != nullptr)
+                    effect->activate(sampleRate, kMaxBlockFrames);
+    });
+    sequencer_.activatePlugins(sampleRate, kMaxBlockFrames);
 
     // Commands sent while the device was gone (Stop, Locate ...) still count.
     applyCommands();
@@ -322,7 +342,8 @@ void Engine::process(float* const* out, int numChannels, int numFrames) noexcept
     measureLoad(std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count(), numFrames);
 }
 
-void Engine::mixBuses(float* const* out, int numChannels, int numFrames) noexcept
+void Engine::mixBuses(
+    float* const* out, int numChannels, int numFrames, const TransportInfo& transport) noexcept
 {
     const MixerState* state = mixer_.acquire();
     float* masterLeft = buses_[0];
@@ -330,11 +351,15 @@ void Engine::mixBuses(float* const* out, int numChannels, int numFrames) noexcep
     const float n = static_cast<float>(numFrames);
     for (int insert = 1; insert <= kMaxInserts; ++insert) {
         const auto index = static_cast<std::size_t>(insert);
-        const InsertState settings
-            = state != nullptr && index <= state->inserts.size() ? state->inserts[index - 1] : InsertState{};
+        // By reference: copying would copy the effect chain (allocation and
+        // reference counting on the audio thread).
+        const InsertState& settings
+            = state != nullptr && index <= state->inserts.size() ? state->inserts[index - 1] : kUnityInsert;
         const StereoGain target = balance(settings.gain, settings.pan);
         StereoGain& applied = insertApplied_[index];
-        if (!busUsed_[index]) {
+        // Effects run even on silence: a reverb or delay tail goes on.
+        const bool hasEffects = !settings.effects.empty();
+        if (!busUsed_[index] && !hasEffects) {
             applied = target; // silent: nothing to ramp
             insertSounding_[index] = false;
             continue;
@@ -345,6 +370,9 @@ void Engine::mixBuses(float* const* out, int numChannels, int numFrames) noexcep
         busUsed_[index] = false;
         float* left = buses_[2 * index];
         float* right = buses_[2 * index + 1];
+        for (const auto& effect : settings.effects)
+            if (effect != nullptr)
+                effect->process(left, right, numFrames, transport);
         const float stepLeft = (target.left - applied.left) / n;
         const float stepRight = (target.right - applied.right) / n;
         float peakLeft = 0.0f;
@@ -511,6 +539,11 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
     for (int ch = 0; ch < numChannels; ++ch)
         std::memset(out[ch], 0, sizeof(float) * static_cast<std::size_t>(numFrames));
 
+    // What hosted plugins are told: the song as at the block's first frame
+    // (they process the block at once, after the transport has moved on).
+    const TransportInfo blockTransport{transport_.isPlaying(), transport_.tempo(),
+        std::isfinite(transport_.positionTicks()) ? transport_.positionTicks() : 0.0};
+
     // The block is played in spans that end where the loop jumps back or
     // the transport stops, each on its exact sample. A jump looks like a
     // locate to the scheduler (the next span is "jumped"): streams start
@@ -561,9 +594,9 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
         }
     }
 
-    sequencer_.mix(numFrames, buses_.data(), busUsed_.data());
+    sequencer_.mix(numFrames, buses_.data(), busUsed_.data(), blockTransport);
     renderPreview(numFrames);
-    mixBuses(out, numChannels, numFrames);
+    mixBuses(out, numChannels, numFrames, blockTransport);
     sequencer_.endBlock();
     applyMasterGain(out, numChannels, numFrames);
     sanitizeOutput(out, numChannels, numFrames);

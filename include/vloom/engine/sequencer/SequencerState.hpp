@@ -5,7 +5,9 @@
 #include "vloom/engine/dsp/Sampler.hpp"
 #include "vloom/engine/dsp/Synth.hpp"
 #include "vloom/engine/mixer/MixerState.hpp"
+#include "vloom/engine/plugin/PluginInstance.hpp"
 #include "vloom/engine/sample/SampleBuffer.hpp"
+#include "vloom/engine/sequencer/PluginNotes.hpp"
 #include "vloom/engine/time/MusicalTime.hpp"
 
 #include <algorithm>
@@ -32,28 +34,36 @@ public:
 
     Sampler sampler;
     Synth synth;
+    PluginNotes plugin; ///< notes for ChannelState::plugin
 
-    // Both instruments at once: a channel switched from one to the other
-    // lets the first one's notes ring out.
-    [[nodiscard]] int activeVoices() const noexcept { return sampler.activeVoices() + synth.activeVoices(); }
+    // Every instrument at once: a channel switched from one to another lets
+    // the first one's notes ring out. `frame` is where in the block a
+    // plugin's note-offs land (the built-ins render as they go).
+    [[nodiscard]] int activeVoices() const noexcept
+    {
+        return sampler.activeVoices() + synth.activeVoices() + plugin.active();
+    }
     [[nodiscard]] std::int64_t nextRelease() const noexcept
     {
-        return std::min(sampler.nextRelease(), synth.nextRelease());
+        return std::min({sampler.nextRelease(), synth.nextRelease(), plugin.nextRelease()});
     }
-    void release(std::int64_t upTo) noexcept
+    void release(std::int64_t upTo, int frame = 0) noexcept
     {
         sampler.release(upTo);
         synth.release(upTo);
+        plugin.release(upTo, frame);
     }
-    void releaseHeld() noexcept
+    void releaseHeld(int frame = 0) noexcept
     {
         sampler.releaseHeld();
         synth.releaseHeld();
+        plugin.releaseHeld(frame);
     }
-    void stopAll() noexcept
+    void stopAll(int frame = 0) noexcept
     {
         sampler.stopAll();
         synth.stopAll();
+        plugin.releaseHeld(frame); // the plugin fades its own notes
     }
 
     // ---- audio thread
@@ -82,6 +92,7 @@ struct Note {
 enum class Instrument : std::uint8_t {
     Sampler, ///< its sample (Sampler)
     Synth, ///< the built-in synth (Synth), with ChannelState::synth
+    Plugin, ///< a hosted instrument (ChannelState::plugin), ADR 0006
 };
 
 /// One channel of the channel rack, as the audio thread sees it.
@@ -89,6 +100,13 @@ struct ChannelState {
     Instrument instrument = Instrument::Sampler;
     /// Instrument::Synth: its sound. A step plays rootKey for one step.
     SynthSettings synth;
+    /// Instrument::Plugin: the hosted instrument, activated (engine rate,
+    /// kMaxBlockFrames) before the state is published. Steps play rootKey
+    /// for one step, notes their key; the master pitch does not apply. It is
+    /// processed every block while set, whatever `instrument` is, so its
+    /// notes and tail finish after a switch. One instance per channel: two
+    /// channels must not share one.
+    std::shared_ptr<PluginInstance> plugin;
     std::shared_ptr<const SampleBuffer> sample; ///< at the engine's sample rate (sample/SampleLoader)
     std::shared_ptr<ChannelVoices> voices; ///< required to sound; keep it across edits
     float gain = 1.0f; ///< channel volume, linear 0 .. 4; changes ramp over one block, ringing notes too

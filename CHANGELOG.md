@@ -85,6 +85,33 @@ and the project uses [Semantic Versioning](https://semver.org/).
   (`WavFileWriter`), so a failed write never leaves a broken file.
 
 ### Added
+- Plugin host interface (M4, ADR 0006): `plugin/AudioProcessor`, the one
+  interface every hosted processor implements whatever its format (CLAP and
+  VST3 adapters come next), with parameters, per-block parameter changes and
+  note events at their frame, transport info, latency and state.
+  `plugin/PluginInstance` wraps one for the engine: activation, bypass, and a
+  lock-free queue of parameter changes (the latest per parameter at the next
+  block; kept while bypassed). Mixer inserts have an effect chain
+  (`InsertState::effects`), processed in order before gain and pan, every
+  block so tails ring out; a removed effect is destroyed on the control
+  thread once the audio thread is done with it, and `Engine::prepare()`
+  activates the hosted effects again at the new rate. An inactive or
+  bypassed processor passes audio through.
+- Built-in effect `plugin/GainProcessor` ("vloom.gain", -60 .. +12 dB,
+  ramped): the first `AudioProcessor`.
+- CLAP hosting (M4, ADR 0006): `plugin/ClapHost` loads .clap files
+  (`ClapLibrary::open()`, once per file), lists their plugins (effect or
+  instrument) and creates them as `AudioProcessor`s with parameters, state,
+  latency, notes and transport. `clapSearchPaths()` / `findClapFiles()` find
+  installed plugins. The CLAP SDK (MIT, headers only) is pinned at 1.2.10.
+- Instrument plugins on channels: `Instrument::Plugin` with
+  `ChannelState::plugin`. Steps and piano-roll notes reach the plugin as
+  sample-accurate note events (`sequencer/PluginNotes`); it is processed once
+  per block and mixed like any channel. `Engine::prepare()` activates
+  channel plugins again too.
+- `PluginInstance::process()` takes note events; `AudioProcessor::idle()`
+  for work a plugin asks to run on the main thread. Hosted plugins get the
+  transport as at the block's start.
 - Audio clips fitted to the song's tempo: `SongAudioClip::sample` replaces
   the channel's sample for that clip (e.g. a copy time-stretched to the
   tempo) and `SongAudioClip::rate` plays it faster or slower (resampled, the
