@@ -29,6 +29,7 @@ using Catch::Approx;
 namespace {
 
 constexpr double kRate = 48000.0;
+constexpr std::int64_t kStep = vloom::kPpq / 4; ///< ticks per step (the default ticksPerStep)
 
 std::shared_ptr<const vloom::SampleBuffer> constant(int frames, float value = 1.0f)
 {
@@ -270,7 +271,7 @@ TEST_CASE("Clip and note values far out of range are ignored, not overflowed", "
     constexpr auto kMax = std::numeric_limits<std::int64_t>::max();
     state->patternClips.push_back({0, kMax / 2, kMax / 2});
     state->patternClips.push_back({0, 0, kMax});
-    state->patternClips.push_back({0, 0, 4}); // the one that plays
+    state->patternClips.push_back({0, 0, 4 * kStep}); // the one that plays
     state->audioClips.push_back({0, kMax / 3});
     state->audioClips.push_back({0, -5});
     engine.setSequencerState(std::move(state));
@@ -340,7 +341,7 @@ TEST_CASE("Playing from just past an audio clip's start plays it once", "[audit]
     c.sample = constant(4800);
     c.voices = std::make_shared<vloom::ChannelVoices>();
     state->channels.push_back(std::move(c));
-    state->audioClips.push_back({0, 4});
+    state->audioClips.push_back({0, 4 * kStep});
     engine.setSequencerState(std::move(state));
     engine.locate(4.0 * vloom::kPpq / 4 + 0.01); // 0.01 tick = a quarter of a frame past the start
     engine.play();

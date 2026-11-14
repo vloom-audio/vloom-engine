@@ -39,19 +39,19 @@ public:
     /// Hands states no voice needs any more back for deletion. Call at the end of every block.
     void endBlock() noexcept;
 
-    /// Ticks per step of the current state; 0 when there is none (nothing to schedule).
+    /// Ticks per step of pattern mode's step grid; 0 when there is nothing
+    /// to schedule on it: no state, or song mode (whose clips sit on any
+    /// tick, so their steps come with the notes: nextNoteStart()).
     [[nodiscard]] int ticksPerStep() const noexcept;
-    /// Starts the notes of absolute step `step` (counted from the song
-    /// start). Pattern mode: the pattern loops every stepCount steps. Song
-    /// mode: the pattern clips covering the step, and the audio clips that
-    /// start on it; `framesPerTick` (the tempo now) places an audio clip's
-    /// offset in its sample.
-    void triggerStep(std::int64_t step, double framesPerTick = 0.0) noexcept;
+    /// Pattern mode: plays absolute step `step` (counted from the song
+    /// start) of the channels' steps; the pattern loops every stepCount
+    /// steps. Song mode: nothing (see startNotes()).
+    void triggerStep(std::int64_t step) noexcept;
     /// Playback starts (or jumps) to `ticks`: held notes are released (their
     /// ends belong to the old position). Song mode: the audio clips already
     /// under way there start part-way through, `framesPerTick` converting
-    /// the distance; clips starting exactly at `ticks` are left to
-    /// triggerStep(). The channels of the audio clips fade out what they
+    /// the distance; clips starting less than a frame before `ticks`, or
+    /// later, are left to startNotes(). The channels of the audio clips fade out what they
     /// were playing first.
     void resumeAt(double ticks, double framesPerTick) noexcept;
 
@@ -64,12 +64,15 @@ public:
     /// The furthest tick anything plays at (Transport::kMaxTicks): clips
     /// reaching further are ignored, notes are held at most this long.
     static constexpr std::int64_t kMaxTicks = 100'000'000'000;
-    /// The first tick at or after `from` (counted from the song start, like
-    /// steps) where a note starts; kNoEvent if none.
+    /// The first tick at or after `from` (counted from the song start) where
+    /// a note starts; in song mode also where a pattern clip's step or an
+    /// audio clip starts. kNoEvent if none.
     [[nodiscard]] std::int64_t nextNoteStart(std::int64_t from) const noexcept;
-    /// Starts the notes starting at `tick`. Each is held until endNotes()
-    /// reaches its end.
-    void startNotes(std::int64_t tick) noexcept;
+    /// Starts the notes starting at `tick`, each held until endNotes()
+    /// reaches its end. Song mode: also the pattern clips' steps on `tick`
+    /// and the audio clips starting there; `framesPerTick` (the tempo now)
+    /// places an audio clip's offset in its sample.
+    void startNotes(std::int64_t tick, double framesPerTick = 0.0) noexcept;
     /// The earliest tick a sounding note ends at; kNoEvent if none.
     [[nodiscard]] std::int64_t nextNoteEnd() const noexcept;
     /// Releases the notes ending at or before `upTo`.
@@ -110,13 +113,9 @@ private:
     /// Audio thread: the frame of the block events fire at now (where the
     /// next render() starts), for the note events of instrument plugins.
     int eventFrame_ = 0;
-    /// Plays one step of `channel` (absolute `step`): its sample, or on a
-    /// synth its root key for one step.
-    void playStep(const ChannelState& channel, std::int64_t step) const noexcept;
-    /// A clip of the current state whose ticks all stay within kMaxTicks
-    /// (ticksPerStep > 0 required). Others are ignored.
-    [[nodiscard]] bool clipInRange(
-        std::int64_t startStep, std::int64_t lengthSteps, std::int64_t offsetSteps = 0) const noexcept;
+    /// Plays one step of `channel`: its sample, or on a synth or plugin its
+    /// root key until tick `end`.
+    void playStep(const ChannelState& channel, std::int64_t end) const noexcept;
     /// The tick an audio clip stops at (kNoEvent: the sample's end).
     [[nodiscard]] std::int64_t audioClipEnd(const SongAudioClip& clip) const noexcept;
     /// Starts `note` on `channel`, ending at `end` ticks.

@@ -73,6 +73,17 @@ and the project uses [Semantic Versioning](https://semver.org/).
   `alignas` types cannot allocate on the audio thread unnoticed.
 
 ### Changed
+- Song-mode clips sit on any tick, not only on steps (a playlist can snap
+  them to 1/32 notes or finer). Breaking: `SongPatternClip` and
+  `SongAudioClip` take `startTick`, `lengthTicks` and `offsetTicks` (kPpq per
+  quarter note) instead of `startStep`, `lengthSteps` and `offsetSteps`;
+  multiply old values by `ticksPerStep`. A pattern clip's steps stay on its
+  pattern's grid: they play at `startTick - offsetTicks + n * ticksPerStep`.
+  Song mode's steps and audio clip starts are scheduled with the note starts
+  (`StepSequencer::nextNoteStart()` / `startNotes(tick, framesPerTick)`), so
+  `ticksPerStep()` is 0 in song mode and `triggerStep(step)` plays pattern
+  mode only. After a locate, starts less than a frame before the position
+  fire on the first sample, as steps already did.
 - `resample()` (used by `loadSample()`) works out each output frame's filter
   taps once for all channels instead of once per channel: about 30% faster on
   stereo files (a 4-minute song from 44.1 to 48 kHz: 4.6 s to 3.2 s in a

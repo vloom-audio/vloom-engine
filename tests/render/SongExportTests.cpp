@@ -27,6 +27,7 @@ using Catch::Approx;
 namespace {
 
 constexpr double kRate = 48000.0;
+constexpr std::int64_t kStep = vloom::kPpq / 4; ///< ticks per step (the default ticksPerStep)
 constexpr float kCentre = 0.70710678f;
 // 120 BPM: a 16th-note step (240 ticks) is 6000 frames.
 constexpr std::int64_t kStepFrames = 6000;
@@ -89,14 +90,14 @@ TEST_CASE("The song ends with its last pattern or audio clip", "[export]")
 {
     auto state = song(constant(48000)); // 1 s
     state.patterns.push_back(pattern({1}));
-    state.patternClips.push_back({0, 4, 8}); // steps 4 .. 11
+    state.patternClips.push_back({0, 4 * kStep, 8 * kStep}); // steps 4 .. 11
     CHECK(vloom::songEndTicks(state, 120.0) == 12 * 240);
 
     // At 120 BPM one second is 1920 ticks; at 60 BPM 960.
-    state.audioClips.push_back({0, 16}); // from tick 3840
+    state.audioClips.push_back({0, 16 * kStep}); // from tick 3840
     CHECK(vloom::songEndTicks(state, 120.0) == 3840 + 1920);
     CHECK(vloom::songEndTicks(state, 60.0) == 3840 + 960); // the same second is fewer ticks
-    state.audioClips.push_back({0, 20});
+    state.audioClips.push_back({0, 20 * kStep});
     CHECK(vloom::songEndTicks(state, 60.0) == 20 * 240 + 960);
 
     state.song = false; // pattern mode: one pass of the pattern
@@ -116,14 +117,14 @@ TEST_CASE("A cut audio clip ends the song where its part of the sample does", "[
 {
     auto state = song(constant(48000)); // 1 s: 1920 ticks at 120 BPM
     vloom::SongAudioClip clip{0, 0};
-    clip.offsetSteps = 2; // 480 ticks into the sample: 1440 left
+    clip.offsetTicks = 2 * kStep; // 480 ticks into the sample: 1440 left
     state.audioClips.push_back(clip);
     CHECK(vloom::songEndTicks(state, 120.0) == 1440);
-    state.audioClips[0].lengthSteps = 4; // 960 ticks long
+    state.audioClips[0].lengthTicks = 4 * kStep; // 960 ticks long
     CHECK(vloom::songEndTicks(state, 120.0) == 960);
-    state.audioClips[0].lengthSteps = 100; // longer than what is left: the sample's end
+    state.audioClips[0].lengthTicks = 100 * kStep; // longer than what is left: the sample's end
     CHECK(vloom::songEndTicks(state, 120.0) == 1440);
-    state.audioClips[0].offsetSteps = 10; // past the sample's end: silent
+    state.audioClips[0].offsetTicks = 10 * kStep; // past the sample's end: silent
     CHECK(vloom::songEndTicks(state, 120.0) == 0);
     // Fitted to the tempo by resampling at twice the speed: half as long.
     state.audioClips[0] = vloom::SongAudioClip{0, 0};
@@ -136,7 +137,7 @@ TEST_CASE("An export sounds exactly like the live engine", "[export]")
     TempFolder folder;
     auto state = song(constant(3000, 0.5f));
     state.patterns.push_back(pattern({1, 0, 1, 0}));
-    state.patternClips.push_back({0, 0, 4});
+    state.patternClips.push_back({0, 0, 4 * kStep});
 
     vloom::SongExportOptions options;
     options.format = vloom::WavFormat::Float32;
@@ -179,7 +180,7 @@ TEST_CASE("An export renders the tail after the song's end", "[export]")
     TempFolder folder;
     auto state = song(constant(48000, 0.25f)); // 1 s, far past the 1-step clip
     state.patterns.push_back(pattern({1}));
-    state.patternClips.push_back({0, 0, 1});
+    state.patternClips.push_back({0, 0, kStep});
     vloom::SongExportOptions options;
     options.format = vloom::WavFormat::Float32;
 
@@ -199,7 +200,7 @@ TEST_CASE("A cancelled export writes no file", "[export]")
     TempFolder folder;
     auto state = song(constant(100));
     state.patterns.push_back(pattern({1}, 1));
-    state.patternClips.push_back({0, 0, 64});
+    state.patternClips.push_back({0, 0, 64 * kStep});
     std::vector<double> seen;
     const auto result = vloom::exportSong(folder.file("x.wav"), state, nullptr, kRate, {}, [&](double done) {
         seen.push_back(done);
@@ -218,7 +219,7 @@ TEST_CASE("Export refuses what it cannot render right", "[export]")
     TempFolder folder;
     auto state = song(constant(100, 1.0f, 44100.0)); // loaded for another rate
     state.patterns.push_back(pattern({1}));
-    state.patternClips.push_back({0, 0, 4});
+    state.patternClips.push_back({0, 0, 4 * kStep});
     auto result = vloom::exportSong(folder.file("a.wav"), state, nullptr, kRate);
     CHECK_FALSE(result.ok);
     CHECK_FALSE(result.error.empty());
@@ -235,7 +236,7 @@ TEST_CASE("Export refuses what it cannot render right", "[export]")
     // is full (and the frame count never overflows: review finding).
     auto fine = song(constant(100));
     fine.patterns.push_back(pattern({1}));
-    fine.patternClips.push_back({0, 0, 4});
+    fine.patternClips.push_back({0, 0, 4 * kStep});
     options = {};
     for (const std::int64_t end : {std::numeric_limits<std::int64_t>::max(), std::int64_t{100'000'000'000},
              std::int64_t{2'000'000'000}}) {
@@ -285,7 +286,7 @@ TEST_CASE("A pattern clip longer than its pattern repeats it", "[export][song]")
     note.velocity = 1.0f;
     looped.notes.push_back({note});
     state->patterns.push_back(std::move(looped));
-    state->patternClips.push_back({0, 0, 10}); // ... in a 10-step clip: steps 0, 4, 8; notes 2, 6
+    state->patternClips.push_back({0, 0, 10 * kStep}); // ... in a 10-step clip: steps 0, 4, 8; notes 2, 6
     engine.setSequencerState(std::move(state));
     engine.play();
     vloom::OfflineRenderOptions render;
