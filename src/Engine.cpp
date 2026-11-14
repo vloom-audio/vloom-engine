@@ -196,6 +196,28 @@ void Engine::setMixerState(std::unique_ptr<const MixerState> state)
     lastMixer_ = published;
 }
 
+bool Engine::updatePluginLatency()
+{
+    if (lastMixer_ == nullptr || lastMixer_->state == nullptr)
+        return false;
+    const MixerState& state = *lastMixer_->state;
+    bool changed = false;
+    const auto read = [&changed](const std::vector<std::shared_ptr<PluginInstance>>& effects) {
+        for (const auto& effect : effects)
+            if (effect != nullptr && effect->updateLatency())
+                changed = true; // every one is read: each keeps its new value
+    };
+    for (const InsertState& insert : state.inserts)
+        read(insert.effects);
+    read(state.masterEffects);
+    if (!changed)
+        return false;
+    // The same settings, compensated for the new latency. Copying shares the
+    // instances; delay lines and send ramps carry over (ADR 0007).
+    setMixerState(std::make_unique<MixerState>(state));
+    return true;
+}
+
 float Engine::takeInsertPeak(int insert, int channel) noexcept
 {
     if (insert < 1 || insert > kMaxInserts || channel < 0 || channel > 1)

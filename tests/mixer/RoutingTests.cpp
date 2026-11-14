@@ -14,6 +14,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <memory>
@@ -52,6 +53,36 @@ public:
 
 private:
     int latency_;
+    vloom::DelayLine line_;
+};
+
+/// Like LatentProcessor, but its latency can change while it runs (as when
+/// a plugin's oversampling is switched on in its editor).
+class ChangingLatency final : public vloom::AudioProcessor {
+public:
+    static constexpr int kRoom = 4096;
+    explicit ChangingLatency(int latency)
+        : latency_(latency)
+    {
+    }
+    [[nodiscard]] vloom::PluginInfo info() const override
+    {
+        return {"test.changing", "Changing", "Tests", "1", {}};
+    }
+    bool activate(double /*sampleRate*/, int /*maxBlockFrames*/) override
+    {
+        line_.resize(kRoom);
+        return true;
+    }
+    [[nodiscard]] int latencyFrames() const override { return latency_.load(); }
+    void process(const vloom::ProcessContext& context) noexcept override
+    {
+        line_.process(context.channels, context.numChannels, context.numFrames, latency_.load());
+    }
+    void setLatency(int latency) { latency_.store(latency); }
+
+private:
+    std::atomic<int> latency_;
     vloom::DelayLine line_;
 };
 
@@ -465,6 +496,73 @@ TEST_CASE("Delay compensation memory is capped", "[mixer][pdc]")
     CHECK(graph->inputDelay[0] == vloom::kMaxLatencyFrames); // the master's own input comes first
 }
 
+TEST_CASE("A latency change while running is compensated once it is picked up", "[mixer][pdc]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    auto processor = std::make_unique<ChangingLatency>(100);
+    ChangingLatency* changing = processor.get();
+    auto effect = std::make_shared<vloom::PluginInstance>(std::move(processor));
+    REQUIRE(effect->activate(kRate, vloom::kMaxBlockFrames));
+    auto state = mixer(2);
+    state->inserts[0].effects.push_back(effect);
+    engine.setMixerState(std::move(state));
+    CHECK_FALSE(engine.updatePluginLatency()); // nothing changed
+    CHECK(engine.latencyFrames() == 0); // not played yet
+
+    // The plugin's latency grows, as when its oversampling is switched on.
+    changing->setLatency(350);
+    CHECK(effect->latencyFrames() == 100); // until it is read again
+    REQUIRE(engine.updatePluginLatency());
+    CHECK(effect->latencyFrames() == 350);
+    CHECK_FALSE(engine.updatePluginLatency()); // once
+
+    // Both tracks line up at the new latency.
+    engine.setSequencerState(rack(click(), {1, 2}));
+    engine.play();
+    const auto audio = render(engine, 0.05);
+    CHECK(sounding(audio) == std::vector<std::size_t>{350});
+    CHECK(left(audio, 350) == Approx(2.0f * kCentre).margin(1e-4));
+    CHECK(engine.latencyFrames() == 350);
+}
+
+TEST_CASE("A bypassed effect follows a latency change within its room", "[mixer][pdc]")
+{
+    auto processor = std::make_unique<ChangingLatency>(10);
+    ChangingLatency* changing = processor.get();
+    vloom::PluginInstance effect(std::move(processor));
+    REQUIRE(effect.activate(kRate, 256));
+    effect.setBypassed(true);
+    changing->setLatency(10 + vloom::PluginInstance::kBypassHeadroom + 500); // past the room
+    REQUIRE(effect.updateLatency());
+    CHECK(effect.latencyFrames() == 10 + vloom::PluginInstance::kBypassHeadroom + 500);
+
+    // An impulse comes out as late as the bypass line has room for.
+    const int room = 10 + vloom::PluginInstance::kBypassHeadroom;
+    std::vector<float> l(256), r(256);
+    int at = -1;
+    for (int block = 0; block * 256 < room + 512 && at < 0; ++block) {
+        std::fill(l.begin(), l.end(), 0.0f);
+        std::fill(r.begin(), r.end(), 0.0f);
+        if (block == 0)
+            l[0] = r[0] = 1.0f;
+        effect.process(l.data(), r.data(), 256, vloom::TransportInfo{});
+        for (int i = 0; i < 256 && at < 0; ++i)
+            if (l[static_cast<std::size_t>(i)] != 0.0f)
+                at = block * 256 + i;
+    }
+    CHECK(at == room);
+}
+
+TEST_CASE("Updating plugin latency does not touch an engine with no mixer state", "[mixer][pdc]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    CHECK_FALSE(engine.updatePluginLatency());
+    engine.setMixerState(nullptr);
+    CHECK_FALSE(engine.updatePluginLatency());
+}
+
 TEST_CASE("Master effects process everything the master gets", "[mixer][master]")
 {
     vloom::Engine engine;
@@ -562,4 +660,24 @@ TEST_CASE("Master effects do not allocate on the audio thread", "[mixer][master]
     for (int i = 0; i < 50; ++i)
         engine.process(out, 2, 256);
     CHECK(counter.count() == 0);
+}
+
+TEST_CASE("A master effect's latency change is picked up too", "[mixer][master][pdc]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    auto processor = std::make_unique<ChangingLatency>(0);
+    ChangingLatency* changing = processor.get();
+    auto effect = std::make_shared<vloom::PluginInstance>(std::move(processor));
+    REQUIRE(effect->activate(kRate, vloom::kMaxBlockFrames));
+    auto state = mixer(0);
+    state->masterEffects.push_back(effect);
+    engine.setMixerState(std::move(state));
+    changing->setLatency(250);
+    REQUIRE(engine.updatePluginLatency());
+    engine.setSequencerState(rack(click(), {0}));
+    engine.play();
+    const auto audio = render(engine, 0.03);
+    CHECK(sounding(audio) == std::vector<std::size_t>{250});
+    CHECK(engine.latencyFrames() == 250);
 }

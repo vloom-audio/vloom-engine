@@ -102,6 +102,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
   (`WavFileWriter`), so a failed write never leaves a broken file.
 
 ### Added
+- Latency that changes while a plugin runs is compensated (ADR 0007):
+  - `Engine::updatePluginLatency()` reads every insert effect's latency
+    again. If one changed, it publishes the mixer state again, lined up for
+    the new latency. Call it from the UI timer.
+  - `PluginInstance::updateLatency()` does the same for one instance.
+  - Before this, a track whose effect changed latency, such as FabFilter
+    Pro-L 2 with oversampling switched on (3115 to 3142 frames), played out
+    of time with the others until the effect was loaded again.
 - Master effects (ADR 0007): `MixerState::masterEffects` is an effect
   chain on the master.
   - It processes everything the master gets, before the master gain and
