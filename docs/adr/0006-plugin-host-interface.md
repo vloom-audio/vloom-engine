@@ -128,5 +128,6 @@ may still be processing it, and never on the audio thread.
   plugin output events, sidechain and extra ports (given silence), the
   master pitch on plugin instruments. These follow as plugins need them.
   The VST 3 adapter has no editor (`IPlugView`) yet. It ignores
-  `restartComponent()` except to note latency changes, and it does not
-  read the plugin's output parameter changes or events.
+  `restartComponent()`, since latency is read at activation. It does not
+  read the plugin's output parameter changes or events, and does not pass
+  a time signature: `TransportInfo` has none yet.

@@ -294,7 +294,9 @@ public:
 };
 
 /// Hears what the controller tells the host. Without an editor there are
-/// no edits to record; a latency change is noted.
+/// no edits to record. restartComponent() is not acted on: latency is read
+/// at activation, and a host publishes a new mixer state after
+/// re-activating a plugin (ADR 0007).
 class ComponentHandler final : public vst::IComponentHandler {
 public:
     tresult PLUGIN_API queryInterface(const TUID wanted, void** obj) override
@@ -312,14 +314,7 @@ public:
     tresult PLUGIN_API beginEdit(vst::ParamID) override { return kResultOk; }
     tresult PLUGIN_API performEdit(vst::ParamID, vst::ParamValue) override { return kResultOk; }
     tresult PLUGIN_API endEdit(vst::ParamID) override { return kResultOk; }
-    tresult PLUGIN_API restartComponent(int32 flags) override
-    {
-        if ((flags & vst::kLatencyChanged) != 0)
-            latencyChanged.store(true, std::memory_order_relaxed);
-        return kResultOk;
-    }
-
-    std::atomic<bool> latencyChanged{false};
+    tresult PLUGIN_API restartComponent(int32) override { return kResultOk; }
 };
 
 /// A byte stream in memory, for state.
@@ -433,8 +428,12 @@ public:
     }
     tresult PLUGIN_API addPoint(int32 sampleOffset, vst::ParamValue value, int32& index) override
     {
-        if (count_ == kMaxPoints)
-            return kResultFalse;
+        if (count_ == kMaxPoints) { // full: the last point takes the newest value
+            offsets_[kMaxPoints - 1] = sampleOffset;
+            values_[kMaxPoints - 1] = value;
+            index = kMaxPoints - 1;
+            return kResultOk;
+        }
         offsets_[static_cast<std::size_t>(count_)] = sampleOffset;
         values_[static_cast<std::size_t>(count_)] = value;
         index = count_++;
@@ -678,7 +677,6 @@ public:
         processing_ = false;
         held_.fill(false);
         resetPending_ = false;
-        handler_.latencyChanged.store(false, std::memory_order_relaxed);
         return true;
     }
 
@@ -827,16 +825,16 @@ public:
         vst::ProcessContext song{};
         song.state = static_cast<uint32>(vst::ProcessContext::kTempoValid)
             | static_cast<uint32>(vst::ProcessContext::kProjectTimeMusicValid)
-            | static_cast<uint32>(vst::ProcessContext::kTimeSigValid)
             | (context.transport.playing ? static_cast<uint32>(vst::ProcessContext::kPlaying) : 0u);
         song.sampleRate = sampleRate_;
         song.tempo = context.transport.tempo;
         song.projectTimeMusic = context.transport.positionTicks / kPpq;
+        // In samples at the current tempo: exact while the tempo stays the
+        // same (TransportInfo carries no tempo map). No time signature is
+        // given: the transport does not carry it either.
         song.projectTimeSamples = context.transport.tempo > 0.0
             ? static_cast<vst::TSamples>(song.projectTimeMusic * 60.0 / context.transport.tempo * sampleRate_)
             : 0;
-        song.timeSigNumerator = 4;
-        song.timeSigDenominator = 4;
 
         for (std::size_t bus = 0; bus < inputs_.size(); ++bus) {
             inputBuffers_[bus].numChannels = static_cast<int32>(inputs_[bus].pointers.size());
