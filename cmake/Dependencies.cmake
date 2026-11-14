@@ -64,5 +64,5 @@ endif()
 CPMAddPackage(
     NAME vloom_dsp
     GITHUB_REPOSITORY vloom-audio/vloom-dsp
-    GIT_TAG 243b1127000cdf45a96b004ccf3b3075d94f0616
+    GIT_TAG 29235d9841f8415c0f833b897645bb9e541d1296
     GIT_SHALLOW FALSE)
