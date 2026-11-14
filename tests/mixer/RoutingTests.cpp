@@ -55,6 +55,44 @@ private:
     vloom::DelayLine line_;
 };
 
+/// Multiplies by `gain` and counts its activations.
+class ScaleProcessor final : public vloom::AudioProcessor {
+public:
+    ScaleProcessor(float gain, int* activations)
+        : gain_(gain)
+        , activations_(activations)
+    {
+    }
+    [[nodiscard]] vloom::PluginInfo info() const override
+    {
+        return {"test.scale", "Scale", "Tests", "1", {}};
+    }
+    bool activate(double /*sampleRate*/, int /*maxBlockFrames*/) override
+    {
+        if (activations_ != nullptr)
+            ++*activations_;
+        return true;
+    }
+    void process(const vloom::ProcessContext& context) noexcept override
+    {
+        for (int ch = 0; ch < context.numChannels; ++ch)
+            for (int i = 0; i < context.numFrames; ++i)
+                context.channels[ch][i] *= gain_;
+    }
+
+private:
+    float gain_;
+    int* activations_;
+};
+
+std::shared_ptr<vloom::PluginInstance> scale(float gain, int* activations = nullptr)
+{
+    auto plugin
+        = std::make_shared<vloom::PluginInstance>(std::make_unique<ScaleProcessor>(gain, activations));
+    plugin->activate(kRate, vloom::kMaxBlockFrames);
+    return plugin;
+}
+
 std::shared_ptr<vloom::PluginInstance> latent(int latency)
 {
     auto plugin = std::make_shared<vloom::PluginInstance>(std::make_unique<LatentProcessor>(latency));
@@ -425,4 +463,103 @@ TEST_CASE("Delay compensation memory is capped", "[mixer][pdc]")
     CHECK(frames <= vloom::MixerGraph::kMaxCompensationFrames);
     CHECK(graph->latency == vloom::kMaxLatencyFrames);
     CHECK(graph->inputDelay[0] == vloom::kMaxLatencyFrames); // the master's own input comes first
+}
+
+TEST_CASE("Master effects process everything the master gets", "[mixer][master]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    engine.setSequencerState(rack(click(), {1, 0})); // through an insert, and straight to the master
+    auto state = mixer(1);
+    state->masterEffects.push_back(scale(0.5f));
+    state->masterEffects.push_back(nullptr); // skipped
+    state->masterEffects.push_back(scale(0.5f));
+    engine.setMixerState(std::move(state));
+    engine.play();
+    const auto audio = render(engine, 0.02);
+    CHECK(sounding(audio) == std::vector<std::size_t>{0});
+    CHECK(left(audio, 0) == Approx(2.0f * kCentre * 0.25f).margin(1e-5)); // in order, both
+    CHECK(engine.latencyFrames() == 0);
+}
+
+TEST_CASE("Master effects leave the metronome alone", "[mixer][master]")
+{
+    const auto firstClick = [](bool muted) {
+        vloom::Engine engine;
+        prepare(engine);
+        engine.setMetronomeEnabled(true);
+        auto state = mixer(0);
+        if (muted)
+            state->masterEffects.push_back(scale(0.0f));
+        engine.setMixerState(std::move(state));
+        engine.play();
+        return render(engine, 0.02);
+    };
+    CHECK(firstClick(true) == firstClick(false));
+}
+
+TEST_CASE("Master effect latency adds to the engine's, and the metronome follows", "[mixer][master][pdc]")
+{
+    constexpr int kInsertLatency = 300;
+    constexpr int kMasterLatency = 200;
+    vloom::Engine engine;
+    prepare(engine);
+    engine.setSequencerState(rack(click(), {1, 0}));
+    auto state = mixer(1);
+    state->inserts[0].effects.push_back(latent(kInsertLatency));
+    state->masterEffects.push_back(latent(kMasterLatency));
+    engine.setMixerState(std::move(state));
+    engine.play();
+    const auto audio = render(engine, 0.05);
+    // Lined up at the master after 300, then 200 more through its effect.
+    CHECK(sounding(audio) == std::vector<std::size_t>{kInsertLatency + kMasterLatency});
+    CHECK(left(audio, kInsertLatency + kMasterLatency) == Approx(2.0f * kCentre).margin(1e-4));
+    CHECK(engine.latencyFrames() == kInsertLatency + kMasterLatency);
+
+    const auto firstClick = [](int masterLatency) {
+        vloom::Engine e;
+        prepare(e);
+        e.setMetronomeEnabled(true);
+        auto s = mixer(0);
+        if (masterLatency > 0)
+            s->masterEffects.push_back(latent(masterLatency));
+        e.setMixerState(std::move(s));
+        e.play();
+        const auto frames = sounding(render(e, 0.05));
+        return frames.empty() ? std::size_t{0} : frames.front();
+    };
+    CHECK(firstClick(kMasterLatency) == firstClick(0) + kMasterLatency);
+}
+
+TEST_CASE("prepare() activates master effects again", "[mixer][master]")
+{
+    int activations = 0;
+    vloom::Engine engine;
+    prepare(engine);
+    auto state = mixer(0);
+    state->masterEffects.push_back(scale(1.0f, &activations));
+    engine.setMixerState(std::move(state));
+    REQUIRE(activations == 1);
+    engine.prepare(96000.0, 512);
+    CHECK(activations == 2);
+}
+
+TEST_CASE("Master effects do not allocate on the audio thread", "[mixer][master][alloc]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    engine.setSequencerState(rack(constant(48000), {1, 0}));
+    auto state = mixer(1);
+    state->masterEffects.push_back(latent(400));
+    state->masterEffects.push_back(scale(0.5f));
+    engine.setMixerState(std::move(state));
+    engine.play();
+    std::vector<float> left(256);
+    std::vector<float> right(256);
+    float* out[2] = {left.data(), right.data()};
+    engine.process(out, 2, 256); // picks up the state
+    const vloom::test::AllocationCounter counter;
+    for (int i = 0; i < 50; ++i)
+        engine.process(out, 2, 256);
+    CHECK(counter.count() == 0);
 }

@@ -102,6 +102,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
   (`WavFileWriter`), so a failed write never leaves a broken file.
 
 ### Added
+- Master effects (ADR 0007): `MixerState::masterEffects` is an effect
+  chain on the master.
+  - It processes everything the master gets, before the master gain and
+    pan, every block, so tails ring out.
+  - Its latency adds to `Engine::latencyFrames()`, and the metronome is
+    delayed as much.
+  - The metronome and the preview bypass it.
+  - `Engine::prepare()` re-activates its effects with the inserts'.
 - Plugin editors (ADR 0009):
   - `AudioProcessor::openEditor(parent, listener)` places a plugin's editor
     in a native window: an HWND, an NSView* or an X11 Window id. The API

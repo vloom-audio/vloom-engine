@@ -50,11 +50,11 @@ const MixerRoute* sameRoute(const MixerGraph* previous, const MixerRoute& route)
     return nullptr;
 }
 
-/// The latency of an insert's effects, in frames.
-int chainLatency(const InsertState& insert)
+/// The latency of an effect chain, in frames.
+int chainLatency(const std::vector<std::shared_ptr<PluginInstance>>& effects)
 {
     std::int64_t total = 0;
-    for (const auto& effect : insert.effects)
+    for (const auto& effect : effects)
         if (effect != nullptr)
             total += effect->latencyFrames();
     return static_cast<int>(std::clamp<std::int64_t>(total, 0, kMaxLatencyFrames));
@@ -143,14 +143,16 @@ void MixerGraph::compensate(const MixerGraph* previous)
     std::array<int, kNodes> ready{};
     for (const int i : order) {
         const auto node = static_cast<std::size_t>(i);
-        ready[node] = std::min(arrive[node] + chainLatency(insert(i)), kMaxLatencyFrames);
+        ready[node] = std::min(arrive[node] + chainLatency(insert(i).effects), kMaxLatencyFrames);
         for (int r = firstRoute[node]; r < firstRoute[node] + routeCount[node]; ++r) {
             const auto target = static_cast<std::size_t>(routes[static_cast<std::size_t>(r)].target);
             arrive[target] = std::max(arrive[target], ready[node]);
         }
     }
     inputDelay = arrive;
-    latency = arrive[0];
+    // The master's own effects come after everything is lined up there.
+    latency = std::min(
+        arrive[0] + (state != nullptr ? chainLatency(state->masterEffects) : 0), kMaxLatencyFrames);
 
     // Delay memory is capped (kMaxCompensationFrames in all): a path that
     // does not fit any more is left uncompensated (delay 0) rather than

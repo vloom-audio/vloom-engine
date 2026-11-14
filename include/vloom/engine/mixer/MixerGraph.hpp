@@ -57,7 +57,8 @@ struct MixerGraph {
     /// by, to line up with what arrives from inserts with latency.
     std::array<int, kNodes> inputDelay{};
     std::array<std::shared_ptr<DelayLine>, kNodes> inputLine{};
-    /// Frames the master's sound comes late, compared with the transport.
+    /// Frames the master's sound comes late, compared with the transport:
+    /// what the inserts add, plus the master's own effects.
     int latency = 0;
 
     /// The insert `insert` (1 .. kMaxInserts) of the state, or unity.

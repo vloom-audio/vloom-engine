@@ -57,6 +57,12 @@ struct InsertState {
 /// `inserts[i]` is insert i + 1; inserts past the end play at unity.
 struct MixerState {
     std::vector<InsertState> inserts;
+    /// The master's effect chain: processed in order on everything the
+    /// master gets, before the master gain and pan (Engine::setMasterGain()).
+    /// The preview and the metronome are not processed by it. Its latency
+    /// adds to Engine::latencyFrames(). Activate each instance before
+    /// publishing, as for inserts; null or inactive entries are skipped.
+    std::vector<std::shared_ptr<PluginInstance>> masterEffects{};
 };
 
 /// Left and right gain for `gain` and balance `pan`: the side panned away

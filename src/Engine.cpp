@@ -58,11 +58,15 @@ void Engine::prepare(double sampleRate, int /*maxBlockSize*/)
     // Every state the audio thread may play, the one published but not
     // picked up yet included.
     mixer_.forEachSnapshot([&](const MixerGraph& graph) {
-        if (graph.state != nullptr)
-            for (const InsertState& insert : graph.state->inserts)
-                for (const auto& effect : insert.effects)
-                    if (effect != nullptr)
-                        effect->activate(sampleRate, kMaxBlockFrames);
+        if (graph.state == nullptr)
+            return;
+        for (const InsertState& insert : graph.state->inserts)
+            for (const auto& effect : insert.effects)
+                if (effect != nullptr)
+                    effect->activate(sampleRate, kMaxBlockFrames);
+        for (const auto& effect : graph.state->masterEffects)
+            if (effect != nullptr)
+                effect->activate(sampleRate, kMaxBlockFrames);
     });
     // Their latency may have changed with the rate: line the paths up again
     // (ADR 0007), and drop what the delays held. The graphs are only handed
@@ -501,8 +505,13 @@ void Engine::mixBuses(
         mixInsert(graph, insert, numFrames, transport);
 
     // The master bus: what the channels played into it directly, lined up
-    // with the inserts; then the preview, which is not delayed.
+    // with the inserts; then its effects (a tail goes on, so every block);
+    // then the preview, which is neither delayed nor processed.
     delayInput(graph, 0, numFrames);
+    if (graph.state != nullptr)
+        for (const auto& effect : graph.state->masterEffects)
+            if (effect != nullptr)
+                effect->process(buses_[0], buses_[1], numFrames, transport);
     renderPreview(numFrames);
     const int latency = graph.latency;
     latency_.store(latency, std::memory_order_relaxed);

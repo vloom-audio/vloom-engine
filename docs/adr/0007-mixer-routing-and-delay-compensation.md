@@ -86,7 +86,14 @@ when the user edits the mixer.
      a send's gain.
    - The audio thread processes an insert while a delay line still holds
      sound, so tails come out even after the input stops.
-8. **Export leaves out the lead-in.** `exportSong()` drops the first
+8. **The master has an effect chain too** (`MixerState::masterEffects`).
+   - It processes everything the master gets, after the inputs are lined
+     up and before the master gain and pan.
+   - Its latency comes after that point, so it delays no path against
+     another: it adds to `Engine::latencyFrames()` (capped at
+     kMaxLatencyFrames), and the metronome is delayed by the total.
+   - The metronome and the preview do not go through it.
+9. **Export leaves out the lead-in.** `exportSong()` drops the first
    `latencyFrames()` frames it renders, so the file starts with the music,
    not with the compensation's silence.
 
