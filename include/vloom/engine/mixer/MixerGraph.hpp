@@ -6,6 +6,7 @@
 #include "vloom/engine/mixer/MixerState.hpp"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -17,8 +18,10 @@ namespace vloom {
 /// by the graphs that keep the route, so an edit does not cut its sound.
 struct MixerRouteState {
     DelayLine line;
-    float applied = 0.0f;
-    bool started = false; ///< applied is set: false until the first block
+    // Atomic (relaxed): the audio thread writes them every block while the
+    // control thread may copy them into a new graph's state.
+    std::atomic<float> applied{0.0f};
+    std::atomic<bool> started{false}; ///< applied is set: false until the first block
 };
 
 /// One route the mixer plays: an insert's output or one of its sends.

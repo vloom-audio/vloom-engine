@@ -451,13 +451,13 @@ void Engine::mixInsert(
         const MixerRoute& route = graph.routes[static_cast<std::size_t>(r)];
         MixerRouteState& state = *route.state;
         const float gain = sendGain(route.gain);
-        if (!state.started) {
-            state.applied = gain;
-            state.started = true;
+        if (!state.started.load(std::memory_order_relaxed)) {
+            state.applied.store(gain, std::memory_order_relaxed);
+            state.started.store(true, std::memory_order_relaxed);
         }
-        const float from = state.applied;
+        const float from = state.applied.load(std::memory_order_relaxed);
         const float step = (gain - from) / n;
-        state.applied = gain;
+        state.applied.store(gain, std::memory_order_relaxed);
         const float* sourceLeft = route.preFader ? left : post_[0];
         const float* sourceRight = route.preFader ? right : post_[1];
         delayInput(graph, route.target, numFrames); // its own input first, then what is routed in

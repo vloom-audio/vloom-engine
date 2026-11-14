@@ -204,8 +204,8 @@ void MixerGraph::compensate(const MixerGraph* previous)
         auto fresh = std::make_shared<MixerRouteState>();
         fresh->line.resize(route.delay);
         if (ramp != nullptr) { // keeps the gain ramp going
-            fresh->applied = ramp->applied;
-            fresh->started = ramp->started;
+            fresh->applied.store(ramp->applied.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            fresh->started.store(ramp->started.load(std::memory_order_relaxed), std::memory_order_relaxed);
         }
         route.state = std::move(fresh);
     }
