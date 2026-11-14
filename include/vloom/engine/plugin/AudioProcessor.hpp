@@ -66,6 +66,32 @@ struct ProcessContext {
     TransportInfo transport;
 };
 
+/// The size of a plugin's editor: pixels on Windows and Linux, points on
+/// macOS (as the platform's window system counts them).
+struct EditorSize {
+    int width = 0;
+    int height = 0;
+};
+
+/// What a processor tells its host about its open editor (ADR 0009).
+/// Called on the control thread, from inside the processor's calls or idle().
+class EditorListener {
+public:
+    virtual ~EditorListener() = default;
+    /// The editor wants another size: resize the window that holds it, then
+    /// call AudioProcessor::setEditorSize().
+    virtual void editorResizeRequested(EditorSize size) = 0;
+    /// The plugin closed its editor itself: close the window that held it.
+    virtual void editorClosed() { }
+    /// A parameter was changed in the editor. The processor already applies
+    /// it: this is for the host's own view (knobs, "project changed").
+    virtual void parameterEdited(std::uint32_t id, double value)
+    {
+        (void)id;
+        (void)value;
+    }
+};
+
 /// What every hosted processor implements, whatever its format (CLAP, VST3,
 /// built-in). See ADR 0006 for the threading contract:
 ///
@@ -100,9 +126,44 @@ public:
         return false;
     }
 
-    /// Control thread, often (a UI timer, ~30 Hz): lets the processor do
-    /// work it asked the host to run on the main thread.
+    /// Control thread, often (a UI timer; ~60 Hz while an editor is open):
+    /// lets the processor do work it asked the host to run on the main
+    /// thread, run its editor's timers and report edits made in it.
     virtual void idle() { }
+
+    /// Editors (ADR 0009), control thread only.
+    ///
+    /// `parent` is the native window the editor goes into: an HWND on
+    /// Windows, an NSView* on macOS, an X11 Window id (cast to a pointer) on
+    /// Linux. The listener must outlive the open editor. Opening an open
+    /// editor closes it first. False if the processor has no editor or it
+    /// could not be opened.
+    [[nodiscard]] virtual bool hasEditor() const { return false; }
+    virtual bool openEditor(void* parent, EditorListener* listener)
+    {
+        (void)parent;
+        (void)listener;
+        return false;
+    }
+    virtual void closeEditor() { }
+    [[nodiscard]] virtual bool isEditorOpen() const { return false; }
+    /// The open editor's size; zero when closed.
+    [[nodiscard]] virtual EditorSize editorSize() const { return {}; }
+    [[nodiscard]] virtual bool canResizeEditor() const { return false; }
+    /// Asks the open editor to take `wanted`; returns the size it took (it
+    /// may adjust it, or keep its own if it cannot resize).
+    virtual EditorSize setEditorSize(EditorSize wanted)
+    {
+        (void)wanted;
+        return editorSize();
+    }
+    /// The host set parameter `id` to `value` (PluginInstance::setParameter,
+    /// before the audio thread gets it), so an open editor can follow.
+    virtual void parameterChangedByHost(std::uint32_t id, double value)
+    {
+        (void)id;
+        (void)value;
+    }
 
     /// Processes one block (audio thread).
     virtual void process(const ProcessContext& context) noexcept = 0;

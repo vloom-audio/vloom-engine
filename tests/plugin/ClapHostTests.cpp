@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Vloom Audio contributors
+#include "plugin/EditorRecorder.hpp"
 #include "support/Allocations.hpp"
 
 #include <vloom/engine/Engine.hpp>
@@ -238,4 +239,77 @@ TEST_CASE("Hosted CLAP plugins do not allocate on the audio thread", "[plugin][c
         onAudioThread += counter.count();
     }
     CHECK(onAudioThread == 0);
+}
+
+TEST_CASE("A CLAP editor opens in a window, resizes and reports edits", "[plugin][clap][editor]")
+{
+    std::string error;
+    auto library = vloom::ClapLibrary::open(kTestClap, &error);
+    REQUIRE(library != nullptr);
+    auto processor = library->create("vloom.test.level", &error);
+    REQUIRE(processor != nullptr);
+    vloom::PluginInstance plugin(std::move(processor));
+    vloom::AudioProcessor& level = plugin.processor();
+    vloom::test::EditorRecorder recorder;
+
+    REQUIRE(level.hasEditor());
+    CHECK_FALSE(level.isEditorOpen());
+    CHECK(level.editorSize().width == 0);
+    CHECK_FALSE(level.openEditor(nullptr, &recorder)); // no window
+
+    REQUIRE(level.openEditor(vloom::test::fakeWindow(), &recorder));
+    CHECK(level.isEditorOpen());
+    REQUIRE(recorder.resizes.size() == 1); // asked for as it attached
+    CHECK(recorder.resizes[0].width == 400);
+    CHECK(recorder.resizes[0].height == 300);
+    CHECK(level.editorSize().width == 300); // until the host resizes it
+    REQUIRE(level.canResizeEditor());
+    const vloom::EditorSize taken = level.setEditorSize({400, 300});
+    CHECK(taken.width == 400);
+    CHECK(taken.height == 300);
+    CHECK(level.setEditorSize({10, 10}).width == 100); // adjusted to its minimum
+
+    // Inactive: its timer runs from idle(), and the edit comes out of a flush there.
+    level.idle();
+    REQUIRE(recorder.edits.size() == 1);
+    CHECK(recorder.edits[0].id == 3);
+    CHECK(recorder.edits[0].value == Approx(0.25));
+
+    level.closeEditor();
+    CHECK_FALSE(level.isEditorOpen());
+    CHECK(level.editorSize().width == 0);
+    level.closeEditor(); // twice is fine
+    CHECK(recorder.closed == 0); // closed by the host, not by the plugin
+}
+
+TEST_CASE("A CLAP editor's edits while processing reach the host from idle()", "[plugin][clap][editor]")
+{
+    auto plugin = load("vloom.test.level");
+    vloom::test::EditorRecorder recorder;
+    REQUIRE(plugin->processor().openEditor(vloom::test::fakeWindow(), &recorder));
+    plugin->processor().idle(); // the timer: an edit, and a flush request
+    CHECK(recorder.edits.empty()); // active: the plugin reports it from process()
+
+    std::vector<float> left(64, 1.0f);
+    std::vector<float> right(64, 1.0f);
+    plugin->process(left.data(), right.data(), 64, vloom::TransportInfo{});
+    CHECK(left[0] == Approx(0.25f)); // the plugin applies its own edit
+    plugin->processor().idle();
+    REQUIRE(recorder.edits.size() == 1);
+    CHECK(recorder.edits[0].value == Approx(0.25));
+
+    // Reopening closes the old editor first.
+    vloom::test::EditorRecorder other;
+    REQUIRE(plugin->processor().openEditor(vloom::test::fakeWindow(), &other));
+    CHECK(other.resizes.size() == 1);
+    plugin->processor().closeEditor();
+}
+
+TEST_CASE("A CLAP plugin without an editor says so", "[plugin][clap][editor]")
+{
+    auto keys = load("vloom.test.keys");
+    vloom::test::EditorRecorder recorder;
+    CHECK_FALSE(keys->processor().hasEditor());
+    CHECK_FALSE(keys->processor().openEditor(vloom::test::fakeWindow(), &recorder));
+    CHECK_FALSE(keys->processor().isEditorOpen());
 }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Vloom Audio contributors
+#include "plugin/EditorRecorder.hpp"
 #include "support/Allocations.hpp"
 
 #include <vloom/engine/Engine.hpp>
@@ -236,4 +237,67 @@ TEST_CASE("Hosted VST 3 plugins do not allocate on the audio thread", "[plugin][
         onAudioThread += counter.count();
     }
     CHECK(onAudioThread == 0);
+}
+
+TEST_CASE(
+    "A VST 3 editor opens in a window, resizes, and its edits reach the processor", "[plugin][vst3][editor]")
+{
+    auto plugin = load("Level");
+    vloom::AudioProcessor& level = plugin->processor();
+    vloom::test::EditorRecorder recorder;
+
+    REQUIRE(level.hasEditor());
+    CHECK_FALSE(level.openEditor(nullptr, &recorder));
+    REQUIRE(level.openEditor(vloom::test::fakeWindow(), &recorder));
+    CHECK(level.isEditorOpen());
+
+    // It asked for 400 x 300 as it attached; the host's frame gave it that.
+    REQUIRE(recorder.resizes.size() == 1);
+    CHECK(recorder.resizes[0].width == 400);
+    CHECK(level.editorSize().width == 400);
+    CHECK(level.editorSize().height == 300);
+    REQUIRE(level.canResizeEditor());
+    CHECK(level.setEditorSize({500, 50}).height == 100); // adjusted to its minimum
+
+    // Its edit (parameter 3 to 0.25: gain 0.5) went to the host and to the processor.
+    REQUIRE(recorder.edits.size() == 1);
+    CHECK(recorder.edits[0].id == 3);
+    CHECK(recorder.edits[0].value == Approx(0.25));
+    std::vector<float> left(64, 1.0f);
+    std::vector<float> right(64, 1.0f);
+    plugin->process(left.data(), right.data(), 64, vloom::TransportInfo{});
+    CHECK(left[0] == Approx(0.5f));
+
+    level.idle();
+    level.closeEditor();
+    CHECK_FALSE(level.isEditorOpen());
+    CHECK(level.editorSize().width == 0);
+
+    // The host's own changes still win over an older edit.
+    REQUIRE(plugin->setParameter(3, 1.0));
+    plugin->process(left.data(), right.data(), 64, vloom::TransportInfo{});
+    std::fill(left.begin(), left.end(), 1.0f);
+    plugin->process(left.data(), right.data(), 64, vloom::TransportInfo{});
+    CHECK(left[0] == Approx(2.0f));
+}
+
+TEST_CASE("A VST 3 plugin without an editor says so", "[plugin][vst3][editor]")
+{
+    auto keys = load("Keys");
+    vloom::test::EditorRecorder recorder;
+    CHECK_FALSE(keys->processor().hasEditor());
+    CHECK_FALSE(keys->processor().openEditor(vloom::test::fakeWindow(), &recorder));
+}
+
+TEST_CASE("A VST 3 editor's edits do not allocate on the audio thread", "[plugin][vst3][editor]")
+{
+    auto plugin = load("Level");
+    vloom::test::EditorRecorder recorder;
+    REQUIRE(plugin->processor().openEditor(vloom::test::fakeWindow(), &recorder)); // queues an edit
+    std::vector<float> left(256, 1.0f);
+    std::vector<float> right(256, 1.0f);
+    const vloom::test::AllocationCounter counter;
+    plugin->process(left.data(), right.data(), 256, vloom::TransportInfo{});
+    CHECK(counter.count() == 0);
+    plugin->processor().closeEditor();
 }

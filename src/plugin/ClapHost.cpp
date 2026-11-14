@@ -2,18 +2,22 @@
 // Copyright (C) 2026 Vloom Audio contributors
 #include "vloom/engine/plugin/ClapHost.hpp"
 
+#include "plugin/EditorRunLoop.hpp"
 #include "plugin/PluginFiles.hpp"
+#include "vloom/engine/core/SpscQueue.hpp"
 #include "vloom/engine/time/MusicalTime.hpp"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <clap/clap.h>
+#include <climits>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <system_error>
 
 namespace vloom {
@@ -51,6 +55,24 @@ struct PortBuffers {
     std::vector<float*> pointers;
 };
 
+/// The window API editors are opened with on this platform (ADR 0009).
+#if defined(_WIN32)
+constexpr const char* kWindowApi = CLAP_WINDOW_API_WIN32;
+#elif defined(__APPLE__)
+constexpr const char* kWindowApi = CLAP_WINDOW_API_COCOA;
+#else
+constexpr const char* kWindowApi = CLAP_WINDOW_API_X11;
+#endif
+
+/// A parameter changed by the plugin itself (in its editor), on its way
+/// from the audio thread to the control thread.
+struct ParameterEdit {
+    std::uint32_t id = 0;
+    double value = 0.0;
+};
+
+int toInt(std::uint32_t value) noexcept { return static_cast<int>(std::min<std::uint32_t>(value, INT_MAX)); }
+
 union ClapEvent {
     clap_event_header_t header;
     clap_event_note_t note;
@@ -75,7 +97,8 @@ public:
         host_.vendor = "Vloom Audio";
         host_.url = "https://github.com/vloom-audio";
         host_.version = "0.1.0";
-        host_.get_extension = [](const clap_host_t*, const char*) -> const void* { return nullptr; };
+        host_.get_extension
+            = [](const clap_host_t*, const char* id) -> const void* { return hostExtension(id); };
         host_.request_restart = [](const clap_host_t* host) {
             self(host)->restartRequested_.store(true, std::memory_order_relaxed);
         };
@@ -92,13 +115,31 @@ public:
             const auto* p = static_cast<const ClapProcessor*>(list->ctx);
             return index < p->eventCount_ ? &p->events_[index].header : nullptr;
         };
+        // Audio thread: parameter values the plugin reports (edits in its
+        // editor) go to the control thread; everything else is dropped.
         outEvents_.ctx = this;
-        outEvents_.try_push = [](const clap_output_events_t*, const clap_event_header_t*) { return true; };
+        outEvents_.try_push = [](const clap_output_events_t* list, const clap_event_header_t* e) {
+            if (const auto edit = editOf(e))
+                static_cast<ClapProcessor*>(list->ctx)->edits_.push(*edit);
+            return true;
+        };
+        // Control thread (a flush while inactive): straight to the listener.
+        mainOutEvents_.ctx = this;
+        mainOutEvents_.try_push = [](const clap_output_events_t* list, const clap_event_header_t* e) {
+            auto* p = static_cast<ClapProcessor*>(list->ctx);
+            if (const auto edit = editOf(e); edit && p->listener_ != nullptr)
+                p->listener_->parameterEdited(edit->id, edit->value);
+            return true;
+        };
+        noEvents_.size = [](const clap_input_events_t*) -> std::uint32_t { return 0; };
+        noEvents_.get
+            = [](const clap_input_events_t*, std::uint32_t) -> const clap_event_header_t* { return nullptr; };
     }
 
     ~ClapProcessor() override
     {
         if (plugin_ != nullptr) {
+            ClapProcessor::closeEditor();
             ClapProcessor::deactivate();
             plugin_->destroy(plugin_);
         }
@@ -123,6 +164,7 @@ public:
             = static_cast<const clap_plugin_latency_t*>(plugin_->get_extension(plugin_, CLAP_EXT_LATENCY));
         ports_ = static_cast<const clap_plugin_audio_ports_t*>(
             plugin_->get_extension(plugin_, CLAP_EXT_AUDIO_PORTS));
+        gui_ = static_cast<const clap_plugin_gui_t*>(plugin_->get_extension(plugin_, CLAP_EXT_GUI));
         return true;
     }
 
@@ -228,6 +270,79 @@ public:
     {
         if (callbackRequested_.exchange(false, std::memory_order_relaxed))
             plugin_->on_main_thread(plugin_);
+        runLoop_.run();
+        // While active the plugin flushes in process(); inactive, it is done here.
+        if (params_ != nullptr && !active_ && flushRequested_.exchange(false, std::memory_order_relaxed))
+            params_->flush(plugin_, &noEvents_, &mainOutEvents_);
+        ParameterEdit edit;
+        while (edits_.pop(edit))
+            if (listener_ != nullptr)
+                listener_->parameterEdited(edit.id, edit.value);
+    }
+
+    [[nodiscard]] bool hasEditor() const override
+    {
+        return gui_ != nullptr && gui_->is_api_supported(plugin_, kWindowApi, false);
+    }
+
+    bool openEditor(void* parent, EditorListener* listener) override
+    {
+        closeEditor();
+        if (parent == nullptr || !hasEditor() || !gui_->create(plugin_, kWindowApi, false))
+            return false;
+        clap_window_t window{};
+        window.api = kWindowApi;
+#if defined(_WIN32)
+        window.win32 = parent;
+#elif defined(__APPLE__)
+        window.cocoa = parent;
+#else
+        window.x11 = static_cast<clap_xwnd>(reinterpret_cast<std::uintptr_t>(parent));
+#endif
+        listener_ = listener; // the plugin may ask for a size while it attaches
+        editorOpen_ = true;
+        if (!gui_->set_parent(plugin_, &window)) {
+            gui_->destroy(plugin_);
+            editorOpen_ = false;
+            listener_ = nullptr;
+            return false;
+        }
+        gui_->show(plugin_);
+        return true;
+    }
+
+    void closeEditor() override
+    {
+        if (!editorOpen_)
+            return;
+        gui_->hide(plugin_);
+        gui_->destroy(plugin_);
+        editorOpen_ = false;
+        listener_ = nullptr;
+    }
+
+    [[nodiscard]] bool isEditorOpen() const override { return editorOpen_; }
+
+    [[nodiscard]] EditorSize editorSize() const override
+    {
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+        if (!editorOpen_ || !gui_->get_size(plugin_, &width, &height))
+            return {};
+        return {toInt(width), toInt(height)};
+    }
+
+    [[nodiscard]] bool canResizeEditor() const override { return editorOpen_ && gui_->can_resize(plugin_); }
+
+    EditorSize setEditorSize(EditorSize wanted) override
+    {
+        if (canResizeEditor()) {
+            auto width = static_cast<std::uint32_t>(std::max(wanted.width, 0));
+            auto height = static_cast<std::uint32_t>(std::max(wanted.height, 0));
+            gui_->adjust_size(plugin_, &width, &height);
+            gui_->set_size(plugin_, width, height);
+        }
+        return editorSize();
     }
 
     void process(const ProcessContext& context) noexcept override
@@ -338,6 +453,108 @@ private:
         return static_cast<ClapProcessor*>(host->host_data);
     }
 
+    static std::optional<ParameterEdit> editOf(const clap_event_header_t* e) noexcept
+    {
+        if (e == nullptr || e->space_id != CLAP_CORE_EVENT_SPACE_ID || e->type != CLAP_EVENT_PARAM_VALUE
+            || e->size < sizeof(clap_event_param_value_t))
+            return std::nullopt;
+        const auto* param = reinterpret_cast<const clap_event_param_value_t*>(e);
+        if (!std::isfinite(param->value))
+            return std::nullopt;
+        return ParameterEdit{param->param_id, param->value};
+    }
+
+    /// The host extensions plugins may ask for (ADR 0009): editors, their
+    /// timers and file descriptors, and parameter flushes.
+    static const void* hostExtension(const char* id)
+    {
+        static const clap_host_gui_t gui = {
+            [](const clap_host_t*) { }, // resize_hints_changed: asked again on each resize
+            [](const clap_host_t* host, std::uint32_t width, std::uint32_t height) {
+                ClapProcessor* p = self(host);
+                if (!p->editorOpen_ || p->listener_ == nullptr)
+                    return false;
+                p->listener_->editorResizeRequested({toInt(width), toInt(height)});
+                return true;
+            },
+            [](const clap_host_t* host) { return self(host)->editorOpen_; }, // request_show: it is shown
+            [](const clap_host_t*) { return false; }, // request_hide: embedded editors stay
+            [](const clap_host_t* host, bool wasDestroyed) {
+                ClapProcessor* p = self(host);
+                EditorListener* listener = p->listener_;
+                if (wasDestroyed) {
+                    p->editorOpen_ = false;
+                    p->listener_ = nullptr;
+                }
+                if (listener != nullptr)
+                    listener->editorClosed();
+            },
+        };
+        static const clap_host_timer_support_t timers = {
+            [](const clap_host_t* host, std::uint32_t periodMs, clap_id* timerId) {
+                ClapProcessor* p = self(host);
+                const std::uint32_t added = p->runLoop_.addTimer(
+                    std::chrono::milliseconds{periodMs}, [p](std::uint32_t timer) { p->onTimer(timer); });
+                if (added == 0 || timerId == nullptr)
+                    return false;
+                *timerId = added;
+                return true;
+            },
+            [](const clap_host_t* host, clap_id timerId) {
+                return self(host)->runLoop_.removeTimer(timerId);
+            },
+        };
+#if !defined(_WIN32)
+        static const clap_host_posix_fd_support_t fds = {
+            [](const clap_host_t* host, int fd, clap_posix_fd_flags_t flags) {
+                ClapProcessor* p = self(host);
+                return p->runLoop_.addFd(
+                    fd, flags, [p, fd](std::uint32_t happened) { p->onFd(fd, happened); });
+            },
+            [](const clap_host_t* host, int fd, clap_posix_fd_flags_t flags) {
+                return self(host)->runLoop_.modifyFd(fd, flags);
+            },
+            [](const clap_host_t* host, int fd) { return self(host)->runLoop_.removeFd(fd); },
+        };
+#endif
+        static const clap_host_params_t params = {
+            [](const clap_host_t*, clap_param_rescan_flags) { }, // the host asks for parameters() each time
+            [](const clap_host_t*, clap_id, clap_param_clear_flags) { },
+            [](const clap_host_t* host) {
+                self(host)->flushRequested_.store(true, std::memory_order_relaxed);
+            },
+        };
+        if (std::strcmp(id, CLAP_EXT_GUI) == 0)
+            return &gui;
+        if (std::strcmp(id, CLAP_EXT_TIMER_SUPPORT) == 0)
+            return &timers;
+        if (std::strcmp(id, CLAP_EXT_PARAMS) == 0)
+            return &params;
+#if !defined(_WIN32)
+        if (std::strcmp(id, CLAP_EXT_POSIX_FD_SUPPORT) == 0)
+            return &fds;
+#endif
+        return nullptr;
+    }
+
+    void onTimer(std::uint32_t timer)
+    {
+        if (timerSupport_ == nullptr)
+            timerSupport_ = static_cast<const clap_plugin_timer_support_t*>(
+                plugin_->get_extension(plugin_, CLAP_EXT_TIMER_SUPPORT));
+        if (timerSupport_ != nullptr)
+            timerSupport_->on_timer(plugin_, timer);
+    }
+
+    void onFd(int fd, std::uint32_t happened)
+    {
+        if (fdSupport_ == nullptr)
+            fdSupport_ = static_cast<const clap_plugin_posix_fd_support_t*>(
+                plugin_->get_extension(plugin_, CLAP_EXT_POSIX_FD_SUPPORT));
+        if (fdSupport_ != nullptr)
+            fdSupport_->on_fd(plugin_, fd, happened);
+    }
+
     static clap_event_header_t header(std::size_t size, int frame, int type) noexcept
     {
         clap_event_header_t h{};
@@ -390,6 +607,18 @@ private:
     const clap_plugin_state_t* state_ = nullptr;
     const clap_plugin_latency_t* latency_ = nullptr;
     const clap_plugin_audio_ports_t* ports_ = nullptr;
+    const clap_plugin_gui_t* gui_ = nullptr;
+    const clap_plugin_timer_support_t* timerSupport_ = nullptr;
+    const clap_plugin_posix_fd_support_t* fdSupport_ = nullptr;
+
+    // Editor (control thread).
+    bool editorOpen_ = false;
+    EditorListener* listener_ = nullptr;
+    plugin_editor::RunLoop runLoop_;
+    std::atomic<bool> flushRequested_{false};
+    SpscQueue<ParameterEdit, 256> edits_; ///< audio thread to control thread
+    clap_output_events_t mainOutEvents_{};
+    clap_input_events_t noEvents_{};
 
     bool active_ = false;
     bool processing_ = false; ///< audio thread, once active

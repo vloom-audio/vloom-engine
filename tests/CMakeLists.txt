@@ -21,6 +21,7 @@ add_executable(vloom_engine_tests
     mixer/RoutingTests.cpp
     plugin/BuiltinProcessorsTests.cpp
     plugin/ClapHostTests.cpp
+    plugin/EditorRunLoopTests.cpp
     plugin/PluginHostTests.cpp
     plugin/Vst3HostTests.cpp
     render/SongExportTests.cpp
@@ -37,7 +38,8 @@ add_executable(vloom_engine_tests
     support/Allocations.cpp
     support/AllocationsTests.cpp)
 
-target_include_directories(vloom_engine_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# src/ too: some tests reach the engine's internal helpers (plugin/EditorRunLoop).
+target_include_directories(vloom_engine_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/src)
 
 # A real .clap for the CLAP host tests (plugin/ClapHostTests.cpp).
 add_library(vloom_test_clap MODULE plugin/clap/TestPlugins.cpp)

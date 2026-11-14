@@ -33,6 +33,7 @@ target_sources(vloom_engine PRIVATE
 
     # plugin — hosted processors behind one interface (ADR 0006)
     plugin/ClapHost.cpp
+    plugin/EditorRunLoop.cpp
     plugin/PluginFiles.cpp
     plugin/PluginInstance.cpp
     plugin/Vst3Host.cpp

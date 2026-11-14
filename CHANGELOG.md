@@ -102,6 +102,21 @@ and the project uses [Semantic Versioning](https://semver.org/).
   (`WavFileWriter`), so a failed write never leaves a broken file.
 
 ### Added
+- Plugin editors (ADR 0009):
+  - `AudioProcessor::openEditor(parent, listener)` places a plugin's editor
+    in a native window: an HWND, an NSView* or an X11 Window id. The API
+    also has `hasEditor`, `closeEditor`, `isEditorOpen`, `editorSize`,
+    `canResizeEditor` and `setEditorSize`.
+  - `EditorListener` tells the host when the editor wants a new size, when
+    the plugin closed it, and when a parameter was edited in it.
+  - The CLAP host offers `gui`, `timer-support`, `posix-fd-support` and
+    `params` (flush) to plugins. Parameter values the plugin reports reach
+    the listener from `idle()`.
+  - The VST 3 host opens `IPlugView` editors. `performEdit` reaches the
+    processor in the next block and the listener at once. On Linux the
+    frame offers an `IRunLoop`.
+  - `PluginInstance::setParameter()` tells an open editor through
+    `AudioProcessor::parameterChangedByHost()`.
 - Built-in processors from vloom-dsp (M5, ADR 0008):
   - The engine pulls in vloom-dsp (MIT, our own DSP library) with CPM,
     pinned to a commit, and links it privately.
