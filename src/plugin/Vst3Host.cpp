@@ -298,11 +298,11 @@ public:
 
 /// The platform type editors are opened with (ADR 0009).
 #if defined(_WIN32)
-constexpr Steinberg::FIDString kPlatformType = Steinberg::kPlatformTypeHWND;
+const Steinberg::FIDString kPlatformType = Steinberg::kPlatformTypeHWND;
 #elif defined(__APPLE__)
-constexpr Steinberg::FIDString kPlatformType = Steinberg::kPlatformTypeNSView;
+const Steinberg::FIDString kPlatformType = Steinberg::kPlatformTypeNSView;
 #else
-constexpr Steinberg::FIDString kPlatformType = Steinberg::kPlatformTypeX11EmbedWindowID;
+const Steinberg::FIDString kPlatformType = Steinberg::kPlatformTypeX11EmbedWindowID;
 #endif
 
 /// What the host objects below report to the processor that owns them.

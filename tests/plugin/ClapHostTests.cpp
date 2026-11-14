@@ -313,3 +313,23 @@ TEST_CASE("A CLAP plugin without an editor says so", "[plugin][clap][editor]")
     CHECK_FALSE(keys->processor().openEditor(vloom::test::fakeWindow(), &recorder));
     CHECK_FALSE(keys->processor().isEditorOpen());
 }
+
+TEST_CASE("A CLAP editor's edits do not allocate on the audio thread", "[plugin][clap][editor]")
+{
+    auto plugin = load("vloom.test.level");
+    vloom::test::EditorRecorder recorder;
+    REQUIRE(plugin->processor().openEditor(vloom::test::fakeWindow(), &recorder));
+    plugin->processor().idle(); // the timer makes an edit; the next process() reports it
+    std::vector<float> left(256, 1.0f);
+    std::vector<float> right(256, 1.0f);
+    long long allocations = 0;
+    {
+        const vloom::test::AllocationCounter counter;
+        plugin->process(left.data(), right.data(), 256, vloom::TransportInfo{});
+        allocations = counter.count();
+    }
+    CHECK(allocations == 0);
+    plugin->processor().idle();
+    CHECK(recorder.edits.size() == 1); // it did go through the queue
+    plugin->processor().closeEditor();
+}

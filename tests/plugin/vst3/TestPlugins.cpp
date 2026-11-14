@@ -143,11 +143,11 @@ protected:
 };
 
 #if defined(_WIN32)
-constexpr FIDString kPlatformType = kPlatformTypeHWND;
+const FIDString kPlatformType = kPlatformTypeHWND;
 #elif defined(__APPLE__)
-constexpr FIDString kPlatformType = kPlatformTypeNSView;
+const FIDString kPlatformType = kPlatformTypeNSView;
 #else
-constexpr FIDString kPlatformType = kPlatformTypeX11EmbedWindowID;
+const FIDString kPlatformType = kPlatformTypeX11EmbedWindowID;
 #endif
 
 /// An editor without a window: 300 x 200, resizable down to 100 x 100.
