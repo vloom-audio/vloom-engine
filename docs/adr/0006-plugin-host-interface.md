@@ -123,11 +123,13 @@ may still be processing it, and never on the audio thread.
 - Loading a .clap or a .vst3 runs third-party code with the host's rights. The engine
   loads only the paths the host gives it; the app decides what to trust
   (installed plugin folders, the user's choice).
-- Not yet: CLAP host extensions (params rescan, latency changes, GUI,
-  note ports, thread-check), `request_restart` (recorded, not acted on),
-  plugin output events, sidechain and extra ports (given silence), the
-  master pitch on plugin instruments. These follow as plugins need them.
-  The VST 3 adapter has no editor (`IPlugView`) yet. It ignores
-  `restartComponent()`, since latency is read at activation. It does not
-  read the plugin's output parameter changes or events, and does not pass
-  a time signature: `TransportInfo` has none yet.
+- Editors, with their timers, file descriptors and edits, came later
+  (ADR 0009).
+- Not yet: CLAP host extensions (params rescan, latency changes, note
+  ports, thread-check), `request_restart` (recorded, not acted on), plugin
+  output events other than parameter values, sidechain and extra ports
+  (given silence), the master pitch on plugin instruments. These follow as
+  plugins need them. The VST 3 adapter ignores `restartComponent()`, since
+  latency is read at activation. It does not read the plugin's output
+  parameter changes or events, and does not pass a time signature:
+  `TransportInfo` has none yet.

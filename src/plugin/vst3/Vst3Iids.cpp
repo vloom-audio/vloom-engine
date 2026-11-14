@@ -5,6 +5,7 @@
 // test plugins use; the interface headers only declare them. The core ones
 // (FUnknown, IPluginFactory, IBStream ...) come from pluginterfaces'
 // coreiids.cpp.
+#include "pluginterfaces/gui/iplugview.h"
 #include "pluginterfaces/vst/ivstattributes.h"
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivstcomponent.h"
@@ -16,6 +17,13 @@
 #include "pluginterfaces/vst/ivstprocesscontext.h"
 
 namespace Steinberg {
+
+DEF_CLASS_IID(IPlugView)
+DEF_CLASS_IID(IPlugFrame)
+DEF_CLASS_IID(Linux::IRunLoop)
+DEF_CLASS_IID(Linux::IEventHandler)
+DEF_CLASS_IID(Linux::ITimerHandler)
+
 namespace Vst {
 
 DEF_CLASS_IID(IComponent)

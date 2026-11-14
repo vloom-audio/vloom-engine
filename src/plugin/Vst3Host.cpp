@@ -2,9 +2,11 @@
 // Copyright (C) 2026 Vloom Audio contributors
 #include "vloom/engine/plugin/Vst3Host.hpp"
 
+#include "plugin/EditorRunLoop.hpp"
 #include "plugin/PluginFiles.hpp"
 #include "pluginterfaces/base/ibstream.h"
 #include "pluginterfaces/base/ipluginbase.h"
+#include "pluginterfaces/gui/iplugview.h"
 #include "pluginterfaces/vst/ivstattributes.h"
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivstcomponent.h"
@@ -15,6 +17,7 @@
 #include "pluginterfaces/vst/ivstparameterchanges.h"
 #include "pluginterfaces/vst/ivstprocesscontext.h"
 #include "pluginterfaces/vst/vstspeaker.h"
+#include "vloom/engine/core/SpscQueue.hpp"
 #include "vloom/engine/time/MusicalTime.hpp"
 
 #include <algorithm>
@@ -293,12 +296,39 @@ public:
     }
 };
 
-/// Hears what the controller tells the host. Without an editor there are
-/// no edits to record. restartComponent() is not acted on: latency is read
-/// at activation, and a host publishes a new mixer state after
-/// re-activating a plugin (ADR 0007).
+/// The platform type editors are opened with (ADR 0009).
+#if defined(_WIN32)
+const Steinberg::FIDString kPlatformType = Steinberg::kPlatformTypeHWND;
+#elif defined(__APPLE__)
+const Steinberg::FIDString kPlatformType = Steinberg::kPlatformTypeNSView;
+#else
+const Steinberg::FIDString kPlatformType = Steinberg::kPlatformTypeX11EmbedWindowID;
+#endif
+
+/// What the host objects below report to the processor that owns them.
+class EditorOwner {
+public:
+    /// The controller changed a parameter (an edit in its editor), UI thread.
+    virtual void edited(vst::ParamID id, vst::ParamValue value) = 0;
+    /// The editor asks to be resized.
+    virtual tresult resizeRequested(Steinberg::IPlugView* view, Steinberg::ViewRect* size) = 0;
+    virtual plugin_editor::RunLoop& runLoop() = 0;
+
+protected:
+    ~EditorOwner() = default;
+};
+
+/// Hears what the controller tells the host: performEdit() is an edit in the
+/// editor, which goes to the processor (ADR 0009). restartComponent() is not
+/// acted on: latency is read at activation, and a host publishes a new mixer
+/// state after re-activating a plugin (ADR 0007).
 class ComponentHandler final : public vst::IComponentHandler {
 public:
+    explicit ComponentHandler(EditorOwner& owner)
+        : owner_(owner)
+    {
+    }
+
     tresult PLUGIN_API queryInterface(const TUID wanted, void** obj) override
     {
         if (same(wanted, FUnknown::iid) || same(wanted, vst::IComponentHandler::iid)) {
@@ -312,9 +342,129 @@ public:
     VLOOM_VST3_OWNED_REFCOUNT
 
     tresult PLUGIN_API beginEdit(vst::ParamID) override { return kResultOk; }
-    tresult PLUGIN_API performEdit(vst::ParamID, vst::ParamValue) override { return kResultOk; }
+    tresult PLUGIN_API performEdit(vst::ParamID id, vst::ParamValue value) override
+    {
+        if (!std::isfinite(value))
+            return kInvalidArgument;
+        owner_.edited(id, std::clamp(value, 0.0, 1.0));
+        return kResultOk;
+    }
     tresult PLUGIN_API endEdit(vst::ParamID) override { return kResultOk; }
     tresult PLUGIN_API restartComponent(int32) override { return kResultOk; }
+
+private:
+    EditorOwner& owner_;
+};
+
+/// The window around an editor: it hears resize requests, and on Linux it
+/// is the run loop for the editor's timers and file descriptors.
+class PlugFrame final : public Steinberg::IPlugFrame
+#if defined(__linux__)
+    ,
+                        public Steinberg::Linux::IRunLoop
+#endif
+{
+public:
+    explicit PlugFrame(EditorOwner& owner)
+        : owner_(owner)
+    {
+    }
+#if defined(__linux__)
+    ~PlugFrame()
+    {
+        for (auto& [handler, fd] : fdHandlers_)
+            handler->release();
+        for (auto& [handler, id] : timerHandlers_)
+            handler->release();
+    }
+#endif
+    PlugFrame(const PlugFrame&) = delete;
+    PlugFrame& operator=(const PlugFrame&) = delete;
+
+    tresult PLUGIN_API queryInterface(const TUID wanted, void** obj) override
+    {
+        if (same(wanted, FUnknown::iid) || same(wanted, Steinberg::IPlugFrame::iid)) {
+            addRef();
+            *obj = static_cast<Steinberg::IPlugFrame*>(this);
+            return kResultOk;
+        }
+#if defined(__linux__)
+        if (same(wanted, Steinberg::Linux::IRunLoop::iid)) {
+            addRef();
+            *obj = static_cast<Steinberg::Linux::IRunLoop*>(this);
+            return kResultOk;
+        }
+#endif
+        *obj = nullptr;
+        return kNoInterface;
+    }
+    VLOOM_VST3_OWNED_REFCOUNT
+
+    tresult PLUGIN_API resizeView(Steinberg::IPlugView* view, Steinberg::ViewRect* size) override
+    {
+        return owner_.resizeRequested(view, size);
+    }
+
+#if defined(__linux__)
+    tresult PLUGIN_API registerEventHandler(
+        Steinberg::Linux::IEventHandler* handler, Steinberg::Linux::FileDescriptor fd) override
+    {
+        if (handler == nullptr
+            || !owner_.runLoop().addFd(
+                fd, plugin_editor::RunLoop::kRead, [handler, fd](std::uint32_t) { handler->onFDIsSet(fd); }))
+            return kResultFalse;
+        handler->addRef();
+        fdHandlers_.emplace_back(handler, fd);
+        return kResultOk;
+    }
+    tresult PLUGIN_API unregisterEventHandler(Steinberg::Linux::IEventHandler* handler) override
+    {
+        return removeAll(fdHandlers_, handler, [this](int fd) { owner_.runLoop().removeFd(fd); });
+    }
+    tresult PLUGIN_API registerTimer(
+        Steinberg::Linux::ITimerHandler* handler, Steinberg::Linux::TimerInterval interval) override
+    {
+        if (handler == nullptr)
+            return kResultFalse;
+        const auto period = std::chrono::milliseconds{
+            static_cast<std::chrono::milliseconds::rep>(std::min<Steinberg::uint64>(interval, 3'600'000))};
+        const std::uint32_t id
+            = owner_.runLoop().addTimer(period, [handler](std::uint32_t) { handler->onTimer(); });
+        if (id == 0)
+            return kResultFalse;
+        handler->addRef();
+        timerHandlers_.emplace_back(handler, id);
+        return kResultOk;
+    }
+    tresult PLUGIN_API unregisterTimer(Steinberg::Linux::ITimerHandler* handler) override
+    {
+        return removeAll(
+            timerHandlers_, handler, [this](std::uint32_t id) { owner_.runLoop().removeTimer(id); });
+    }
+#endif
+
+private:
+#if defined(__linux__)
+    template <typename Handler, typename Key, typename Remove>
+    static tresult removeAll(std::vector<std::pair<Handler*, Key>>& list, Handler* handler, Remove remove)
+    {
+        bool found = false;
+        for (auto it = list.begin(); it != list.end();)
+            if (it->first == handler) {
+                remove(it->second);
+                it->first->release();
+                it = list.erase(it);
+                found = true;
+            } else {
+                ++it;
+            }
+        return found ? kResultOk : kResultFalse;
+    }
+
+    std::vector<std::pair<Steinberg::Linux::IEventHandler*, int>> fdHandlers_;
+    std::vector<std::pair<Steinberg::Linux::ITimerHandler*, std::uint32_t>> timerHandlers_;
+#endif
+    EditorOwner& owner_;
 };
 
 /// A byte stream in memory, for state. Positions come from the plugin:
@@ -556,7 +706,7 @@ struct BusBuffers {
 
 /// A VST 3 audio processor as an AudioProcessor. The control thread is
 /// VST 3's UI thread; process() and reset() run on the audio thread.
-class Vst3Processor final : public AudioProcessor {
+class Vst3Processor final : public AudioProcessor, private EditorOwner {
 public:
     static constexpr int32 kMaxBuses = 16;
     static constexpr int32 kMaxBusChannels = 32;
@@ -569,6 +719,7 @@ public:
 
     ~Vst3Processor() override
     {
+        Vst3Processor::closeEditor();
         Vst3Processor::deactivate();
         if (componentConnection_ != nullptr && controllerConnection_ != nullptr) {
             componentConnection_->disconnect(controllerConnection_);
@@ -780,8 +931,15 @@ public:
         float* left = context.channels[0];
         float* right = context.numChannels > 1 ? context.channels[1] : context.channels[0];
 
-        // Parameters: their latest value at their frame.
+        // Parameters: edits in the editor first, then the host's changes at
+        // their frame (a later point wins).
         changes_.clear();
+        Edit edit;
+        while (edits_.pop(edit)) {
+            int32 index = 0;
+            if (vst::IParamValueQueue* queue = changes_.addParameterData(edit.id, index); queue != nullptr)
+                queue->addPoint(0, edit.value, index);
+        }
         for (const ParameterEvent& p : context.parameters) {
             int32 index = 0;
             if (vst::IParamValueQueue* queue = changes_.addParameterData(p.id, index); queue != nullptr)
@@ -894,7 +1052,107 @@ public:
         resetPending_ = true;
     }
 
+    void idle() override { runLoop_.run(); }
+
+    [[nodiscard]] bool hasEditor() const override
+    {
+        if (!editorChecked_) { // a view is made once to ask; not every plugin has one
+            editorChecked_ = true;
+            Steinberg::IPlugView* view
+                = controller_ != nullptr ? controller_->createView(vst::ViewType::kEditor) : nullptr;
+            hasEditor_ = view != nullptr && view->isPlatformTypeSupported(kPlatformType) == kResultOk;
+            drop(view);
+        }
+        return hasEditor_;
+    }
+
+    bool openEditor(void* parent, EditorListener* listener) override
+    {
+        closeEditor();
+        if (parent == nullptr || controller_ == nullptr)
+            return false;
+        view_ = controller_->createView(vst::ViewType::kEditor);
+        if (view_ == nullptr || view_->isPlatformTypeSupported(kPlatformType) != kResultOk) {
+            drop(view_);
+            return false;
+        }
+        listener_ = listener; // the editor may ask for a size while it attaches
+        view_->setFrame(&frame_);
+        if (view_->attached(parent, kPlatformType) != kResultOk) {
+            view_->setFrame(nullptr);
+            drop(view_);
+            listener_ = nullptr;
+            return false;
+        }
+        return true;
+    }
+
+    void closeEditor() override
+    {
+        if (view_ == nullptr)
+            return;
+        view_->removed();
+        view_->setFrame(nullptr);
+        drop(view_);
+        listener_ = nullptr;
+    }
+
+    [[nodiscard]] bool isEditorOpen() const override { return view_ != nullptr; }
+
+    [[nodiscard]] EditorSize editorSize() const override
+    {
+        Steinberg::ViewRect rect;
+        if (view_ == nullptr || view_->getSize(&rect) != kResultOk)
+            return {};
+        return {std::max(rect.getWidth(), 0), std::max(rect.getHeight(), 0)};
+    }
+
+    [[nodiscard]] bool canResizeEditor() const override
+    {
+        return view_ != nullptr && view_->canResize() == kResultOk;
+    }
+
+    EditorSize setEditorSize(EditorSize wanted) override
+    {
+        if (canResizeEditor()) {
+            Steinberg::ViewRect rect{0, 0, std::max(wanted.width, 0), std::max(wanted.height, 0)};
+            view_->checkSizeConstraint(&rect);
+            view_->onSize(&rect);
+        }
+        return editorSize();
+    }
+
+    void parameterChangedByHost(std::uint32_t id, double value) override
+    {
+        if (controller_ != nullptr && std::isfinite(value))
+            controller_->setParamNormalized(id, std::clamp(value, 0.0, 1.0));
+    }
+
 private:
+    /// A parameter edited in the editor, on its way to the audio thread.
+    struct Edit {
+        vst::ParamID id = 0;
+        vst::ParamValue value = 0.0;
+    };
+
+    void edited(vst::ParamID id, vst::ParamValue value) override
+    {
+        edits_.push(Edit{id, value}); // full: dropped; the controller still shows it
+        if (listener_ != nullptr)
+            listener_->parameterEdited(id, value);
+    }
+
+    tresult resizeRequested(Steinberg::IPlugView* view, Steinberg::ViewRect* size) override
+    {
+        if (view == nullptr || view != view_ || size == nullptr)
+            return kInvalidArgument;
+        if (listener_ != nullptr)
+            listener_->editorResizeRequested({std::max(size->getWidth(), 0), std::max(size->getHeight(), 0)});
+        return view_->onSize(size); // the host resized its window: tell the view
+    }
+
+    plugin_editor::RunLoop& runLoop() override { return runLoop_; }
+
     /// Stereo main buses where the plugin agrees; buffers for every bus.
     bool configureBuses(int maxBlockFrames)
     {
@@ -945,7 +1203,14 @@ private:
     std::shared_ptr<Vst3Library> library_; ///< kept loaded while the plugin lives
     PluginInfo info_;
     HostApplication host_;
-    ComponentHandler handler_;
+    plugin_editor::RunLoop runLoop_; ///< before the frame, which removes from it
+    ComponentHandler handler_{*this};
+    PlugFrame frame_{*this};
+    Steinberg::IPlugView* view_ = nullptr;
+    EditorListener* listener_ = nullptr;
+    mutable bool editorChecked_ = false;
+    mutable bool hasEditor_ = false;
+    SpscQueue<Edit, 256> edits_; ///< control thread to audio thread
     vst::IComponent* component_ = nullptr;
     vst::IAudioProcessor* processor_ = nullptr;
     vst::IEditController* controller_ = nullptr;

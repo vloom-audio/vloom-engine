@@ -4,7 +4,11 @@
 // A .clap holding two tiny plugins the CLAP host tests load for real:
 //
 // - "vloom.test.level" (effect): output = input * Level (param 3, 0 .. 2),
-//   stereo in and out, 8-byte state, 7 frames of latency.
+//   stereo in and out, 8-byte state, 7 frames of latency. Its editor (no
+//   real window: it only records the parent) is 300 x 200, resizable down to
+//   100 x 100. As it attaches it asks for 400 x 300 and starts a timer; on
+//   the timer's first tick it edits Level to 0.25 and asks for a flush, so
+//   the edit comes out of params.flush() (inactive) or process() (active).
 // - "vloom.test.keys" (instrument): no input; outputs 0.1 per held key from
 //   the frame the note-on lands on, so a test can read note timing off the
 //   audio. Its right channel is the tempo / 1000 while playing.
@@ -17,9 +21,23 @@ namespace {
 
 constexpr clap_id kLevel = 3;
 
+#if defined(_WIN32)
+constexpr const char* kWindowApi = CLAP_WINDOW_API_WIN32;
+#elif defined(__APPLE__)
+constexpr const char* kWindowApi = CLAP_WINDOW_API_COCOA;
+#else
+constexpr const char* kWindowApi = CLAP_WINDOW_API_X11;
+#endif
+
 struct Plugin {
     clap_plugin_t clap{};
+    const clap_host_t* host = nullptr;
     bool instrument = false;
+    bool guiCreated = false;
+    std::uint32_t width = 300;
+    std::uint32_t height = 200;
+    clap_id timer = CLAP_INVALID_ID;
+    double pendingEdit = -1.0; ///< an edit made in the editor, not yet reported
     double level = 1.0;
     int held[128]{};
     int count = 0;
@@ -58,7 +76,28 @@ bool paramValue(const clap_plugin_t* p, clap_id id, double* value)
 }
 bool paramToText(const clap_plugin_t*, clap_id, double, char*, std::uint32_t) { return false; }
 bool paramFromText(const clap_plugin_t*, clap_id, const char*, double*) { return false; }
-void paramFlush(const clap_plugin_t*, const clap_input_events_t*, const clap_output_events_t*) { }
+/// Reports an edit made in the editor, if there is one.
+void reportEdit(Plugin* plugin, const clap_output_events_t* out)
+{
+    if (plugin->pendingEdit < 0.0 || out == nullptr)
+        return;
+    clap_event_param_value_t e{};
+    e.header.size = sizeof(e);
+    e.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+    e.header.type = CLAP_EVENT_PARAM_VALUE;
+    e.param_id = kLevel;
+    e.note_id = -1;
+    e.port_index = -1;
+    e.channel = -1;
+    e.key = -1;
+    e.value = plugin->pendingEdit;
+    if (out->try_push(out, &e.header))
+        plugin->pendingEdit = -1.0;
+}
+void paramFlush(const clap_plugin_t* p, const clap_input_events_t*, const clap_output_events_t* out)
+{
+    reportEdit(self(p), out);
+}
 const clap_plugin_params_t kParams
     = {paramCount, paramInfo, paramValue, paramToText, paramFromText, paramFlush};
 
@@ -96,6 +135,89 @@ bool load(const clap_plugin_t* p, const clap_istream_t* stream)
 const clap_plugin_state_t kState = {save, load};
 std::uint32_t latency(const clap_plugin_t*) { return 7; }
 const clap_plugin_latency_t kLatency = {latency};
+
+// ---- editor
+template <typename T> const T* hostExtension(Plugin* plugin, const char* id)
+{
+    return static_cast<const T*>(plugin->host->get_extension(plugin->host, id));
+}
+bool guiApiSupported(const clap_plugin_t*, const char* api, bool floating)
+{
+    return !floating && std::strcmp(api, kWindowApi) == 0;
+}
+bool guiPreferredApi(const clap_plugin_t*, const char** api, bool* floating)
+{
+    *api = kWindowApi;
+    *floating = false;
+    return true;
+}
+bool guiCreate(const clap_plugin_t* p, const char* api, bool floating)
+{
+    if (!guiApiSupported(p, api, floating))
+        return false;
+    self(p)->guiCreated = true;
+    return true;
+}
+void guiDestroy(const clap_plugin_t* p)
+{
+    Plugin* plugin = self(p);
+    if (plugin->timer != CLAP_INVALID_ID)
+        if (const auto* timers = hostExtension<clap_host_timer_support_t>(plugin, CLAP_EXT_TIMER_SUPPORT))
+            timers->unregister_timer(plugin->host, plugin->timer);
+    plugin->timer = CLAP_INVALID_ID;
+    plugin->guiCreated = false;
+}
+bool guiSetScale(const clap_plugin_t*, double) { return true; }
+bool guiGetSize(const clap_plugin_t* p, std::uint32_t* width, std::uint32_t* height)
+{
+    *width = self(p)->width;
+    *height = self(p)->height;
+    return true;
+}
+bool guiCanResize(const clap_plugin_t*) { return true; }
+bool guiResizeHints(const clap_plugin_t*, clap_gui_resize_hints_t*) { return false; }
+bool guiAdjustSize(const clap_plugin_t*, std::uint32_t* width, std::uint32_t* height)
+{
+    *width = std::max<std::uint32_t>(*width, 100);
+    *height = std::max<std::uint32_t>(*height, 100);
+    return true;
+}
+bool guiSetSize(const clap_plugin_t* p, std::uint32_t width, std::uint32_t height)
+{
+    self(p)->width = width;
+    self(p)->height = height;
+    return true;
+}
+bool guiSetParent(const clap_plugin_t* p, const clap_window_t* window)
+{
+    Plugin* plugin = self(p);
+    if (!plugin->guiCreated || window == nullptr || window->ptr == nullptr)
+        return false;
+    if (const auto* gui = hostExtension<clap_host_gui_t>(plugin, CLAP_EXT_GUI))
+        gui->request_resize(plugin->host, 400, 300);
+    if (const auto* timers = hostExtension<clap_host_timer_support_t>(plugin, CLAP_EXT_TIMER_SUPPORT))
+        timers->register_timer(plugin->host, 0, &plugin->timer);
+    return true;
+}
+bool guiSetTransient(const clap_plugin_t*, const clap_window_t*) { return false; }
+void guiSuggestTitle(const clap_plugin_t*, const char*) { }
+bool guiShow(const clap_plugin_t*) { return true; }
+bool guiHide(const clap_plugin_t*) { return true; }
+const clap_plugin_gui_t kGui = {guiApiSupported, guiPreferredApi, guiCreate, guiDestroy, guiSetScale,
+    guiGetSize, guiCanResize, guiResizeHints, guiAdjustSize, guiSetSize, guiSetParent, guiSetTransient,
+    guiSuggestTitle, guiShow, guiHide};
+
+void onTimer(const clap_plugin_t* p, clap_id)
+{
+    Plugin* plugin = self(p);
+    if (plugin->pendingEdit >= 0.0 || plugin->level == 0.25)
+        return; // edited once
+    plugin->level = 0.25; // as if the user turned the editor's knob
+    plugin->pendingEdit = 0.25;
+    if (const auto* params = hostExtension<clap_host_params_t>(plugin, CLAP_EXT_PARAMS))
+        params->request_flush(plugin->host);
+}
+const clap_plugin_timer_support_t kTimer = {onTimer};
 
 // ---- plugin
 bool init(const clap_plugin_t*) { return true; }
@@ -154,6 +276,7 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proces
             out[1][i] = in[1][i] * static_cast<float>(plugin->level);
         }
     }
+    reportEdit(plugin, process->out_events);
     return CLAP_PROCESS_CONTINUE;
 }
 
@@ -169,6 +292,10 @@ const void* extension(const clap_plugin_t* p, const char* id)
         return &kState;
     if (std::strcmp(id, CLAP_EXT_LATENCY) == 0)
         return &kLatency;
+    if (std::strcmp(id, CLAP_EXT_GUI) == 0)
+        return &kGui;
+    if (std::strcmp(id, CLAP_EXT_TIMER_SUPPORT) == 0)
+        return &kTimer;
     return nullptr;
 }
 
@@ -180,12 +307,13 @@ const clap_plugin_descriptor_t* descriptor(const clap_plugin_factory_t*, std::ui
 {
     return index == 0 ? &kLevelDescriptor : index == 1 ? &kKeysDescriptor : nullptr;
 }
-const clap_plugin_t* create(const clap_plugin_factory_t*, const clap_host_t*, const char* id)
+const clap_plugin_t* create(const clap_plugin_factory_t*, const clap_host_t* host, const char* id)
 {
     const bool keys = std::strcmp(id, kKeysDescriptor.id) == 0;
     if (!keys && std::strcmp(id, kLevelDescriptor.id) != 0)
         return nullptr;
     auto* plugin = new Plugin;
+    plugin->host = host;
     plugin->instrument = keys;
     plugin->clap = {keys ? &kKeysDescriptor : &kLevelDescriptor, plugin, init, destroy, activate, deactivate,
         startProcessing, stopProcessing, reset, process, extension, onMainThread};

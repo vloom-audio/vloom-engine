@@ -5,12 +5,15 @@
 // against the plain interfaces, like the test .clap:
 //   "Level"  effect, one object as component and controller: multiplies by
 //            2 x parameter 3 (normalized, default 0.5 = unity); state = that
-//            value; latency 7 frames.
+//            value; latency 7 frames. Its editor (no real window: it only
+//            records the parent) asks for 400 x 300 as it attaches, and
+//            edits parameter 3 to 0.25 through the host.
 //   "Keys"   instrument, a component with a separate controller connected
 //            to it: left = 0.1 per held key, right = tempo / 1000 while the
 //            host plays. No audio input.
 #include "pluginterfaces/base/ibstream.h"
 #include "pluginterfaces/base/ipluginbase.h"
+#include "pluginterfaces/gui/iplugview.h"
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivstcomponent.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
@@ -139,6 +142,92 @@ protected:
     bool setUp_ = false;
 };
 
+#if defined(_WIN32)
+const FIDString kPlatformType = kPlatformTypeHWND;
+#elif defined(__APPLE__)
+const FIDString kPlatformType = kPlatformTypeNSView;
+#else
+const FIDString kPlatformType = kPlatformTypeX11EmbedWindowID;
+#endif
+
+/// An editor without a window: 300 x 200, resizable down to 100 x 100.
+class TestView final : public IPlugView {
+public:
+    explicit TestView(IComponentHandler* handler)
+        : handler_(handler)
+    {
+    }
+
+    tresult PLUGIN_API queryInterface(const TUID wanted, void** obj) override
+    {
+        if (same(wanted, FUnknown::iid) || same(wanted, IPlugView::iid)) {
+            addRef();
+            *obj = static_cast<IPlugView*>(this);
+            return kResultOk;
+        }
+        *obj = nullptr;
+        return kNoInterface;
+    }
+    TEST_REFCOUNT
+
+    tresult PLUGIN_API isPlatformTypeSupported(FIDString type) override
+    {
+        return type != nullptr && std::strcmp(type, kPlatformType) == 0 ? kResultTrue : kResultFalse;
+    }
+    tresult PLUGIN_API attached(void* parent, FIDString type) override
+    {
+        if (parent == nullptr || isPlatformTypeSupported(type) != kResultTrue || frame_ == nullptr)
+            return kResultFalse;
+        ViewRect wanted{0, 0, 400, 300};
+        frame_->resizeView(this, &wanted);
+        if (handler_ != nullptr) {
+            handler_->beginEdit(3);
+            handler_->performEdit(3, 0.25);
+            handler_->endEdit(3);
+        }
+        return kResultOk;
+    }
+    tresult PLUGIN_API removed() override { return kResultOk; }
+    tresult PLUGIN_API onWheel(float) override { return kResultFalse; }
+    tresult PLUGIN_API onKeyDown(char16, int16, int16) override { return kResultFalse; }
+    tresult PLUGIN_API onKeyUp(char16, int16, int16) override { return kResultFalse; }
+    tresult PLUGIN_API getSize(ViewRect* size) override
+    {
+        if (size == nullptr)
+            return kInvalidArgument;
+        *size = size_;
+        return kResultOk;
+    }
+    tresult PLUGIN_API onSize(ViewRect* size) override
+    {
+        if (size == nullptr)
+            return kInvalidArgument;
+        size_ = *size;
+        return kResultOk;
+    }
+    tresult PLUGIN_API onFocus(TBool) override { return kResultOk; }
+    tresult PLUGIN_API setFrame(IPlugFrame* frame) override
+    {
+        frame_ = frame;
+        return kResultOk;
+    }
+    tresult PLUGIN_API canResize() override { return kResultTrue; }
+    tresult PLUGIN_API checkSizeConstraint(ViewRect* rect) override
+    {
+        if (rect == nullptr)
+            return kInvalidArgument;
+        rect->right = rect->left + std::max(rect->getWidth(), 100);
+        rect->bottom = rect->top + std::max(rect->getHeight(), 100);
+        return kResultOk;
+    }
+
+private:
+    ~TestView() = default;
+    IComponentHandler* handler_ = nullptr;
+    IPlugFrame* frame_ = nullptr;
+    ViewRect size_{0, 0, 300, 200};
+};
+
 class Level final : public ProcessorBase, public IEditController {
 public:
     Level()
@@ -230,12 +319,21 @@ public:
     ParamValue PLUGIN_API plainParamToNormalized(ParamID, ParamValue value) override { return value / 2.0; }
     ParamValue PLUGIN_API getParamNormalized(ParamID) override { return level_; }
     tresult PLUGIN_API setParamNormalized(ParamID, ParamValue) override { return kResultOk; }
-    tresult PLUGIN_API setComponentHandler(IComponentHandler*) override { return kResultOk; }
-    IPlugView* PLUGIN_API createView(FIDString) override { return nullptr; }
+    tresult PLUGIN_API setComponentHandler(IComponentHandler* handler) override
+    {
+        handler_ = handler;
+        return kResultOk;
+    }
+    IPlugView* PLUGIN_API createView(FIDString name) override
+    {
+        return name != nullptr && std::strcmp(name, ViewType::kEditor) == 0 ? new TestView(handler_)
+                                                                            : nullptr;
+    }
 
 private:
     ~Level() override = default;
     double level_ = 0.5;
+    IComponentHandler* handler_ = nullptr;
 };
 
 class Keys final : public ProcessorBase, public IConnectionPoint {

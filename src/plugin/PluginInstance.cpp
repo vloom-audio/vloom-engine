@@ -39,9 +39,10 @@ void PluginInstance::deactivate()
 
 bool PluginInstance::setParameter(std::uint32_t id, double value)
 {
-    if (!std::isfinite(value))
+    if (!std::isfinite(value) || !parameters_.push(ParameterEvent{0, id, value}))
         return false;
-    return parameters_.push(ParameterEvent{0, id, value});
+    processor_->parameterChangedByHost(id, value); // an open editor follows
+    return true;
 }
 
 void PluginInstance::process(float* left, float* right, int numFrames, const TransportInfo& transport,
