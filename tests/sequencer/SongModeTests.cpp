@@ -229,3 +229,174 @@ TEST_CASE("Song mode does not allocate on the audio thread", "[song]")
     }
     CHECK(onAudioThread == 0);
 }
+
+TEST_CASE("A pattern clip with an offset starts that far into its pattern", "[song][clips]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    auto state = song(constant(100));
+    // Steps 0 and 5 play; the clip starts 4 steps in, so step 5 lands on its
+    // step 1, and with a 8-step pattern the next pass's step 0 on its step 4.
+    auto pattern = stepPattern({1, 0, 0, 0, 0, 1, 0, 0});
+    pattern.stepCount = 8;
+    state->patterns.push_back(std::move(pattern));
+    vloom::SongPatternClip clip{0, 2, 8};
+    clip.offsetSteps = 4;
+    state->patternClips.push_back(clip); // steps 2 .. 9
+    engine.setSequencerState(std::move(state));
+    engine.play();
+    const auto audio = render(engine, 1.5);
+
+    std::vector<std::size_t> onsets;
+    for (std::size_t s = 0; s < 12; ++s)
+        if (left(audio, s * kStepFrames) != 0.0f)
+            onsets.push_back(s);
+    CHECK(onsets == std::vector<std::size_t>{3, 6});
+}
+
+TEST_CASE("A pattern clip's offset moves its notes too, without a repeat", "[song][clips]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    auto state = song(constant(48000));
+    vloom::SongPattern pattern;
+    pattern.notes.emplace_back();
+    vloom::Note note;
+    note.start = 3 * kTicksPerStep;
+    note.length = kTicksPerStep;
+    note.velocity = 1.0f;
+    pattern.notes[0].push_back(note);
+    state->patterns.push_back(std::move(pattern)); // stepCount 0: no repeat
+    vloom::SongPatternClip clip{0, 0, 4};
+    clip.offsetSteps = 2;
+    state->patternClips.push_back(clip);
+    engine.setSequencerState(std::move(state));
+    engine.play();
+    const auto audio = render(engine, 1.0);
+
+    CHECK(peak(audio, 0, kStepFrames) == 0.0f);
+    CHECK(left(audio, kStepFrames) == Approx(kCentre).margin(1e-4)); // pattern step 3 = clip step 1
+    // Held one step, then released: silent once the release is over.
+    CHECK(peak(audio, 2 * kStepFrames + vloom::Sampler::kReleaseFrames + 10, 4 * kStepFrames) == 0.0f);
+}
+
+TEST_CASE("An audio clip with an offset plays its sample from there", "[song][clips]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    auto state = song(ramp(48000));
+    vloom::SongAudioClip clip{0, 1};
+    clip.offsetSteps = 2; // 12000 frames into the sample
+    state->audioClips.push_back(clip);
+    engine.setSequencerState(std::move(state));
+    engine.play();
+    const auto audio = render(engine, 0.5);
+
+    CHECK(peak(audio, 0, kStepFrames) == 0.0f);
+    // After the fade-in, frame 12000 + n of the sample.
+    CHECK(left(audio, kStepFrames + 200) / kCentre == Approx((12000.0 + 200.0) / 48000.0).margin(1e-3));
+    CHECK(std::abs(left(audio, kStepFrames)) < 0.02f); // starts part-way: faded in
+}
+
+TEST_CASE("An audio clip with a length fades out at its end", "[song][clips]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    auto state = song(constant(48000, 0.5f));
+    vloom::SongAudioClip clip{0, 0};
+    clip.lengthSteps = 2;
+    state->audioClips.push_back(clip);
+    engine.setSequencerState(std::move(state));
+    engine.play();
+    const auto audio = render(engine, 0.6);
+
+    CHECK(left(audio, 2 * kStepFrames - 1) == Approx(0.5f * kCentre).margin(1e-4));
+    CHECK(peak(audio, 2 * kStepFrames + vloom::Sampler::kReleaseFrames + 1, audio.size() / 2) == 0.0f);
+}
+
+TEST_CASE("Playing from inside a cut audio clip keeps its offset and end", "[song][clips]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    auto state = song(ramp(48000));
+    vloom::SongAudioClip clip{0, 0};
+    clip.offsetSteps = 1; // 6000 frames in
+    clip.lengthSteps = 3;
+    state->audioClips.push_back(clip);
+    engine.setSequencerState(std::move(state));
+    engine.locate(1.0 * kTicksPerStep); // one step into the clip
+    engine.play();
+    const auto audio = render(engine, 0.5);
+
+    CHECK(left(audio, 200) / kCentre == Approx((12000.0 + 200.0) / 48000.0).margin(1e-3));
+    // The clip ends 2 steps after the locate.
+    CHECK(peak(audio, 2 * kStepFrames + vloom::Sampler::kReleaseFrames + 1, audio.size() / 2) == 0.0f);
+
+    // Located past its end: silent.
+    engine.locate(3.5 * kTicksPerStep);
+    CHECK(peak(render(engine, 0.2), 0, 9600) == 0.0f);
+}
+
+TEST_CASE("An audio clip's rate plays its sample faster, offset included", "[song][clips]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    auto state = song(ramp(96000));
+    vloom::SongAudioClip clip{0, 0};
+    clip.rate = 2.0; // fitted to the tempo by resampling
+    clip.offsetSteps = 1; // one step of the song: 6000 frames played, 12000 of the sample
+    state->audioClips.push_back(clip);
+    engine.setSequencerState(std::move(state));
+    engine.play();
+    const auto audio = render(engine, 0.2);
+    // After the fade-in, frame n of the song plays frame 12000 + 2n of the sample.
+    CHECK(left(audio, 1000) / kCentre == Approx((12000.0 + 2000.0) / 96000.0).margin(2e-3));
+    CHECK(left(audio, 5000) / kCentre == Approx((12000.0 + 10000.0) / 96000.0).margin(2e-3));
+}
+
+TEST_CASE("An audio clip's own sample replaces its channel's", "[song][clips]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    auto state = song(constant(48000, 0.25f));
+    vloom::SongAudioClip clip{0, 0};
+    clip.sample = constant(48000, 0.5f); // e.g. time-stretched to the tempo
+    state->audioClips.push_back(clip);
+    engine.setSequencerState(std::move(state));
+    engine.play();
+    const auto audio = render(engine, 0.1);
+    CHECK(left(audio, 1000) == Approx(0.5f * kCentre).margin(1e-4));
+}
+
+TEST_CASE("A clip's own sample stays alive while it sounds, then is freed", "[song][clips]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    std::weak_ptr<const vloom::SampleBuffer> watch;
+    std::shared_ptr<vloom::ChannelVoices> voices;
+    {
+        auto state = song(constant(10));
+        voices = state->channels[0].voices;
+        vloom::SongAudioClip clip{0, 0};
+        auto own = constant(12000); // 0.25 s
+        watch = own;
+        clip.sample = std::move(own);
+        state->audioClips.push_back(clip);
+        engine.setSequencerState(std::move(state));
+    }
+    engine.play();
+    render(engine, 0.1);
+
+    // The clip is gone from the song, but the same channel still plays its
+    // sample: the old state, which alone holds it, must stay.
+    auto next = song(constant(10));
+    next->channels[0].voices = voices;
+    engine.setSequencerState(std::move(next));
+    render(engine, 0.05);
+    engine.collectGarbage();
+    CHECK_FALSE(watch.expired());
+
+    render(engine, 0.2);
+    engine.collectGarbage();
+    CHECK(watch.expired());
+}

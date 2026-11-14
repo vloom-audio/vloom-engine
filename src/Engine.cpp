@@ -480,7 +480,7 @@ void Engine::playSpan(float* const* out, int numChannels, int spanStart, int spa
                 ++nextBeat_;
             }
             if (fireStep) {
-                sequencer_.triggerStep(nextStep_);
+                sequencer_.triggerStep(nextStep_, ticksPerSample > 0.0 ? 1.0 / ticksPerSample : 0.0);
                 ++nextStep_;
             }
             if (fireStart) {

@@ -39,15 +39,17 @@ void notesAt(const std::vector<Note>& row, std::int64_t at, std::int64_t span, P
             play(*it);
 }
 
-/// Ticks after which a pattern repeats inside a clip `span` ticks long:
-/// its own length when it has one (SongPattern::stepCount), else the clip's.
-std::int64_t loopTicks(const SongPattern& pattern, std::int64_t span, std::int64_t ticksPerStep) noexcept
+/// Ticks after which a pattern repeats inside a clip: its own length when
+/// it has one (SongPattern::stepCount). Without, it never repeats: the
+/// period is the furthest the clip reaches into it, its offset plus its span.
+std::int64_t loopTicks(
+    const SongPattern& pattern, std::int64_t offset, std::int64_t span, std::int64_t ticksPerStep) noexcept
 {
     if (pattern.stepCount <= 0)
-        return span;
+        return offset + span;
     // stepCount and ticksPerStep are both int: their product (at most about
     // 4.6e18) always fits int64.
-    return std::min(span, static_cast<std::int64_t>(pattern.stepCount) * ticksPerStep);
+    return static_cast<std::int64_t>(pattern.stepCount) * ticksPerStep;
 }
 
 void sortNotes(std::vector<Note>& notes)
@@ -61,12 +63,22 @@ double keyFrequency(int key) noexcept { return 440.0 * std::exp2(static_cast<dou
 
 /// An audio clip plays at the sample's own speed, master pitch or not, so it
 /// stays in time with the song.
-Sampler::PlayOptions audioClipOptions(std::int64_t startFrame) noexcept
+Sampler::PlayOptions audioClipOptions(std::int64_t startFrame, std::int64_t releaseAt, double rate) noexcept
 {
     Sampler::PlayOptions options;
     options.startFrame = startFrame;
+    options.rate = rate; // 1 unless the clip is fitted to the tempo by resampling
     options.followsPitch = false;
+    options.releaseAt = releaseAt; // a clip shorter than its sample ends there
     return options;
+}
+
+/// Frames into the sample `ticks` from where it starts, at `framesPerTick`.
+std::int64_t framesInto(double ticks, double framesPerTick) noexcept
+{
+    const double frames = std::floor(ticks * framesPerTick);
+    // A huge offset only has to land past the sample's end.
+    return frames > 0.0 ? static_cast<std::int64_t>(std::min(frames, 9.0e18)) : 0;
 }
 
 } // namespace
@@ -85,12 +97,23 @@ void StepSequencer::publish(std::unique_ptr<SequencerState> state)
     exchange_.publish(std::unique_ptr<const SequencerState>(std::move(state)));
 }
 
-bool StepSequencer::clipInRange(std::int64_t startStep, std::int64_t lengthSteps) const noexcept
+bool StepSequencer::clipInRange(
+    std::int64_t startStep, std::int64_t lengthSteps, std::int64_t offsetSteps) const noexcept
 {
-    // Keeps every tick computed from a clip (start + span + note length)
-    // far inside int64.
+    // Keeps every tick computed from a clip (start + offset + span + note
+    // length) far inside int64.
     const std::int64_t maxSteps = kMaxTicks / current_->ticksPerStep;
-    return startStep >= 0 && startStep <= maxSteps && lengthSteps > 0 && lengthSteps <= maxSteps;
+    return startStep >= 0 && startStep <= maxSteps && lengthSteps > 0 && lengthSteps <= maxSteps
+        && offsetSteps >= 0 && offsetSteps <= maxSteps;
+}
+
+std::int64_t StepSequencer::audioClipEnd(const SongAudioClip& clip) const noexcept
+{
+    // clipChannel() has checked startStep; the length is checked here.
+    const std::int64_t maxSteps = kMaxTicks / current_->ticksPerStep;
+    if (clip.lengthSteps <= 0 || clip.lengthSteps > maxSteps)
+        return kNoEvent;
+    return (clip.startStep + clip.lengthSteps) * current_->ticksPerStep;
 }
 
 std::int64_t StepSequencer::nextNoteStart(std::int64_t from) const noexcept
@@ -103,25 +126,29 @@ std::int64_t StepSequencer::nextNoteStart(std::int64_t from) const noexcept
     if (current_->song) {
         for (const SongPatternClip& clip : current_->patternClips) {
             if (clip.pattern < 0 || static_cast<std::size_t>(clip.pattern) >= current_->patterns.size()
-                || !clipInRange(clip.startStep, clip.lengthSteps))
+                || !clipInRange(clip.startStep, clip.lengthSteps, clip.offsetSteps))
                 continue;
             const std::int64_t start = clip.startStep * ticksPerStep;
             const std::int64_t span = clip.lengthSteps * ticksPerStep;
             if (start + span <= from || start >= next)
                 continue; // over already, or nothing in it can come first
             const SongPattern& pattern = current_->patterns[static_cast<std::size_t>(clip.pattern)];
-            const std::int64_t period = loopTicks(pattern, span, ticksPerStep);
-            // Where `from` falls in the clip: which pass of the pattern, and where in it.
-            const std::int64_t into = std::max<std::int64_t>(from - start, 0);
+            const std::int64_t offset = clip.offsetSteps * ticksPerStep;
+            const std::int64_t period = loopTicks(pattern, offset, span, ticksPerStep);
+            // Where `from` falls in the pattern (the clip starts `offset`
+            // into it): which pass, and where in it. `origin` is where the
+            // pattern's first pass would have started.
+            const std::int64_t origin = start - offset;
+            const std::int64_t into = offset + std::max<std::int64_t>(from - start, 0);
             const std::int64_t pass = into / period;
             const std::int64_t local = into - pass * period;
             for (std::size_t c = 0; c < channels.size() && c < pattern.notes.size(); ++c) {
                 const auto& row = pattern.notes[c];
                 std::int64_t at = kNoEvent;
                 if (const Note* note = firstPlayable(row, local, period))
-                    at = start + pass * period + note->start;
+                    at = origin + pass * period + note->start;
                 else if (const Note* first = firstPlayable(row, 0, period))
-                    at = start + (pass + 1) * period + first->start; // the next pass
+                    at = origin + (pass + 1) * period + first->start; // the next pass
                 if (at < start + span) // not past the clip's end
                     next = std::min(next, at);
             }
@@ -154,15 +181,16 @@ void StepSequencer::startNotes(std::int64_t tick) noexcept
     if (current_->song) {
         for (const SongPatternClip& clip : current_->patternClips) {
             if (clip.pattern < 0 || static_cast<std::size_t>(clip.pattern) >= current_->patterns.size()
-                || !clipInRange(clip.startStep, clip.lengthSteps))
+                || !clipInRange(clip.startStep, clip.lengthSteps, clip.offsetSteps))
                 continue;
             const std::int64_t start = clip.startStep * ticksPerStep;
             const std::int64_t span = clip.lengthSteps * ticksPerStep;
             if (tick < start || tick >= start + span)
                 continue;
             const SongPattern& pattern = current_->patterns[static_cast<std::size_t>(clip.pattern)];
-            const std::int64_t period = loopTicks(pattern, span, ticksPerStep);
-            const std::int64_t local = (tick - start) % period;
+            const std::int64_t offset = clip.offsetSteps * ticksPerStep;
+            const std::int64_t period = loopTicks(pattern, offset, span, ticksPerStep);
+            const std::int64_t local = (offset + tick - start) % period;
             for (std::size_t c = 0; c < channels.size() && c < pattern.notes.size(); ++c)
                 notesAt(pattern.notes[c], local, period, [&](const Note& note) { play(channels[c], note); });
         }
@@ -246,7 +274,7 @@ int StepSequencer::ticksPerStep() const noexcept
     return current_ != nullptr && current_->stepCount > 0 ? current_->ticksPerStep : 0;
 }
 
-void StepSequencer::triggerStep(std::int64_t step) noexcept
+void StepSequencer::triggerStep(std::int64_t step, double framesPerTick) noexcept
 {
     if (current_ == nullptr || current_->stepCount <= 0 || step < 0)
         return;
@@ -254,12 +282,13 @@ void StepSequencer::triggerStep(std::int64_t step) noexcept
         const auto& channels = current_->channels;
         for (const SongPatternClip& clip : current_->patternClips) {
             if (clip.pattern < 0 || static_cast<std::size_t>(clip.pattern) >= current_->patterns.size()
-                || current_->ticksPerStep <= 0 || !clipInRange(clip.startStep, clip.lengthSteps)
-                || step < clip.startStep || step >= clip.startStep + clip.lengthSteps)
+                || current_->ticksPerStep <= 0
+                || !clipInRange(clip.startStep, clip.lengthSteps, clip.offsetSteps) || step < clip.startStep
+                || step >= clip.startStep + clip.lengthSteps)
                 continue;
             const SongPattern& pattern = current_->patterns[static_cast<std::size_t>(clip.pattern)];
             const auto& rows = pattern.steps;
-            std::int64_t into = step - clip.startStep;
+            std::int64_t into = clip.offsetSteps + step - clip.startStep;
             if (pattern.stepCount > 0)
                 into %= pattern.stepCount; // the pattern repeats along a longer clip
             const auto local = static_cast<std::size_t>(into);
@@ -273,8 +302,13 @@ void StepSequencer::triggerStep(std::int64_t step) noexcept
         }
         for (const SongAudioClip& clip : current_->audioClips)
             if (clip.startStep == step)
-                if (const ChannelState* channel = clipChannel(clip))
-                    channel->voices->sampler.play(channel->sample.get(), audioClipOptions(0));
+                if (const ChannelState* channel = clipChannel(clip)) {
+                    const double offsetTicks = static_cast<double>(clip.offsetSteps) * current_->ticksPerStep;
+                    const double rate = clipRate(clip);
+                    channel->voices->sampler.play(clipSample(clip, *channel),
+                        audioClipOptions(
+                            framesInto(offsetTicks, framesPerTick * rate), audioClipEnd(clip), rate));
+                }
         return;
     }
     const auto index = static_cast<std::size_t>(step % current_->stepCount);
@@ -291,10 +325,22 @@ const ChannelState* StepSequencer::clipChannel(const SongAudioClip& clip) const 
 {
     if (current_ == nullptr || clip.channel < 0
         || static_cast<std::size_t>(clip.channel) >= current_->channels.size() || current_->ticksPerStep <= 0
-        || clip.startStep < 0 || clip.startStep > kMaxTicks / current_->ticksPerStep)
+        || clip.startStep < 0 || clip.startStep > kMaxTicks / current_->ticksPerStep || clip.offsetSteps < 0
+        || clip.offsetSteps > kMaxTicks / current_->ticksPerStep)
         return nullptr;
     const ChannelState& channel = current_->channels[static_cast<std::size_t>(clip.channel)];
-    return channel.muted || channel.voices == nullptr || channel.sample == nullptr ? nullptr : &channel;
+    return channel.muted || channel.voices == nullptr || clipSample(clip, channel) == nullptr ? nullptr
+                                                                                              : &channel;
+}
+
+const SampleBuffer* StepSequencer::clipSample(const SongAudioClip& clip, const ChannelState& channel) noexcept
+{
+    return clip.sample != nullptr ? clip.sample.get() : channel.sample.get();
+}
+
+double StepSequencer::clipRate(const SongAudioClip& clip) noexcept
+{
+    return clip.rate >= Sampler::kMinRate && clip.rate <= Sampler::kMaxRate ? clip.rate : 1.0;
 }
 
 void StepSequencer::resumeAt(double ticks, double framesPerTick) noexcept
@@ -321,9 +367,14 @@ void StepSequencer::resumeAt(double ticks, double framesPerTick) noexcept
         constexpr double kEpsilon = 1e-6; // as in Engine::processBlock
         if ((ticks - start) * framesPerTick < 1.0 - kEpsilon)
             continue;
-        const auto offset = static_cast<std::int64_t>(std::floor((ticks - start) * framesPerTick));
-        channel->voices->sampler.play(
-            channel->sample.get(), audioClipOptions(offset)); // ignored past the end
+        const std::int64_t end = audioClipEnd(clip);
+        if (end != kNoEvent && ticks >= static_cast<double>(end))
+            continue; // the clip is over
+        const double offsetTicks = static_cast<double>(clip.offsetSteps) * current_->ticksPerStep;
+        const double rate = clipRate(clip);
+        channel->voices->sampler.play(clipSample(clip, *channel),
+            audioClipOptions(framesInto(offsetTicks + ticks - start, framesPerTick * rate), end,
+                rate)); // ignored past the end
     }
 }
 
@@ -452,6 +503,12 @@ bool StepSequencer::canRelease(const SequencerState& old) const noexcept
         if (sample != nullptr && !sampleInCurrent(sample) && samplePlaying(sample))
             return false; // a sample only this state owns is still sounding
     }
+    // Audio clips' own samples (fitted to the tempo) the same way.
+    for (const SongAudioClip& clip : old.audioClips) {
+        const SampleBuffer* sample = clip.sample.get();
+        if (sample != nullptr && !sampleInCurrent(sample) && samplePlaying(sample))
+            return false;
+    }
     return true;
 }
 
@@ -461,6 +518,9 @@ bool StepSequencer::sampleInCurrent(const SampleBuffer* sample) const noexcept
         return false;
     for (const ChannelState& channel : current_->channels)
         if (channel.sample.get() == sample)
+            return true;
+    for (const SongAudioClip& clip : current_->audioClips)
+        if (clip.sample.get() == sample)
             return true;
     return false;
 }

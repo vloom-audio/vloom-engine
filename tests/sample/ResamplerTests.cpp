@@ -93,3 +93,16 @@ TEST_CASE("Constant signals keep their level", "[sample]")
     for (std::int64_t i = 500; i < out.frames() - 500; ++i)
         REQUIRE(std::abs(out.channel(0)[i] - 0.5f) < 1e-4f);
 }
+
+TEST_CASE("A long file, split between threads, is resampled the same throughout", "[sample]")
+{
+    // 10 s of stereo: long enough to be split into several ranges, each on
+    // a thread of its own. Every frame, the range boundaries included, is as
+    // accurate as in a short file, and both channels match.
+    const auto out = vloom::resample(sine(1000.0, 44100.0, 441000, 2), 48000.0);
+    REQUIRE(out.frames() == 480000);
+    CHECK(maxSineError(out, 1000.0, 200) < 1e-4);
+    for (std::int64_t i = 0; i < out.frames(); ++i)
+        if (out.channel(0)[i] != out.channel(1)[i])
+            FAIL("channels differ at frame " << i);
+}
