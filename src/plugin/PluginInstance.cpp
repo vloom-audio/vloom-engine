@@ -59,8 +59,16 @@ void PluginInstance::process(float* left, float* right, int numFrames, const Tra
         else if (pendingCount_ < pending_.size())
             pending_[pendingCount_++] = event;
     }
-    if (bypassed_.load(std::memory_order_relaxed))
+    if (bypassed_.load(std::memory_order_relaxed)) {
+        // Notes ending while bypassed never reach the processor, and the
+        // host forgets them: end everything it holds as bypass starts, so
+        // nothing hangs once it processes again.
+        if (!bypassedLast_)
+            processor_->reset();
+        bypassedLast_ = true;
         return;
+    }
+    bypassedLast_ = false;
     float* channels[2] = {left, right};
     if (notes.size() > kMaxNotes)
         notes = notes.first(kMaxNotes);

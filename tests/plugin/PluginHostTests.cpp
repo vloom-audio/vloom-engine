@@ -190,6 +190,9 @@ TEST_CASE("An inactive, refused or bypassed processor passes audio through", "[p
     REQUIRE(probe.setParameter(7, 0.5)); // made while bypassed: kept
     CHECK(runOnes(probe, 16).front() == 1.0f);
     CHECK(log.lastParameter == -1.0);
+    CHECK(log.resets == 1); // as bypass started: held notes end
+    CHECK(runOnes(probe, 16).front() == 1.0f);
+    CHECK(log.resets == 1); // once
     probe.setBypassed(false);
     CHECK(runOnes(probe, 16).front() == Approx(1.25f));
     CHECK(log.lastParameter == 0.5); // delivered once it processes again

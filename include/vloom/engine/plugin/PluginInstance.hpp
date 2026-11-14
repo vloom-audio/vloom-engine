@@ -43,7 +43,9 @@ public:
     /// Sets parameter `id` to `value` at the start of the next block. False
     /// if the queue is full (try again later).
     bool setParameter(std::uint32_t id, double value);
-    /// A bypassed instance passes audio through, unprocessed.
+    /// A bypassed instance passes audio through, unprocessed. As bypass
+    /// starts, the processor is reset (held notes end, tails stop): the
+    /// notes sent meanwhile are dropped.
     void setBypassed(bool bypassed) noexcept { bypassed_.store(bypassed, std::memory_order_relaxed); }
     [[nodiscard]] bool isBypassed() const noexcept { return bypassed_.load(std::memory_order_relaxed); }
 
@@ -76,6 +78,7 @@ private:
     /// Audio thread: changes not given to the processor yet, one per parameter.
     std::array<ParameterEvent, kMaxQueuedParameters> pending_{};
     std::size_t pendingCount_ = 0;
+    bool bypassedLast_ = false; ///< audio thread: the last block was bypassed
     /// Audio thread: the notes of one chunk, their frames made chunk-relative.
     std::array<NoteEvent, kMaxNotes> chunkNotes_{};
 };

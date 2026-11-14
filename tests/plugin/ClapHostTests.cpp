@@ -186,6 +186,22 @@ TEST_CASE("Stopping ends a CLAP instrument's held notes", "[plugin][clap][sequen
     CHECK(audio[300 * 2] == 0.0f);
 }
 
+TEST_CASE("Bypassing a CLAP instrument ends its held notes", "[plugin][clap]")
+{
+    auto keys = load("vloom.test.keys");
+    std::vector<float> l(64), r(64);
+    const std::array<vloom::NoteEvent, 1> on{vloom::NoteEvent{0, vloom::NoteEvent::Type::On, 60, 1.0f}};
+    keys->process(l.data(), r.data(), 64, {}, on);
+    REQUIRE(l[10] > 0.05f);
+    keys->setBypassed(true);
+    const std::array<vloom::NoteEvent, 1> off{vloom::NoteEvent{0, vloom::NoteEvent::Type::Off, 60, 0.0f}};
+    keys->process(l.data(), r.data(), 64, {}, off); // the off is dropped while bypassed
+    keys->setBypassed(false);
+    std::fill(l.begin(), l.end(), 0.0f);
+    keys->process(l.data(), r.data(), 64, {});
+    CHECK(l[10] == 0.0f); // not hanging
+}
+
 TEST_CASE("Hosted CLAP plugins do not allocate on the audio thread", "[plugin][clap]")
 {
     vloom::Engine engine;
