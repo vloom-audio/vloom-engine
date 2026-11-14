@@ -37,7 +37,7 @@ public:
 
 private:
     std::vector<float> buffer_; ///< channel-major, `size_` frames each
-    std::size_t size_ = 0; ///< a power of two, > maxDelay_ (0 when empty)
+    std::size_t size_ = 0; ///< maxDelay_ + 1 (0 when empty)
     std::size_t write_ = 0;
     int channels_ = 0;
     int maxDelay_ = 0;

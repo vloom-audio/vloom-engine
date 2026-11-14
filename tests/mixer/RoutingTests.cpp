@@ -404,3 +404,25 @@ TEST_CASE("Removing latency from a live graph neither hangs nor replays a delay"
     CHECK(heard == 0.0f);
     CHECK(engine.latencyFrames() == kLatency);
 }
+
+TEST_CASE("Delay compensation memory is capped", "[mixer][pdc]")
+{
+    // One insert at the most latency, every other one sending everywhere:
+    // nearly every route would need a full-length delay.
+    auto state = mixer(static_cast<std::size_t>(vloom::kMaxInserts));
+    state->inserts[0].effects.push_back(latent(vloom::kMaxLatencyFrames));
+    for (int i = 2; i <= vloom::kMaxInserts; ++i)
+        for (int s = 0; s < vloom::kMaxSends; ++s)
+            state->inserts[static_cast<std::size_t>(i) - 1].sends.push_back({0, 0.1f, false});
+    const auto graph = vloom::buildMixerGraph(std::move(state), nullptr);
+
+    std::int64_t frames = 0;
+    for (const vloom::MixerRoute& route : graph->routes)
+        frames += route.state->line.maxDelay();
+    for (const auto& line : graph->inputLine)
+        if (line != nullptr)
+            frames += line->maxDelay();
+    CHECK(frames <= vloom::MixerGraph::kMaxCompensationFrames);
+    CHECK(graph->latency == vloom::kMaxLatencyFrames);
+    CHECK(graph->inputDelay[0] == vloom::kMaxLatencyFrames); // the master's own input comes first
+}

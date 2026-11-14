@@ -152,34 +152,62 @@ void MixerGraph::compensate(const MixerGraph* previous)
     inputDelay = arrive;
     latency = arrive[0];
 
+    // Delay memory is capped (kMaxCompensationFrames in all): a path that
+    // does not fit any more is left uncompensated (delay 0) rather than
+    // allocating without bound. Inputs first, then routes in order.
+    std::int64_t used = 0;
+    const auto take = [&used](int frames) {
+        if (used + frames > kMaxCompensationFrames)
+            return false;
+        used += frames;
+        return true;
+    };
+
+    for (std::size_t node = 0; node < kNodes; ++node) {
+        const int delay = inputDelay[node];
+        std::shared_ptr<DelayLine> reuse;
+        if (previous != nullptr && previous->inputLine[node] != nullptr
+            && previous->inputLine[node]->maxDelay() >= delay)
+            reuse = previous->inputLine[node];
+        else if (inputLine[node] != nullptr && inputLine[node]->maxDelay() >= delay)
+            reuse = inputLine[node];
+        if (delay == 0) {
+            inputLine[node] = nullptr;
+        } else if (reuse != nullptr && take(reuse->maxDelay())) {
+            inputLine[node] = std::move(reuse);
+        } else if (take(delay)) {
+            inputLine[node] = std::make_shared<DelayLine>(delay);
+        } else {
+            inputDelay[node] = 0;
+            inputLine[node] = nullptr;
+        }
+    }
+
     for (MixerRoute& route : routes) {
         route.delay = std::clamp(
             arrive[static_cast<std::size_t>(route.target)] - ready[static_cast<std::size_t>(route.source)], 0,
             kMaxLatencyFrames);
         const MixerRoute* old = sameRoute(previous, route);
-        if (old != nullptr && old->state != nullptr && old->state->line.maxDelay() >= route.delay) {
-            route.state = old->state;
-        } else if (route.state == nullptr || route.state->line.maxDelay() < route.delay) {
-            auto fresh = std::make_shared<MixerRouteState>();
-            fresh->line.resize(route.delay);
-            if (route.state != nullptr) { // keeps the ramp going
-                fresh->applied = route.state->applied;
-                fresh->started = route.state->started;
-            }
-            route.state = std::move(fresh);
-        }
-    }
-    for (std::size_t node = 0; node < kNodes; ++node) {
-        const int delay = inputDelay[node];
-        if (delay == 0) {
-            inputLine[node] = nullptr;
+        std::shared_ptr<MixerRouteState> reuse;
+        if (old != nullptr && old->state != nullptr && old->state->line.maxDelay() >= route.delay)
+            reuse = old->state;
+        else if (route.state != nullptr && route.state->line.maxDelay() >= route.delay)
+            reuse = route.state;
+        if (reuse != nullptr && take(reuse->line.maxDelay())) {
+            route.state = std::move(reuse);
             continue;
         }
-        if (previous != nullptr && previous->inputLine[node] != nullptr
-            && previous->inputLine[node]->maxDelay() >= delay)
-            inputLine[node] = previous->inputLine[node];
-        else if (inputLine[node] == nullptr || inputLine[node]->maxDelay() < delay)
-            inputLine[node] = std::make_shared<DelayLine>(delay);
+        if (!take(route.delay))
+            route.delay = 0; // over the cap: uncompensated
+        const MixerRouteState* ramp
+            = old != nullptr && old->state != nullptr ? old->state.get() : route.state.get();
+        auto fresh = std::make_shared<MixerRouteState>();
+        fresh->line.resize(route.delay);
+        if (ramp != nullptr) { // keeps the gain ramp going
+            fresh->applied = ramp->applied;
+            fresh->started = ramp->started;
+        }
+        route.state = std::move(fresh);
     }
 }
 

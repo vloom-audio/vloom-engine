@@ -6,6 +6,7 @@
 #include "vloom/engine/mixer/MixerState.hpp"
 
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -37,6 +38,9 @@ struct MixerRoute {
 /// left out) and the delays that line up paths with plugin latency.
 struct MixerGraph {
     static constexpr std::size_t kNodes = static_cast<std::size_t>(kMaxInserts) + 1; ///< 0 = the master
+    /// Most delay-line frames one graph holds, all lines together (stereo:
+    /// 64 MiB). Paths that would need more are left uncompensated.
+    static constexpr std::int64_t kMaxCompensationFrames = std::int64_t{1} << 23;
 
     std::unique_ptr<const MixerState> state; ///< may be null: every insert at unity into the master
     std::vector<int> order; ///< inserts 1 .. kMaxInserts, sources before targets

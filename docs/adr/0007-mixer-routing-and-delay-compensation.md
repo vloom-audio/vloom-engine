@@ -96,9 +96,12 @@ when the user edits the mixer.
   The cost is a few branches per insert per block.
 - An insert's sound passes through one post-fader scratch buffer before its
   routes. A delayed route also goes through a second scratch buffer.
-- Memory for compensation grows with the latency, up to about
-  2 × 65536 floats per delayed route. The metronome's line has room for
-  kMaxLatencyFrames from the start.
+- Memory for compensation grows with the latency: 2 × (delay + 1) floats
+  per delayed route or input. A graph holds at most
+  `MixerGraph::kMaxCompensationFrames` (8 Mi frames, 64 MiB) in all; inputs
+  are served first, then routes in order, and a path past the cap is left
+  uncompensated rather than allocating without bound. The metronome's line
+  has room for kMaxLatencyFrames from the start.
 - Building a graph allocates: about 125 routes plus a reachability search
   per route. That is fine for UI edits. A volume drag publishes a graph per
   change, as it did with the flat state.

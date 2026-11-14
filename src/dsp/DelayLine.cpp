@@ -3,7 +3,6 @@
 #include "vloom/engine/dsp/DelayLine.hpp"
 
 #include <algorithm>
-#include <bit>
 
 namespace vloom {
 
@@ -13,7 +12,7 @@ void DelayLine::resize(int maxDelay, int numChannels)
 {
     maxDelay_ = std::max(maxDelay, 0);
     channels_ = std::clamp(numChannels, 0, kMaxChannels);
-    size_ = maxDelay_ > 0 ? std::bit_ceil(static_cast<std::size_t>(maxDelay_) + 1) : 0;
+    size_ = maxDelay_ > 0 ? static_cast<std::size_t>(maxDelay_) + 1 : 0; // no more than needed
     buffer_.assign(size_ * static_cast<std::size_t>(channels_), 0.0f);
     write_ = 0;
     pending_ = 0;
@@ -27,42 +26,35 @@ void DelayLine::process(float* const* channels, int numChannels, int numFrames, 
         return;
     }
     numChannels = std::min(numChannels, channels_);
-    const std::size_t mask = size_ - 1;
-    if (delay == 0) {
-        // Passed through untouched, but remembered: if the delay grows
-        // again, it reads what really came before, not older sound.
-        for (int ch = 0; ch < numChannels; ++ch) {
-            float* ring = buffer_.data() + static_cast<std::size_t>(ch) * size_;
-            const float* in = channels[ch];
-            std::size_t w = write_;
-            for (int i = 0; i < numFrames; ++i) {
-                ring[w] = in[i];
-                w = (w + 1) & mask;
-            }
-        }
-        write_ = (write_ + static_cast<std::size_t>(numFrames)) & mask;
-        pending_ = 0;
-        return;
-    }
-    const auto lag = static_cast<std::size_t>(delay);
+    const auto lag = static_cast<std::size_t>(delay); // < size_
+    const std::size_t start = write_;
     int lastSound = -1; // last frame of the input that was not silent
     for (int ch = 0; ch < numChannels; ++ch) {
         float* ring = buffer_.data() + static_cast<std::size_t>(ch) * size_;
         float* io = channels[ch];
-        std::size_t w = write_;
+        std::size_t w = start;
+        std::size_t r = start >= lag ? start - lag : start + size_ - lag;
         for (int i = 0; i < numFrames; ++i) {
             const float in = io[i];
             ring[w] = in;
-            io[i] = ring[(w - lag) & mask];
+            // A delay of 0 passes the audio through untouched, but it is
+            // remembered: if the delay grows again, it reads what really
+            // came before, not older sound.
+            io[i] = ring[r];
             if (in != 0.0f)
                 lastSound = std::max(lastSound, i);
-            w = (w + 1) & mask;
+            if (++w == size_)
+                w = 0;
+            if (++r == size_)
+                r = 0;
         }
     }
-    write_ = (write_ + static_cast<std::size_t>(numFrames)) & mask;
+    write_ = (start + static_cast<std::size_t>(numFrames)) % size_;
     pending_ = std::max(pending_ - numFrames, 0);
-    if (lastSound >= 0)
+    if (lastSound >= 0 && delay > 0)
         pending_ = std::max(pending_, delay - (numFrames - 1 - lastSound));
+    if (delay == 0)
+        pending_ = 0;
 }
 
 void DelayLine::clear() noexcept
