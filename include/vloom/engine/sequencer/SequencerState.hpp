@@ -148,7 +148,7 @@ struct SongAudioClip {
     std::int64_t startStep = 0;
     std::int64_t offsetSteps = 0; ///< >= 0
     std::int64_t lengthSteps = 0; ///< 0: to the sample's end
-    std::shared_ptr<const SampleBuffer> sample; ///< null: the channel's sample
+    std::shared_ptr<const SampleBuffer> sample = nullptr; ///< null: the channel's sample
     double rate = 1.0; ///< playback speed, Sampler::kMinRate .. kMaxRate; anything else plays at 1
 };
 
