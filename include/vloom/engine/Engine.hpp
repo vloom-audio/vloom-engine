@@ -165,7 +165,8 @@ private:
     void renderSegment(float* const* out, int numChannels, int startFrame, int numFrames) noexcept;
     void processBlock(float* const* out, int numChannels, int numFrames) noexcept;
     /// Inserts (volume, pan, meters) into the master bus, the master bus into `out`.
-    void mixBuses(float* const* out, int numChannels, int numFrames) noexcept;
+    /// `transport` as at the block's start, for hosted effects.
+    void mixBuses(float* const* out, int numChannels, int numFrames, const TransportInfo& transport) noexcept;
     /// Starts a newly published preview and adds the preview into the master bus.
     void renderPreview(int numFrames) noexcept;
 

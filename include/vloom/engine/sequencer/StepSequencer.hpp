@@ -28,6 +28,10 @@ public:
     /// Silences every voice of the current and draining states at once.
     /// Only while the audio thread is stopped (Engine::prepare()).
     void resetVoices() noexcept;
+    /// Activates every channel's instrument plugin (current and draining
+    /// states) for `sampleRate`. Only while the audio thread is stopped
+    /// (Engine::prepare()).
+    void activatePlugins(double sampleRate, int maxBlockFrames);
 
     // ---- audio thread
     /// Picks up a newly published state. Call at the start of every block.
@@ -79,11 +83,13 @@ public:
     /// [startFrame, startFrame + numFrames), including channels already
     /// removed whose notes are still fading.
     void render(int startFrame, int numFrames) noexcept;
-    /// Once per block, after render(): adds each channel's buffer, with its
-    /// volume and pan ramped from the last block, into the stereo bus of its
-    /// insert (`buses[2 * insert]`, `buses[2 * insert + 1]`, insert 0 = the
-    /// master bus) and clears the buffer. Marks the buses it wrote in `used`.
-    void mix(int numFrames, float* const* buses, bool* used) noexcept;
+    /// Once per block, after render(): runs each channel's instrument plugin
+    /// over the block (with the notes it got, `transport` as at the block's
+    /// start), then adds each channel's buffer, with its volume and pan
+    /// ramped from the last block, into the stereo bus of its insert
+    /// (`buses[2 * insert]`, `buses[2 * insert + 1]`, insert 0 = the master
+    /// bus) and clears the buffer. Marks the buses it wrote in `used`.
+    void mix(int numFrames, float* const* buses, bool* used, const TransportInfo& transport = {}) noexcept;
     /// Fades out every note and audio clip (transport stop).
     void stopAll() noexcept;
 
@@ -101,6 +107,9 @@ private:
     std::uint64_t block_ = 0; ///< audio thread: mix() calls so far
     double pitch_ = 1.0; ///< audio thread
     double sampleRate_ = 48000.0;
+    /// Audio thread: the frame of the block events fire at now (where the
+    /// next render() starts), for the note events of instrument plugins.
+    int eventFrame_ = 0;
     /// Plays one step of `channel` (absolute `step`): its sample, or on a
     /// synth its root key for one step.
     void playStep(const ChannelState& channel, std::int64_t step) const noexcept;

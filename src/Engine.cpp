@@ -52,6 +52,7 @@ void Engine::prepare(double sampleRate, int /*maxBlockSize*/)
             for (const auto& effect : insert.effects)
                 if (effect != nullptr)
                     effect->activate(sampleRate, kMaxBlockFrames);
+    sequencer_.activatePlugins(sampleRate, kMaxBlockFrames);
 
     // Commands sent while the device was gone (Stop, Locate ...) still count.
     applyCommands();
@@ -338,10 +339,10 @@ void Engine::process(float* const* out, int numChannels, int numFrames) noexcept
     measureLoad(std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count(), numFrames);
 }
 
-void Engine::mixBuses(float* const* out, int numChannels, int numFrames) noexcept
+void Engine::mixBuses(
+    float* const* out, int numChannels, int numFrames, const TransportInfo& transport) noexcept
 {
     const MixerState* state = mixer_.acquire();
-    const TransportInfo transport{transport_.isPlaying(), transport_.tempo(), transport_.positionTicks()};
     float* masterLeft = buses_[0];
     float* masterRight = buses_[1];
     const float n = static_cast<float>(numFrames);
@@ -535,6 +536,11 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
     for (int ch = 0; ch < numChannels; ++ch)
         std::memset(out[ch], 0, sizeof(float) * static_cast<std::size_t>(numFrames));
 
+    // What hosted plugins are told: the song as at the block's first frame
+    // (they process the block at once, after the transport has moved on).
+    const TransportInfo blockTransport{transport_.isPlaying(), transport_.tempo(),
+        std::isfinite(transport_.positionTicks()) ? transport_.positionTicks() : 0.0};
+
     // The block is played in spans that end where the loop jumps back or
     // the transport stops, each on its exact sample. A jump looks like a
     // locate to the scheduler (the next span is "jumped"): streams start
@@ -585,9 +591,9 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
         }
     }
 
-    sequencer_.mix(numFrames, buses_.data(), busUsed_.data());
+    sequencer_.mix(numFrames, buses_.data(), busUsed_.data(), blockTransport);
     renderPreview(numFrames);
-    mixBuses(out, numChannels, numFrames);
+    mixBuses(out, numChannels, numFrames, blockTransport);
     sequencer_.endBlock();
     applyMasterGain(out, numChannels, numFrames);
     sanitizeOutput(out, numChannels, numFrames);

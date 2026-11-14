@@ -48,9 +48,26 @@ may still be processing it, and never on the audio thread.
 5. **Latency is reported, not compensated yet.** Plugin delay compensation
    comes with M5; until then `latencyFrames()` is informational.
 
-Instruments (plugins that make sound from notes on a channel) use the same
-interface with `Kind::Instrument`; wiring them into the channel rack comes
-with the CLAP host.
+6. **Instruments play channels.** A channel with `Instrument::Plugin` holds
+   a `PluginInstance` (`ChannelState::plugin`). Its steps and piano-roll
+   notes become `NoteEvent`s at the frame they fire on (`PluginNotes`, in
+   the channel's voices, tracks the held keys like the built-in voices do);
+   the plugin processes the whole block once, in `StepSequencer::mix()`,
+   every block while set, then the channel's volume, pan and insert apply as
+   for any channel. Plugins are told the transport as at the block's start.
+7. **CLAP is the first format** (`plugin/ClapHost`). `ClapLibrary` loads a
+   .clap once per process and lists its plugins; `create()` wraps one in an
+   `AudioProcessor` that keeps the library loaded. The adapter sizes a
+   buffer for every audio port at activation, copies our stereo into the
+   main input and back from the main output (an instrument without inputs
+   adds to the channel), passes parameters and notes as CLAP events from a
+   fixed event array, and answers no host extensions yet. The control thread
+   is CLAP's main thread; `AudioProcessor::idle()` runs what a plugin asked
+   for with `request_callback`. `start_processing()` runs on the audio
+   thread before the first block; `stop_processing()` runs at deactivation,
+   which the host only does once the audio thread stopped using the plugin.
+   `clapSearchPaths()` and `findClapFiles()` find installed plugins (the
+   CLAP spec's directories, after `CLAP_PATH`).
 
 ## Alternatives considered
 
@@ -74,3 +91,10 @@ with the CLAP host.
   event lists).
 - A plugin that blocks or crashes in `process()` still takes the audio
   thread with it; out-of-process hosting is the remedy if that proves common.
+- Loading a .clap runs third-party code with the host's rights. The engine
+  loads only the paths the host gives it; the app decides what to trust
+  (installed plugin folders, the user's choice).
+- Not yet: CLAP host extensions (params rescan, latency changes, GUI,
+  note ports, thread-check), `request_restart` (recorded, not acted on),
+  plugin output events, sidechain and extra ports (given silence), the
+  master pitch on plugin instruments. These follow as plugins need them.

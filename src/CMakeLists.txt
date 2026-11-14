@@ -31,6 +31,7 @@ target_sources(vloom_engine PRIVATE
     sample/WavReader.cpp
 
     # plugin — hosted processors behind one interface (ADR 0006)
+    plugin/ClapHost.cpp
     plugin/GainProcessor.cpp
     plugin/PluginInstance.cpp
 
@@ -50,7 +51,8 @@ target_compile_definitions(vloom_engine PRIVATE VLOOM_ENGINE_VERSION="${PROJECT_
 vloom_set_warnings(vloom_engine)
 
 find_package(Threads REQUIRED)
-target_link_libraries(vloom_engine PRIVATE Threads::Threads)
+# CLAP headers; loading .clap files needs the dynamic loader (dl on Linux).
+target_link_libraries(vloom_engine PRIVATE Threads::Threads vloom_clap_headers ${CMAKE_DL_LIBS})
 
 if(WIN32)
     # WASAPI: COM (ole32) and the MMCSS "Pro Audio" thread class (avrt).

@@ -41,8 +41,8 @@ bool PluginInstance::setParameter(std::uint32_t id, double value)
     return parameters_.push(ParameterEvent{0, id, value});
 }
 
-void PluginInstance::process(
-    float* left, float* right, int numFrames, const TransportInfo& transport) noexcept
+void PluginInstance::process(float* left, float* right, int numFrames, const TransportInfo& transport,
+    std::span<const NoteEvent> notes) noexcept
 {
     if (!active_.load(std::memory_order_acquire) || numFrames <= 0)
         return;
@@ -62,9 +62,22 @@ void PluginInstance::process(
     if (bypassed_.load(std::memory_order_relaxed))
         return;
     float* channels[2] = {left, right};
-    const TransportInfo info = transport;
+    if (notes.size() > kMaxNotes)
+        notes = notes.first(kMaxNotes);
+    std::size_t nextNote = 0;
     for (int offset = 0; offset < numFrames; offset += maxBlockFrames_) {
         const int frames = std::min(maxBlockFrames_, numFrames - offset);
+        const bool last = offset + frames >= numFrames;
+        // This chunk's notes, at frames relative to it (out of range: clamped).
+        std::size_t count = 0;
+        while (nextNote < notes.size()) {
+            const int frame = std::clamp(notes[nextNote].frame, 0, numFrames - 1);
+            if (frame >= offset + frames && !last)
+                break;
+            NoteEvent note = notes[nextNote++];
+            note.frame = std::clamp(frame - offset, 0, frames - 1);
+            chunkNotes_[count++] = note;
+        }
         channels[0] = left + offset;
         channels[1] = right + offset;
         ProcessContext context;
@@ -73,7 +86,8 @@ void PluginInstance::process(
         context.numFrames = frames;
         if (offset == 0)
             context.parameters = std::span<const ParameterEvent>(pending_.data(), pendingCount_);
-        context.transport = info;
+        context.notes = std::span<const NoteEvent>(chunkNotes_.data(), count);
+        context.transport = transport;
         processor_->process(context);
     }
     pendingCount_ = 0;

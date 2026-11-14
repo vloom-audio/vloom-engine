@@ -10,9 +10,9 @@
 | dsp | `dsp/` | Sound generators and processors | core |
 | io | `io/` | Hardware audio devices (WASAPI, CoreAudio, ALSA) | core |
 | mixer | `mixer/` | Insert settings (volume, pan, effect chain) and the pan law; Engine mixes the buses | core, plugin |
-| plugin | `plugin/` | Hosted processors behind one interface (ADR 0006), built-in effects | core |
+| plugin | `plugin/` | Hosted processors behind one interface (ADR 0006): CLAP host, built-in effects | core, time |
 | sample | `sample/` | Decoded audio in memory: WAV reading, resampling | core |
-| sequencer | `sequencer/` | Channel rack state and step playback | core, dsp, sample, time |
+| sequencer | `sequencer/` | Channel rack state and step playback (built-in and plugin instruments) | core, dsp, plugin, sample, time |
 | render | `render/` | Offline rendering, file export | engine |
 
 Rules:
@@ -77,6 +77,7 @@ sample-exact results across many block sizes. Rendering must be deterministic.
    (engine side; the app's piano roll and synth panel are next)
 5. **M3** arrangement (patterns on a timeline), song mode, loop region, WAV export ✅
    (engine side; the app's export dialog and loop markers are next)
-6. **M4** plugin host interface ✅ (ADR 0006: `AudioProcessor`, insert effect chains), CLAP hosting ← *next*
-7. **M5** VST3 hosting, built-in effects, sends, delay compensation
+6. **M4** plugin host interface, CLAP hosting ✅ (ADR 0006: `AudioProcessor`,
+   insert effect chains, CLAP effects and instruments)
+7. **M5** VST3 hosting, built-in effects, sends, delay compensation ← *next*
 8. **M6** audio input and recording, MIDI input

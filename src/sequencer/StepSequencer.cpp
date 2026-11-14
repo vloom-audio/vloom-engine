@@ -209,6 +209,11 @@ void StepSequencer::playNote(const ChannelState& channel, const Note& note, std:
         channel.voices->synth.noteOn(keyFrequency(note.key), note.velocity, end);
         return;
     }
+    if (channel.instrument == Instrument::Plugin) {
+        if (channel.plugin != nullptr)
+            channel.voices->plugin.noteOn(eventFrame_, note.key, std::clamp(note.velocity, 0.0f, 1.0f), end);
+        return;
+    }
     if (channel.sample == nullptr)
         return;
     const int root = std::clamp(channel.rootKey, Note::kMinKey, Note::kMaxKey);
@@ -222,9 +227,15 @@ void StepSequencer::playNote(const ChannelState& channel, const Note& note, std:
 void StepSequencer::playStep(const ChannelState& channel, std::int64_t step) const noexcept
 {
     // Volume and pan are applied to the whole channel in mix(), live.
+    const int root = std::clamp(channel.rootKey, Note::kMinKey, Note::kMaxKey);
+    const std::int64_t stepEnd = (step + 1) * current_->ticksPerStep;
     if (channel.instrument == Instrument::Synth) {
-        const int root = std::clamp(channel.rootKey, Note::kMinKey, Note::kMaxKey);
-        channel.voices->synth.noteOn(keyFrequency(root), 1.0f, (step + 1) * current_->ticksPerStep);
+        channel.voices->synth.noteOn(keyFrequency(root), 1.0f, stepEnd);
+        return;
+    }
+    if (channel.instrument == Instrument::Plugin) {
+        if (channel.plugin != nullptr)
+            channel.voices->plugin.noteOn(eventFrame_, root, 1.0f, stepEnd);
         return;
     }
     channel.voices->sampler.trigger(channel.sample.get());
@@ -245,7 +256,7 @@ void StepSequencer::endNotes(std::int64_t upTo) noexcept
     if (current_ != nullptr)
         for (const ChannelState& channel : current_->channels)
             if (channel.voices != nullptr)
-                channel.voices->release(upTo);
+                channel.voices->release(upTo, eventFrame_);
 }
 
 void StepSequencer::resetVoices() noexcept
@@ -255,6 +266,7 @@ void StepSequencer::resetVoices() noexcept
             if (channel.voices != nullptr) {
                 channel.voices->sampler.reset();
                 channel.voices->synth.reset();
+                channel.voices->plugin.reset(); // activatePlugins() starts the plugins afresh
             }
     };
     if (const SequencerState* state = exchange_.current())
@@ -262,7 +274,23 @@ void StepSequencer::resetVoices() noexcept
     exchange_.forEachDraining(reset);
 }
 
-void StepSequencer::beginBlock() noexcept { current_ = exchange_.acquire(); }
+void StepSequencer::activatePlugins(double sampleRate, int maxBlockFrames)
+{
+    const auto activate = [&](const SequencerState& state) {
+        for (const ChannelState& channel : state.channels)
+            if (channel.plugin != nullptr)
+                channel.plugin->activate(sampleRate, maxBlockFrames);
+    };
+    if (const SequencerState* state = exchange_.current())
+        activate(*state);
+    exchange_.forEachDraining(activate);
+}
+
+void StepSequencer::beginBlock() noexcept
+{
+    current_ = exchange_.acquire();
+    eventFrame_ = 0;
+}
 
 void StepSequencer::endBlock() noexcept
 {
@@ -349,13 +377,13 @@ void StepSequencer::resumeAt(double ticks, double framesPerTick) noexcept
         return;
     for (const ChannelState& channel : current_->channels)
         if (channel.voices != nullptr)
-            channel.voices->releaseHeld();
+            channel.voices->releaseHeld(eventFrame_);
     if (!current_->song || current_->ticksPerStep <= 0 || !(framesPerTick > 0.0))
         return;
     // Whatever the clips' channels were playing belongs to the old position.
     for (const SongAudioClip& clip : current_->audioClips)
         if (const ChannelState* channel = clipChannel(clip))
-            channel->voices->stopAll();
+            channel->voices->stopAll(eventFrame_);
     for (const SongAudioClip& clip : current_->audioClips) {
         const ChannelState* channel = clipChannel(clip);
         if (channel == nullptr)
@@ -401,6 +429,7 @@ void StepSequencer::render(int startFrame, int numFrames) noexcept
     if (current_ != nullptr)
         for (const ChannelState& channel : current_->channels)
             play(channel);
+    eventFrame_ = startFrame + numFrames; // events between renders land here
     // Removed channels: their last notes fade out (stopAll() only starts a
     // fade once per note) and are rendered from the old state until silent.
     exchange_.forEachDraining([&](const SequencerState& old) {
@@ -408,13 +437,14 @@ void StepSequencer::render(int startFrame, int numFrames) noexcept
             ChannelVoices* voices = channel.voices.get();
             if (voices == nullptr || voices->activeVoices() == 0 || inCurrent(voices))
                 continue;
-            voices->stopAll();
+            voices->stopAll(startFrame);
             play(channel);
         }
     });
 }
 
-void StepSequencer::mix(int numFrames, float* const* buses, bool* used) noexcept
+void StepSequencer::mix(
+    int numFrames, float* const* buses, bool* used, const TransportInfo& transport) noexcept
 {
     ++block_;
     const auto mixChannel = [&](const ChannelState& channel) {
@@ -422,6 +452,16 @@ void StepSequencer::mix(int numFrames, float* const* buses, bool* used) noexcept
         if (voices == nullptr || voices->mixedBlock == block_)
             return;
         voices->mixedBlock = block_;
+        // The instrument plugin plays the whole block at once, its notes at
+        // their frames; every block while set, so its tail rings out.
+        if (channel.plugin != nullptr) {
+            channel.plugin->process(
+                voices->left.data(), voices->right.data(), numFrames, transport, voices->plugin.events());
+            voices->plugin.clearEvents();
+            voices->written = true;
+        } else if (voices->plugin.active() > 0) {
+            voices->plugin.reset(); // the plugin went: nothing to end
+        }
         const StereoGain target = balance(channel.gain, channel.pan);
         if (!voices->rampStarted) { // first block: no ramp from a stale value
             voices->rampStarted = true;
@@ -465,9 +505,9 @@ void StepSequencer::mix(int numFrames, float* const* buses, bool* used) noexcept
 
 void StepSequencer::stopAll() noexcept
 {
-    const auto stop = [](const ChannelState& channel) {
+    const auto stop = [this](const ChannelState& channel) {
         if (channel.voices != nullptr)
-            channel.voices->stopAll();
+            channel.voices->stopAll(eventFrame_);
     };
     if (current_ != nullptr)
         for (const ChannelState& channel : current_->channels)

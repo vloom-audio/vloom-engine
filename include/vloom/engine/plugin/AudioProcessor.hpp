@@ -100,6 +100,10 @@ public:
         return false;
     }
 
+    /// Control thread, often (a UI timer, ~30 Hz): lets the processor do
+    /// work it asked the host to run on the main thread.
+    virtual void idle() { }
+
     /// Processes one block (audio thread).
     virtual void process(const ProcessContext& context) noexcept = 0;
     /// Forgets what it was playing or holding (tails, notes), e.g. on a jump

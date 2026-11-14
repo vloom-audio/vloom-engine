@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <span>
 
 namespace vloom {
 
@@ -51,12 +52,18 @@ public:
     [[nodiscard]] AudioProcessor& processor() noexcept { return *processor_; }
     [[nodiscard]] const AudioProcessor& processor() const noexcept { return *processor_; }
 
+    /// Notes one process() call passes on; more are dropped.
+    static constexpr std::size_t kMaxNotes = 256;
+
     /// Audio thread: processes `numFrames` of stereo in place (blocks longer
     /// than the activation's maxBlockFrames are split), with the queued
-    /// parameter changes at frame 0 (the latest per parameter). Inactive or
-    /// bypassed: the audio passes through; changes made meanwhile are kept
-    /// for the next block processed.
-    void process(float* left, float* right, int numFrames, const TransportInfo& transport) noexcept;
+    /// parameter changes at frame 0 (the latest per parameter) and `notes`
+    /// (in frame order; frames past the block land on its last frame).
+    /// Inactive or bypassed: the audio passes through and the notes are
+    /// dropped; parameter changes made meanwhile are kept for the next block
+    /// processed.
+    void process(float* left, float* right, int numFrames, const TransportInfo& transport,
+        std::span<const NoteEvent> notes = {}) noexcept;
     /// Audio thread: forwards to AudioProcessor::reset() when active.
     void reset() noexcept;
 
@@ -69,6 +76,8 @@ private:
     /// Audio thread: changes not given to the processor yet, one per parameter.
     std::array<ParameterEvent, kMaxQueuedParameters> pending_{};
     std::size_t pendingCount_ = 0;
+    /// Audio thread: the notes of one chunk, their frames made chunk-relative.
+    std::array<NoteEvent, kMaxNotes> chunkNotes_{};
 };
 
 } // namespace vloom

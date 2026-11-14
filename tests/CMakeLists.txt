@@ -18,6 +18,7 @@ add_executable(vloom_engine_tests
     dsp/SynthTests.cpp
     io/AudioDeviceTests.cpp
     mixer/MixerTests.cpp
+    plugin/ClapHostTests.cpp
     plugin/PluginHostTests.cpp
     render/SongExportTests.cpp
     render/WavWriterTests.cpp
@@ -25,6 +26,7 @@ add_executable(vloom_engine_tests
     sample/SampleLoaderTests.cpp
     sample/WavReaderTests.cpp
     sequencer/NoteTests.cpp
+    sequencer/PluginNotesTests.cpp
     sequencer/SongModeTests.cpp
     sequencer/StepSequencerTests.cpp
     time/MusicalTimeTests.cpp
@@ -33,6 +35,17 @@ add_executable(vloom_engine_tests
     support/AllocationsTests.cpp)
 
 target_include_directories(vloom_engine_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# A real .clap for the CLAP host tests (plugin/ClapHostTests.cpp).
+add_library(vloom_test_clap MODULE plugin/clap/TestPlugins.cpp)
+set_target_properties(vloom_test_clap PROPERTIES PREFIX "" SUFFIX ".clap" OUTPUT_NAME "vloom-test")
+target_link_libraries(vloom_test_clap PRIVATE vloom_clap_headers)
+target_compile_features(vloom_test_clap PRIVATE cxx_std_20)
+if(MSVC)
+    target_compile_definitions(vloom_test_clap PRIVATE _CRT_SECURE_NO_WARNINGS) # strcpy into CLAP's fixed names
+endif()
+add_dependencies(vloom_engine_tests vloom_test_clap)
+target_compile_definitions(vloom_engine_tests PRIVATE VLOOM_TEST_CLAP="$<TARGET_FILE:vloom_test_clap>")
 target_link_libraries(vloom_engine_tests PRIVATE vloom::engine Catch2::Catch2WithMain)
 vloom_set_warnings(vloom_engine_tests)
 
