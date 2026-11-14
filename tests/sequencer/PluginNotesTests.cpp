@@ -71,3 +71,30 @@ TEST_CASE("PluginNotes always has room to end a held key", "[sequencer][plugin]"
     CHECK(notes.events().size() == before + static_cast<std::size_t>(held)); // every off made it
     CHECK(notes.held() == 0);
 }
+
+TEST_CASE("PluginNotes counts a plugin's tail as active, for a while", "[sequencer][plugin]")
+{
+    PluginNotes notes;
+    notes.noteOn(0, 60, 1.0f, 100);
+    notes.releaseHeld(10);
+    notes.processed(true, 256); // the off reached the plugin this block
+    notes.clearEvents();
+    CHECK(notes.active() == 1); // its release still rings
+    notes.processed(true, 256);
+    CHECK(notes.active() == 1);
+    notes.processed(false, 256);
+    CHECK(notes.active() == 0); // silent: done
+
+    // A plugin that never goes silent cannot keep the channel forever.
+    notes.noteOn(0, 60, 1.0f, 100);
+    notes.releaseHeld(10);
+    notes.processed(true, 256);
+    notes.clearEvents();
+    std::int64_t frames = 0;
+    while (notes.active() > 0 && frames <= PluginNotes::kMaxTailFrames) {
+        notes.processed(true, 4096);
+        frames += 4096;
+    }
+    CHECK(notes.active() == 0);
+    CHECK(frames <= PluginNotes::kMaxTailFrames + 4096);
+}

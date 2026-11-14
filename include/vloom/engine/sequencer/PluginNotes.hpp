@@ -4,6 +4,7 @@
 
 #include "vloom/engine/plugin/AudioProcessor.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <span>
@@ -20,6 +21,9 @@ public:
     static constexpr std::int64_t kNoRelease = INT64_MAX;
     /// Events one block holds; further note-ons in the block are dropped.
     static constexpr std::size_t kMaxEvents = 256;
+    /// How long a plugin's tail (release, reverb) may keep a removed
+    /// channel alive after its last note: about 10 s at 48 kHz.
+    static constexpr std::int64_t kMaxTailFrames = 480'000;
 
     /// Starts `key` at `frame` of the block, held until release() reaches
     /// `releaseAt` (ticks). A key already held is ended first, so the
@@ -62,9 +66,23 @@ public:
     /// Ends every held key at `frame`.
     void releaseHeld(int frame) noexcept { release(kNoRelease, frame); }
 
-    /// Held keys, plus one while events wait for the plugin: what keeps a
-    /// removed channel's state alive until its plugin has heard the note-offs.
-    [[nodiscard]] int active() const noexcept { return held_ + (count_ > 0 ? 1 : 0); }
+    /// Held keys, plus one while events wait for the plugin or its output
+    /// still rings: what keeps a removed channel's state alive until its
+    /// plugin has heard the note-offs and its tail has died away.
+    [[nodiscard]] int active() const noexcept { return held_ + (count_ > 0 || ringing_ ? 1 : 0); }
+
+    /// After the plugin processed `frames`: whether its output was `sounding`.
+    /// Once no key is held, a sounding output counts as a tail for at most
+    /// kMaxTailFrames (a plugin that never goes silent cannot keep a state
+    /// alive forever).
+    void processed(bool sounding, int frames) noexcept
+    {
+        if (held_ > 0 || count_ > 0)
+            tailLeft_ = kMaxTailFrames;
+        else
+            tailLeft_ = std::max<std::int64_t>(tailLeft_ - frames, 0);
+        ringing_ = sounding && tailLeft_ > 0;
+    }
     [[nodiscard]] int held() const noexcept { return held_; }
 
     /// The events of the block so far, in frame order.
@@ -77,6 +95,8 @@ public:
         releaseAt_.fill(kNotHeld);
         held_ = 0;
         count_ = 0;
+        ringing_ = false;
+        tailLeft_ = 0;
     }
 
 private:
@@ -96,6 +116,8 @@ private:
     int held_ = 0;
     std::array<NoteEvent, kMaxEvents> events_{};
     std::size_t count_ = 0;
+    bool ringing_ = false;
+    std::int64_t tailLeft_ = 0;
 
     static constexpr std::array<std::int64_t, kKeys> filled() noexcept
     {

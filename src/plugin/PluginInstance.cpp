@@ -44,11 +44,10 @@ bool PluginInstance::setParameter(std::uint32_t id, double value)
 void PluginInstance::process(float* left, float* right, int numFrames, const TransportInfo& transport,
     std::span<const NoteEvent> notes) noexcept
 {
-    if (!active_.load(std::memory_order_acquire) || numFrames <= 0)
-        return;
     // Changes queued since the last block, at its first frame; the latest
-    // value per parameter. While bypassed they are kept (not dropped) and
-    // reach the processor with the first block it processes again.
+    // value per parameter. While inactive or bypassed they are kept (not
+    // dropped) and reach the processor with the first block it processes:
+    // drained first, so the queue never fills up meanwhile.
     ParameterEvent event;
     while (parameters_.pop(event)) {
         auto* end = pending_.data() + pendingCount_;
@@ -59,6 +58,8 @@ void PluginInstance::process(float* left, float* right, int numFrames, const Tra
         else if (pendingCount_ < pending_.size())
             pending_[pendingCount_++] = event;
     }
+    if (!active_.load(std::memory_order_acquire) || numFrames <= 0)
+        return;
     if (bypassed_.load(std::memory_order_relaxed)) {
         // Notes ending while bypassed never reach the processor, and the
         // host forgets them: end everything it holds as bypass starts, so

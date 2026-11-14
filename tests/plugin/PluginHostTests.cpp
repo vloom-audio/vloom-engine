@@ -198,6 +198,19 @@ TEST_CASE("An inactive, refused or bypassed processor passes audio through", "[p
     CHECK(log.lastParameter == 0.5); // delivered once it processes again
 }
 
+TEST_CASE("Parameter changes for an inactive processor are kept, and the queue never fills", "[plugin]")
+{
+    ProbeProcessor::Log log;
+    vloom::PluginInstance probe(std::make_unique<ProbeProcessor>(log, 0.0f));
+    for (int i = 0; i < 1000; ++i) { // far more than the queue holds
+        REQUIRE(probe.setParameter(1, i));
+        (void)runOnes(probe, 16); // a block while inactive: drained, kept
+    }
+    REQUIRE(probe.activate(kRate, 256));
+    (void)runOnes(probe, 16);
+    CHECK(log.lastParameter == 999.0); // the latest, once it processes
+}
+
 TEST_CASE("Blocks longer than the processor's maximum are split", "[plugin]")
 {
     ProbeProcessor::Log log;

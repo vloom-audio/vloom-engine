@@ -455,6 +455,10 @@ void StepSequencer::mix(
         if (channel.plugin != nullptr) {
             channel.plugin->process(
                 voices->left.data(), voices->right.data(), numFrames, transport, voices->plugin.events());
+            bool sounding = false;
+            for (int i = 0; i < numFrames && !sounding; ++i)
+                sounding = std::abs(voices->left[i]) > 1e-6f || std::abs(voices->right[i]) > 1e-6f;
+            voices->plugin.processed(sounding, numFrames); // a tail keeps a removed channel alive
             voices->plugin.clearEvents();
             voices->written = true;
         } else if (voices->plugin.active() > 0) {
