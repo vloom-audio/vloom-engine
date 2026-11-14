@@ -270,6 +270,17 @@ TEST_CASE("prepare() activates the hosted effects again at the new rate", "[plug
     CHECK(log.lastRate == 96000.0);
 }
 
+TEST_CASE("prepare() activates effects of a state the audio thread has not picked up yet", "[plugin]")
+{
+    ProbeProcessor::Log log;
+    vloom::Engine engine;
+    prepare(engine);
+    engine.setMixerState(withEffects(1, {instance(std::make_unique<ProbeProcessor>(log, 0.0f))}));
+    engine.prepare(96000.0, 512); // no block in between
+    CHECK(log.activations == 2);
+    CHECK(log.lastRate == 96000.0);
+}
+
 TEST_CASE("Effects do not allocate on the audio thread", "[plugin]")
 {
     vloom::Engine engine;

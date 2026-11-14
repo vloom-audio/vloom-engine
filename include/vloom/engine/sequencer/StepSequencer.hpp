@@ -28,8 +28,8 @@ public:
     /// Silences every voice of the current and draining states at once.
     /// Only while the audio thread is stopped (Engine::prepare()).
     void resetVoices() noexcept;
-    /// Activates every channel's instrument plugin (current and draining
-    /// states) for `sampleRate`. Only while the audio thread is stopped
+    /// Activates every channel's instrument plugin (current, draining and
+    /// pending states) for `sampleRate`. Only while the audio thread is stopped
     /// (Engine::prepare()).
     void activatePlugins(double sampleRate, int maxBlockFrames);
 

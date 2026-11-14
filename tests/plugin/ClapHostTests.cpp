@@ -186,6 +186,17 @@ TEST_CASE("Stopping ends a CLAP instrument's held notes", "[plugin][clap][sequen
     CHECK(audio[300 * 2] == 0.0f);
 }
 
+TEST_CASE("prepare() activates a channel's plugin before the audio thread picked it up", "[plugin][clap]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    auto keys = load("vloom.test.keys");
+    keys->deactivate();
+    engine.setSequencerState(pluginChannel(keys, {1}));
+    engine.prepare(kRate, 256); // no block in between
+    CHECK(keys->isActive());
+}
+
 TEST_CASE("Bypassing a CLAP instrument ends its held notes", "[plugin][clap]")
 {
     auto keys = load("vloom.test.keys");

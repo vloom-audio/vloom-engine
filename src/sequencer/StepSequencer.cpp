@@ -281,9 +281,7 @@ void StepSequencer::activatePlugins(double sampleRate, int maxBlockFrames)
             if (channel.plugin != nullptr)
                 channel.plugin->activate(sampleRate, maxBlockFrames);
     };
-    if (const SequencerState* state = exchange_.current())
-        activate(*state);
-    exchange_.forEachDraining(activate);
+    exchange_.forEachSnapshot(activate); // the one not picked up yet too
 }
 
 void StepSequencer::beginBlock() noexcept

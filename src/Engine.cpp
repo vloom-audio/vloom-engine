@@ -47,11 +47,14 @@ void Engine::prepare(double sampleRate, int /*maxBlockSize*/)
     wasRolling_ = false;
 
     // Hosted effects run at the new rate from now on (ADR 0006).
-    if (const MixerState* mixer = mixer_.current())
-        for (const InsertState& insert : mixer->inserts)
+    // Every state the audio thread may play, the one published but not
+    // picked up yet included.
+    mixer_.forEachSnapshot([&](const MixerState& mixer) {
+        for (const InsertState& insert : mixer.inserts)
             for (const auto& effect : insert.effects)
                 if (effect != nullptr)
                     effect->activate(sampleRate, kMaxBlockFrames);
+    });
     sequencer_.activatePlugins(sampleRate, kMaxBlockFrames);
 
     // Commands sent while the device was gone (Stop, Locate ...) still count.
