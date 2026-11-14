@@ -18,6 +18,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
   pinned SHA-256 (a cached copy that does not match is fetched again), and Catch2 is
   pinned to the commit of its v3.7.1 tag.
 
+### Fixed
+- Windows: loading a file that is not a plugin (or a plugin whose own DLLs
+  are missing) showed a system "Bad Image" message box and waited for the
+  user. The loader now asks Windows to return the error, so
+  `ClapLibrary::open()` and `Vst3Library::open()` just fail with a message.
+  Load errors also name files outside the system code page without
+  throwing.
+
 ### Fixed (engine audit)
 - A tempo change while playing could fire a beat, step or note start twice,
   or skip it: the scheduler now carries each stream's next event over between

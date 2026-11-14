@@ -6,6 +6,7 @@
 #include <vloom/engine/Engine.hpp>
 #include <vloom/engine/plugin/ClapHost.hpp>
 #include <vloom/engine/plugin/PluginInstance.hpp>
+#include <vloom/engine/plugin/Vst3Host.hpp>
 #include <vloom/engine/render/OfflineRenderer.hpp>
 #include <vloom/engine/sequencer/SequencerState.hpp>
 
@@ -14,9 +15,12 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <vector>
 
 using Catch::Approx;
@@ -332,4 +336,27 @@ TEST_CASE("A CLAP editor's edits do not allocate on the audio thread", "[plugin]
     plugin->processor().idle();
     CHECK(recorder.edits.size() == 1); // it did go through the queue
     plugin->processor().closeEditor();
+}
+
+TEST_CASE("A file that is not a plugin fails to load without stopping the app", "[plugin][clap][vst3]")
+{
+    // On Windows, loading a file that is not a DLL shows a "Bad Image"
+    // message box unless the loader asks for the error instead: this hung
+    // VloomDAW's CI.
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path folder
+        = std::filesystem::temp_directory_path() / ("vloom_not_a_plugin_" + std::to_string(stamp));
+    std::filesystem::create_directories(folder);
+    for (const char* name : {"bogus.clap", "bogus.vst3"}) {
+        const std::filesystem::path file = folder / name;
+        std::ofstream(file) << "not a plugin";
+        std::string error;
+        if (file.extension() == ".clap")
+            CHECK(vloom::ClapLibrary::open(file, &error) == nullptr);
+        else
+            CHECK(vloom::Vst3Library::open(file, &error) == nullptr);
+        CHECK_FALSE(error.empty());
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(folder, ec);
 }
