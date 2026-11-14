@@ -69,9 +69,15 @@ when the user edits the mixer.
      counts as 0.
    - The graph is compensated when it is built. `Engine::prepare()`
      compensates again after re-activating plugins at a new rate.
-   - A plugin whose latency changes needs a new published state. This
-     happens only through the host, until CLAP latency-change notifications
-     are wired up.
+   - Plugins change their latency while running, for example when
+     oversampling or a linear-phase mode is switched on in their editor.
+     `Engine::updatePluginLatency()` reads every effect's latency again
+     (`PluginInstance::updateLatency()`). If one changed, it publishes the
+     same state again, compensated anew, and the delay lines and send
+     ramps carry over. The host calls it from its UI timer.
+   - A bypassed instance's dry line has room for its latency at activation
+     plus `PluginInstance::kBypassHeadroom` (8192 frames). Past that, it
+     delays only as far as it fits until the next activation.
 6. **Bypass keeps the latency.** A bypassed instance delays its dry sound by
    its latency (`DelayLine`), so bypassing does not shift the path and the
    compensation stays right.
@@ -114,6 +120,5 @@ when the user edits the mixer.
   change, as it did with the flat state.
 - Not yet:
   - instrument plugins' latency on channels (not compensated);
-  - latency changes reported by plugins while running (the host republishes);
   - sidechain inputs;
   - a send's own pan.

@@ -98,9 +98,15 @@ public:
     /// Replaces the mixer inserts (volume, pan, effects, routing; mute and
     /// solo folded into the gain by the host), from the next block on;
     /// volume and send changes ramp. Works out the routes' order and the
-    /// delays lining up paths with plugin latency (ADR 0007): publish a new
-    /// state when an effect's latency changes.
+    /// delays lining up paths with plugin latency (ADR 0007). Latency that
+    /// changes later is picked up by updatePluginLatency().
     void setMixerState(std::unique_ptr<const MixerState> state);
+    /// Reads the latency of every effect in the published mixer state again,
+    /// on inserts and on the master (PluginInstance::updateLatency()). If one changed, the state is
+    /// published again, so the paths are lined up anew; returns true then.
+    /// Control thread, often: from the same UI timer as
+    /// AudioProcessor::idle().
+    bool updatePluginLatency();
     /// Plays `sample` once from its start on the master bus (after the master
     /// volume), whether or not the transport plays: a browser preview. A new
     /// preview replaces the one sounding, which fades out; null stops it.

@@ -22,11 +22,20 @@ bool PluginInstance::activate(double sampleRate, int maxBlockFrames)
     if (!processor_->activate(sampleRate, maxBlockFrames))
         return false;
     maxBlockFrames_ = maxBlockFrames;
-    latency_ = std::clamp(processor_->latencyFrames(), 0, kMaxLatencyFrames);
-    bypassLine_.resize(latency_);
+    const int latency = std::clamp(processor_->latencyFrames(), 0, kMaxLatencyFrames);
+    latency_.store(latency, std::memory_order_relaxed);
+    bypassLine_.resize(std::min(latency + kBypassHeadroom, kMaxLatencyFrames));
     bypassedLast_ = false;
     active_.store(true, std::memory_order_release); // after maxBlockFrames_, for the audio thread
     return true;
+}
+
+bool PluginInstance::updateLatency()
+{
+    if (!active_.load(std::memory_order_acquire))
+        return false;
+    const int latency = std::clamp(processor_->latencyFrames(), 0, kMaxLatencyFrames);
+    return latency_.exchange(latency, std::memory_order_relaxed) != latency;
 }
 
 void PluginInstance::deactivate()
@@ -75,7 +84,8 @@ void PluginInstance::process(float* left, float* right, int numFrames, const Tra
         bypassedLast_ = true;
         // The dry sound, as late as the processed one would be.
         float* dry[2] = {left, right};
-        bypassLine_.process(dry, 2, numFrames, latency_);
+        bypassLine_.process(
+            dry, 2, numFrames, std::min(latency_.load(std::memory_order_relaxed), bypassLine_.maxDelay()));
         return;
     }
     bypassedLast_ = false;

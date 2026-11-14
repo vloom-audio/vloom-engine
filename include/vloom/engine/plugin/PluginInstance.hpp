@@ -55,10 +55,25 @@ public:
     [[nodiscard]] bool isBypassed() const noexcept { return bypassed_.load(std::memory_order_relaxed); }
 
     /// Frames the instance delays its sound by: the processor's latency as
-    /// it was at activate() (at most kMaxLatencyFrames); 0 while inactive.
-    /// Bypassed, it delays the dry sound as much, so the mixer's delay
-    /// compensation (ADR 0007) stays right. Control thread.
-    [[nodiscard]] int latencyFrames() const noexcept { return active_.load() ? latency_ : 0; }
+    /// read at activate() or by the last updateLatency() (at most
+    /// kMaxLatencyFrames); 0 while inactive. Bypassed, it delays the dry
+    /// sound as much (up to the bypass line's room, see updateLatency()), so
+    /// the mixer's delay compensation (ADR 0007) stays right. Control thread.
+    [[nodiscard]] int latencyFrames() const noexcept
+    {
+        return active_.load() ? latency_.load(std::memory_order_relaxed) : 0;
+    }
+
+    /// Reads the processor's latency again; true if it changed. Plugins
+    /// change it while running, e.g. when oversampling or a linear-phase mode
+    /// is switched on in their editor. The bypass line was sized at
+    /// activate() with room to spare (kBypassHeadroom); past that, the dry
+    /// sound is delayed only as far as it fits until the next activate().
+    /// Control thread; Engine::updatePluginLatency() calls it.
+    bool updateLatency();
+
+    /// Room the bypass line gets beyond the latency at activate(), in frames.
+    static constexpr int kBypassHeadroom = 8192;
 
     /// The processor, for what only the control thread may ask (info,
     /// parameters, state).
@@ -85,8 +100,8 @@ private:
     std::atomic<bool> active_{false};
     std::atomic<bool> bypassed_{false};
     int maxBlockFrames_ = 0; ///< written before activation is published
-    int latency_ = 0; ///< written before activation is published
-    DelayLine bypassLine_; ///< the dry path while bypassed, `latency_` long
+    std::atomic<int> latency_{0}; ///< control thread writes, audio thread reads (bypass)
+    DelayLine bypassLine_; ///< the dry path while bypassed: room for latency_ plus kBypassHeadroom
     SpscQueue<ParameterEvent, kMaxQueuedParameters + 1> parameters_;
     /// Audio thread: changes not given to the processor yet, one per parameter.
     std::array<ParameterEvent, kMaxQueuedParameters> pending_{};
