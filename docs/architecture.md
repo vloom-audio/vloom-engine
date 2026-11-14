@@ -10,7 +10,7 @@
 | dsp | `dsp/` | Sound generators and processors | core |
 | io | `io/` | Hardware audio devices (WASAPI, CoreAudio, ALSA) | core |
 | mixer | `mixer/` | Insert settings (volume, pan, effect chain, output, sends), the pan law, and `MixerGraph`: inserts in processing order with delay compensation (ADR 0007); Engine mixes the buses along it | core, dsp, plugin |
-| plugin | `plugin/` | Hosted processors behind one interface (ADR 0006): CLAP host, built-in effects | core, time |
+| plugin | `plugin/` | Hosted processors behind one interface (ADR 0006): CLAP and VST 3 hosts, built-in effects | core, time |
 | sample | `sample/` | Decoded audio in memory: WAV reading, resampling | core |
 | sequencer | `sequencer/` | Channel rack state and step playback (built-in and plugin instruments) | core, dsp, plugin, sample, time |
 | render | `render/` | Offline rendering, file export | engine |

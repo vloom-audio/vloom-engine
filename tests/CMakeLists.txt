@@ -21,6 +21,7 @@ add_executable(vloom_engine_tests
     mixer/RoutingTests.cpp
     plugin/ClapHostTests.cpp
     plugin/PluginHostTests.cpp
+    plugin/Vst3HostTests.cpp
     render/SongExportTests.cpp
     render/WavWriterTests.cpp
     sample/ResamplerTests.cpp
@@ -47,6 +48,17 @@ if(MSVC)
 endif()
 add_dependencies(vloom_engine_tests vloom_test_clap)
 target_compile_definitions(vloom_engine_tests PRIVATE VLOOM_TEST_CLAP="$<TARGET_FILE:vloom_test_clap>")
+
+# A real .vst3 (a single-file module) for the VST 3 host tests (plugin/Vst3HostTests.cpp).
+add_library(vloom_test_vst3 MODULE plugin/vst3/TestPlugins.cpp)
+set_target_properties(vloom_test_vst3 PROPERTIES PREFIX "" SUFFIX ".vst3" OUTPUT_NAME "vloom-test-vst3")
+target_link_libraries(vloom_test_vst3 PRIVATE vloom_vst3_interfaces)
+target_compile_features(vloom_test_vst3 PRIVATE cxx_std_20)
+if(MSVC)
+    target_compile_definitions(vloom_test_vst3 PRIVATE _CRT_SECURE_NO_WARNINGS) # strcpy into VST 3's fixed names
+endif()
+add_dependencies(vloom_engine_tests vloom_test_vst3)
+target_compile_definitions(vloom_engine_tests PRIVATE VLOOM_TEST_VST3="$<TARGET_FILE:vloom_test_vst3>")
 target_link_libraries(vloom_engine_tests PRIVATE vloom::engine Catch2::Catch2WithMain)
 vloom_set_warnings(vloom_engine_tests)
 

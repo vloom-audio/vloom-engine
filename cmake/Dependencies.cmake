@@ -23,3 +23,36 @@ CPMAddPackage(
 add_library(vloom_clap_headers INTERFACE)
 # SYSTEM: their warnings are not ours.
 target_include_directories(vloom_clap_headers SYSTEM INTERFACE ${clap_SOURCE_DIR}/include)
+
+# VST 3 plugin interfaces (MIT since VST 3.8) — the plugin format the engine
+# also hosts (docs/adr/0006). Only the interfaces, not the whole SDK: the
+# engine implements the host side itself. Pinned to the commit of the
+# v3.8.1_build_84 tag. Its two .cpp files (FUnknown/FUID and the core
+# interface ids) plus ours (the VST interface ids) are built into a small
+# static library, without our warnings.
+CPMAddPackage(
+    NAME vst3_pluginterfaces
+    GITHUB_REPOSITORY steinbergmedia/vst3_pluginterfaces
+    GIT_TAG 4f547e8e102b47de4a8b8aaf343c73b700786372
+    GIT_SHALLOW FALSE
+    DOWNLOAD_ONLY YES)
+# The headers include "pluginterfaces/...": the checkout must sit in a
+# directory of that name.
+set(VLOOM_VST3_ROOT ${PROJECT_BINARY_DIR}/vst3)
+file(MAKE_DIRECTORY ${VLOOM_VST3_ROOT})
+if(NOT EXISTS ${VLOOM_VST3_ROOT}/pluginterfaces)
+    file(COPY ${vst3_pluginterfaces_SOURCE_DIR}/ DESTINATION ${VLOOM_VST3_ROOT}/pluginterfaces
+        PATTERN ".git" EXCLUDE)
+endif()
+add_library(vloom_vst3_interfaces STATIC
+    ${VLOOM_VST3_ROOT}/pluginterfaces/base/funknown.cpp
+    ${VLOOM_VST3_ROOT}/pluginterfaces/base/coreiids.cpp
+    ${PROJECT_SOURCE_DIR}/src/plugin/vst3/Vst3Iids.cpp)
+target_include_directories(vloom_vst3_interfaces SYSTEM PUBLIC ${VLOOM_VST3_ROOT})
+target_compile_features(vloom_vst3_interfaces PUBLIC cxx_std_20)
+set_target_properties(vloom_vst3_interfaces PROPERTIES POSITION_INDEPENDENT_CODE ON)
+if(WIN32)
+    target_link_libraries(vloom_vst3_interfaces PUBLIC ole32) # FUID::generate: CoCreateGuid
+elseif(APPLE)
+    target_link_libraries(vloom_vst3_interfaces PUBLIC "-framework CoreFoundation")
+endif()
