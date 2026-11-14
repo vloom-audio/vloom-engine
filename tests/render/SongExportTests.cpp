@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Vloom Audio contributors
 #include <vloom/engine/Engine.hpp>
+#include <vloom/engine/dsp/DelayLine.hpp>
+#include <vloom/engine/mixer/MixerState.hpp>
+#include <vloom/engine/plugin/PluginInstance.hpp>
 #include <vloom/engine/render/OfflineRenderer.hpp>
 #include <vloom/engine/render/SongExport.hpp>
 #include <vloom/engine/render/WavWriter.hpp>
@@ -405,4 +408,60 @@ TEST_CASE("A WAV file of unknown length gets its real length in the header", "[r
     CHECK(bytesOf(folder.file("open.wav"))
         == vloom::encodeWavFloat32(
             std::vector<float>{0.25f, -0.25f, 0.5f, -0.5f, 0.25f, -0.25f, 0.5f, -0.5f}, 2, 48000));
+}
+
+namespace {
+
+/// Delays its input by `latency` frames and says so.
+class LatentEffect final : public vloom::AudioProcessor {
+public:
+    explicit LatentEffect(int latency)
+        : latency_(latency)
+    {
+    }
+    [[nodiscard]] vloom::PluginInfo info() const override
+    {
+        return {"test.latent", "Latent", "Tests", "1", {}};
+    }
+    bool activate(double /*sampleRate*/, int /*maxBlockFrames*/) override
+    {
+        line_.resize(latency_);
+        return true;
+    }
+    [[nodiscard]] int latencyFrames() const override { return latency_; }
+    void process(const vloom::ProcessContext& context) noexcept override
+    {
+        line_.process(context.channels, context.numChannels, context.numFrames, latency_);
+    }
+
+private:
+    int latency_;
+    vloom::DelayLine line_;
+};
+
+} // namespace
+
+TEST_CASE("An export leaves out the delay compensation's lead-in", "[export][pdc]")
+{
+    TempFolder folder;
+    auto state = song(constant(3000, 0.5f));
+    state.patterns.push_back(pattern({1, 0, 0, 0}));
+    state.patternClips.push_back({0, 0, 4 * kStep});
+    vloom::MixerState mixer;
+    mixer.inserts.resize(1);
+    auto effect = std::make_shared<vloom::PluginInstance>(std::make_unique<LatentEffect>(700));
+    REQUIRE(effect->activate(kRate, vloom::kMaxBlockFrames));
+    mixer.inserts[0].effects.push_back(effect); // makes the master wait 700 frames
+
+    vloom::SongExportOptions options;
+    options.format = vloom::WavFormat::Float32;
+    const auto result = vloom::exportSong(folder.file("pdc.wav"), state, &mixer, kRate, options);
+    REQUIRE(result.ok);
+    const auto read = vloom::readWavFile(folder.file("pdc.wav"));
+    REQUIRE(read.buffer);
+    const vloom::SampleBuffer& wav = *read.buffer;
+    CHECK(wav.channel(0)[0] == Approx(0.5f * kCentre).margin(1e-4)); // the music from the first frame
+    CHECK(wav.channel(0)[2999] == Approx(0.5f * kCentre).margin(1e-4));
+    CHECK(wav.channel(0)[3001] == Approx(0.0f).margin(1e-4));
+    CHECK(wav.frames() >= 4 * kStepFrames);
 }

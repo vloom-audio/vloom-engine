@@ -96,6 +96,21 @@ and the project uses [Semantic Versioning](https://semver.org/).
   (`WavFileWriter`), so a failed write never leaves a broken file.
 
 ### Added
+- Mixer routing and plugin delay compensation (M5, ADR 0007):
+  - `InsertState::output` plays an insert into the master, into another
+    insert, or nowhere.
+  - `InsertState::sends` sends up to `kMaxSends` copies, pre- or post-fader,
+    with ramped gain.
+  - A route that would close a loop is ignored.
+  - `Engine::setMixerState()` compiles the state into a `MixerGraph` that
+    processes inserts before what they play into, and delays every path to
+    line up with plugin latency (up to `kMaxLatencyFrames`).
+  - The metronome is delayed as much as the music; the preview is not.
+  - `Engine::latencyFrames()` reports how late the music comes.
+  - `PluginInstance::latencyFrames()`; a bypassed instance delays its dry
+    sound by its latency.
+  - `exportSong()` leaves out the lead-in.
+  - New `dsp/DelayLine`.
 - Plugin host interface (M4, ADR 0006): `plugin/AudioProcessor`, the one
   interface every hosted processor implements whatever its format (CLAP and
   VST3 adapters come next), with parameters, per-block parameter changes and

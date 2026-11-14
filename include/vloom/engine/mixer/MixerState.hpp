@@ -19,8 +19,25 @@ inline constexpr int kMaxInserts = 125;
 /// Per-channel and per-insert buffers have this size.
 inline constexpr int kMaxBlockFrames = 4096;
 
+/// Most sends one insert has; more are ignored.
+inline constexpr int kMaxSends = 16;
+
+/// Where an insert sends a copy of its sound, besides its output (ADR 0007).
+struct Send {
+    int target = 0; ///< insert 1 .. kMaxInserts, or 0 = the master
+    float gain = 1.0f; ///< linear, 0 .. 4; changes ramp over one block
+    /// True: taken after the effects, before the insert's volume and pan
+    /// (so muting the insert does not mute it). False: after them.
+    bool preFader = false;
+};
+
 /// One insert, as the audio thread sees it. The host folds mute and solo into
 /// `gain` (0 = silent).
+///
+/// Routing (ADR 0007): the insert plays into `output` and sends copies to
+/// `sends`. A route that would make a loop (an insert reaching itself) is
+/// ignored, checked in insert order, output before sends. Paths with plugin
+/// latency are lined up: the mixer delays the others to match.
 struct InsertState {
     float gain = 1.0f; ///< linear, 0 .. 4
     float pan = 0.0f; ///< balance, -1 (left) .. +1 (right)
@@ -30,6 +47,10 @@ struct InsertState {
     /// null entry or an inactive instance is skipped. An insert with effects
     /// is processed every block, so their tails ring out.
     std::vector<std::shared_ptr<PluginInstance>> effects{}; // defaulted: {gain, pan} stays warning-free
+    /// Where it plays into, after volume and pan: 0 = the master, 1 ..
+    /// kMaxInserts another insert, anything else nowhere (sends only).
+    int output = 0;
+    std::vector<Send> sends{}; ///< at most kMaxSends; a send to nowhere is ignored
 };
 
 /// Immutable snapshot of the mixer, published with Engine::setMixerState().

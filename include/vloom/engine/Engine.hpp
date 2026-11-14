@@ -3,8 +3,10 @@
 #pragma once
 
 #include "vloom/engine/core/SpscQueue.hpp"
+#include "vloom/engine/dsp/DelayLine.hpp"
 #include "vloom/engine/dsp/Metronome.hpp"
 #include "vloom/engine/dsp/Sampler.hpp"
+#include "vloom/engine/mixer/MixerGraph.hpp"
 #include "vloom/engine/mixer/MixerState.hpp"
 #include "vloom/engine/sequencer/StepSequencer.hpp"
 #include "vloom/engine/time/Transport.hpp"
@@ -93,8 +95,11 @@ public:
     /// Frees states the audio thread has finished with. Call it regularly
     /// from the control thread (a UI timer); setSequencerState() does too.
     void collectGarbage();
-    /// Replaces the mixer inserts' volume and pan (mute and solo folded into
-    /// the gain by the host), from the next block on; changes ramp.
+    /// Replaces the mixer inserts (volume, pan, effects, routing; mute and
+    /// solo folded into the gain by the host), from the next block on;
+    /// volume and send changes ramp. Works out the routes' order and the
+    /// delays lining up paths with plugin latency (ADR 0007): publish a new
+    /// state when an effect's latency changes.
     void setMixerState(std::unique_ptr<const MixerState> state);
     /// Plays `sample` once from its start on the master bus (after the master
     /// volume), whether or not the transport plays: a browser preview. A new
@@ -120,6 +125,10 @@ public:
     {
         return beatsPerBarStatus_.load(std::memory_order_relaxed);
     }
+    /// Frames the mixer delays the music by to line up plugin latency (ADR
+    /// 0007): what is heard comes this late compared with positionTicks().
+    /// The metronome is delayed as much; the preview is not.
+    [[nodiscard]] int latencyFrames() const noexcept { return latency_.load(std::memory_order_relaxed); }
     /// Smoothed share of each block's real-time budget that process() used:
     /// 0 = idle, 1 = the whole block (audio starts to drop out above that).
     [[nodiscard]] float cpuLoad() const noexcept { return cpuLoad_.load(std::memory_order_relaxed); }
@@ -153,7 +162,7 @@ private:
     bool send(Command::Type type, double value = 0.0, double value2 = 0.0);
     /// Runs the event scheduler over [spanStart, spanStart + spanFrames) of
     /// the block, the transport standing at spanStart; renders that span.
-    void playSpan(float* const* out, int numChannels, int spanStart, int spanFrames) noexcept;
+    void playSpan(int spanStart, int spanFrames) noexcept;
     void applyCommands() noexcept;
     void publishStatus() noexcept;
     void applyMasterGain(float* const* out, int numChannels, int numFrames) noexcept;
@@ -162,11 +171,18 @@ private:
     /// NaN / infinity become silence before the device sees them.
     static void sanitizeOutput(float* const* out, int numChannels, int numFrames) noexcept;
     void measureLoad(double seconds, int numFrames) noexcept;
-    void renderSegment(float* const* out, int numChannels, int startFrame, int numFrames) noexcept;
+    void renderSegment(int startFrame, int numFrames) noexcept;
     void processBlock(float* const* out, int numChannels, int numFrames) noexcept;
-    /// Inserts (volume, pan, meters) into the master bus, the master bus into `out`.
-    /// `transport` as at the block's start, for hosted effects.
+    /// Inserts (effects, volume, pan, meters) along their routes into the
+    /// master bus, then the master bus, the preview and the metronome into
+    /// `out`. `transport` as at the block's start, for hosted effects.
     void mixBuses(float* const* out, int numChannels, int numFrames, const TransportInfo& transport) noexcept;
+    /// Delays node `node`'s direct input by the graph's compensation, once
+    /// per block, before anything is routed into it.
+    void delayInput(const MixerGraph& graph, int node, int numFrames) noexcept;
+    /// Plays `numFrames` of one insert of `graph` along its routes.
+    void mixInsert(
+        const MixerGraph& graph, int insert, int numFrames, const TransportInfo& transport) noexcept;
     /// Starts a newly published preview and adds the preview into the master bus.
     void renderPreview(int numFrames) noexcept;
 
@@ -180,7 +196,9 @@ private:
     Transport transport_;
     Metronome metronome_;
     StepSequencer sequencer_;
-    SnapshotExchange<MixerState> mixer_;
+    SnapshotExchange<MixerGraph> mixer_;
+    MixerGraph* lastMixer_ = nullptr; ///< control thread: the graph published last (routes are reused)
+    std::unique_ptr<MixerGraph> unityMixer_; ///< what plays before any state is published
     SnapshotExchange<PreviewState> preview_;
     Sampler previewSampler_{1}; ///< audio thread: one voice (plus the sampler's fade slots)
     const PreviewState* previewStarted_ = nullptr; ///< audio thread: the preview last triggered
@@ -191,6 +209,15 @@ private:
     std::array<StereoGain, kMaxInserts + 1> insertApplied_{}; ///< audio thread: ramp start per insert
     std::array<bool, kMaxInserts + 1> insertSounding_{}; ///< audio thread: the insert had sound last block
     std::array<std::array<std::atomic<float>, 2>, kMaxInserts + 1> insertPeak_{};
+    /// audio thread: per node, its direct input was delayed this block
+    std::array<bool, kMaxInserts + 1> inputDelayed_{};
+    /// audio thread: an insert after its volume and pan; a route's copy of
+    /// it; the metronome (mono); kMaxBlockFrames each
+    std::vector<float> scratchMemory_;
+    std::array<float*, 2> post_{};
+    std::array<float*, 2> routed_{};
+    float* click_ = nullptr;
+    DelayLine clickLine_; ///< audio thread: the metronome, delayed as the music
     bool stopVoices_ = false; ///< audio thread: a Stop command arrived this block
     bool wasRolling_ = false; ///< audio thread: the transport played in the last block
     double expectedTicks_ = 0.0; ///< audio thread: where the last block left the position
@@ -218,6 +245,7 @@ private:
     std::atomic<int> beatsPerBarStatus_{4};
     std::atomic<float> cpuLoad_{0.0f};
     std::array<std::atomic<float>, 2> outputPeak_{}; ///< left, right; see takeOutputPeak()
+    std::atomic<int> latency_{0};
 };
 
 } // namespace vloom

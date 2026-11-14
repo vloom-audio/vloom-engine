@@ -9,3 +9,5 @@
   - [0003 GPL-3.0-or-later](adr/0003-gpl-3-or-later.md)
   - [0004 Native audio I/O instead of miniaudio](adr/0004-native-audio-io.md)
   - [0005 Immutable snapshots for state the audio thread reads](adr/0005-state-snapshots-for-the-audio-thread.md)
+  - [0006 Plugin host interface](adr/0006-plugin-host-interface.md)
+  - [0007 Mixer routing and delay compensation](adr/0007-mixer-routing-and-delay-compensation.md)

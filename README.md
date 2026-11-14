@@ -3,7 +3,7 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![C++ Standard](https://img.shields.io/badge/C%2B%2B-20-brightgreen.svg)](#requirements)
 [![Platforms](https://img.shields.io/badge/Platforms-macOS%20|%20Linux%20|%20Windows-lightgrey.svg)](#quick-start)
-[![Status: M2](https://img.shields.io/badge/Status-M2%20(Notes%20%26%20Synth)-orange.svg)](#roadmap)
+[![Status: M5](https://img.shields.io/badge/Status-M5%20(Mixer%20%26%20Plugins)-orange.svg)](#roadmap)
 
 The real-time audio engine behind [VloomDAW](https://github.com/vloom-audio/VloomDAW).
 A plain **C++20** library with no UI dependency, so it can be tested headless and
@@ -16,7 +16,8 @@ reused by other Vloom Audio tools.
 > of up to 125 insert buses. Outputs through each OS's own audio API, exports
 > songs to float / 16 / 24-bit WAV, and ships the `vloom-cli` developer tool.
 > Hosts CLAP plugins: effects on mixer inserts, instruments on channels
-> (ADR 0006). Next: M5, VST3 hosting and delay compensation.
+> (ADR 0006). Inserts route into each other with sends, and plugin latency
+> is compensated (ADR 0007). Next: VST3 hosting and built-in effects.
 
 ---
 
