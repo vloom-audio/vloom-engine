@@ -22,6 +22,9 @@ bool PluginInstance::activate(double sampleRate, int maxBlockFrames)
     if (!processor_->activate(sampleRate, maxBlockFrames))
         return false;
     maxBlockFrames_ = maxBlockFrames;
+    latency_ = std::clamp(processor_->latencyFrames(), 0, kMaxLatencyFrames);
+    bypassLine_.resize(latency_);
+    bypassedLast_ = false;
     active_.store(true, std::memory_order_release); // after maxBlockFrames_, for the audio thread
     return true;
 }
@@ -64,9 +67,14 @@ void PluginInstance::process(float* left, float* right, int numFrames, const Tra
         // Notes ending while bypassed never reach the processor, and the
         // host forgets them: end everything it holds as bypass starts, so
         // nothing hangs once it processes again.
-        if (!bypassedLast_)
+        if (!bypassedLast_) {
             processor_->reset();
+            bypassLine_.clear();
+        }
         bypassedLast_ = true;
+        // The dry sound, as late as the processed one would be.
+        float* dry[2] = {left, right};
+        bypassLine_.process(dry, 2, numFrames, latency_);
         return;
     }
     bypassedLast_ = false;

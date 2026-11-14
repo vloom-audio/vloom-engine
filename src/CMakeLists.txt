@@ -14,6 +14,7 @@ target_sources(vloom_engine PRIVATE
     time/Transport.cpp
 
     # dsp — sound generators and processors
+    dsp/DelayLine.cpp
     dsp/Metronome.cpp
     dsp/Sampler.cpp
     dsp/Synth.cpp
@@ -34,6 +35,9 @@ target_sources(vloom_engine PRIVATE
     plugin/ClapHost.cpp
     plugin/GainProcessor.cpp
     plugin/PluginInstance.cpp
+
+    # mixer — inserts, routes and delay compensation (ADR 0007)
+    mixer/MixerGraph.cpp
 
     # sequencer — the channel rack: steps that trigger samples
     sequencer/StepSequencer.cpp

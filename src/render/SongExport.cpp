@@ -163,19 +163,27 @@ SongExportResult exportSong(const std::string& path, const SequencerState& song,
     std::array<float*, 2> ptrs{planar.data(), planar.data() + (width > 1 ? length : 0)};
     std::vector<float> interleaved(width * length);
 
-    // Renders `frames` and writes them; the block's peak in `peak`.
-    const auto renderBlock = [&](int frames, float& peak) {
+    // The mixer's delay compensation (ADR 0007) makes the music come late:
+    // that many frames at the start are left out. Known after the first block.
+    std::int64_t skip = -1;
+    // Renders `frames` and writes what is not skipped (`written` frames);
+    // their peak in `peak`.
+    const auto renderBlock = [&](int frames, float& peak, std::int64_t& written) {
         engine->process(ptrs.data(), options.channels, frames);
+        if (skip < 0)
+            skip = engine->latencyFrames();
+        const auto from = static_cast<std::size_t>(std::min<std::int64_t>(skip, frames));
+        skip -= static_cast<std::int64_t>(from);
         peak = 0.0f;
-        for (std::size_t i = 0; i < static_cast<std::size_t>(frames); ++i)
+        std::size_t count = 0;
+        for (std::size_t i = from; i < static_cast<std::size_t>(frames); ++i, ++count)
             for (std::size_t ch = 0; ch < width; ++ch) {
                 const float s = ptrs[ch][i];
-                interleaved[i * width + ch] = s;
+                interleaved[count * width + ch] = s;
                 peak = std::max(peak, std::abs(s));
             }
-        return writer.write(
-            std::span<const float>(interleaved.data(), static_cast<std::size_t>(frames) * width),
-            &result.error);
+        written += static_cast<std::int64_t>(count);
+        return writer.write(std::span<const float>(interleaved.data(), count * width), &result.error);
     };
     const auto keepGoing = [&](double done) {
         if (!progress || progress(std::clamp(done, 0.0, 1.0)))
@@ -188,10 +196,11 @@ SongExportResult exportSong(const std::string& path, const SequencerState& song,
     // The song itself.
     float peak = 0.0f;
     for (std::int64_t done = 0; done < bodyFrames;) {
-        const auto frames = static_cast<int>(std::min<std::int64_t>(blockSize, bodyFrames - done));
-        if (!renderBlock(frames, peak))
+        // Not past the body's end once the skipped start is known.
+        const std::int64_t left = bodyFrames - done + std::max<std::int64_t>(skip, 0);
+        const auto frames = static_cast<int>(std::min<std::int64_t>(blockSize, left));
+        if (!renderBlock(frames, peak, done))
             return result;
-        done += frames;
         if (!keepGoing(0.9 * static_cast<double>(done) / static_cast<double>(bodyFrames)))
             return result;
     }
@@ -199,9 +208,8 @@ SongExportResult exportSong(const std::string& path, const SequencerState& song,
     std::int64_t silent = 0;
     for (std::int64_t done = 0; done < tailFrames && silent < silentEnough;) {
         const auto frames = static_cast<int>(std::min<std::int64_t>(blockSize, tailFrames - done));
-        if (!renderBlock(frames, peak))
+        if (!renderBlock(frames, peak, done))
             return result;
-        done += frames;
         silent = peak <= threshold ? silent + frames : 0;
         if (!keepGoing(0.9 + 0.1 * static_cast<double>(done) / static_cast<double>(tailFrames)))
             return result;

@@ -3,6 +3,7 @@
 #pragma once
 
 #include "vloom/engine/core/SpscQueue.hpp"
+#include "vloom/engine/dsp/DelayLine.hpp"
 #include "vloom/engine/plugin/AudioProcessor.hpp"
 
 #include <array>
@@ -12,6 +13,10 @@
 #include <span>
 
 namespace vloom {
+
+/// Longest latency the engine compensates (ADR 0007): about 1.4 s at
+/// 48 kHz. More is counted as this much.
+inline constexpr int kMaxLatencyFrames = 65536;
 
 /// A hosted processor as the engine holds it (ADR 0006): the processor plus
 /// activation, bypass and a queue carrying parameter changes from the
@@ -49,6 +54,12 @@ public:
     void setBypassed(bool bypassed) noexcept { bypassed_.store(bypassed, std::memory_order_relaxed); }
     [[nodiscard]] bool isBypassed() const noexcept { return bypassed_.load(std::memory_order_relaxed); }
 
+    /// Frames the instance delays its sound by: the processor's latency as
+    /// it was at activate() (at most kMaxLatencyFrames); 0 while inactive.
+    /// Bypassed, it delays the dry sound as much, so the mixer's delay
+    /// compensation (ADR 0007) stays right. Control thread.
+    [[nodiscard]] int latencyFrames() const noexcept { return active_.load() ? latency_ : 0; }
+
     /// The processor, for what only the control thread may ask (info,
     /// parameters, state).
     [[nodiscard]] AudioProcessor& processor() noexcept { return *processor_; }
@@ -74,6 +85,8 @@ private:
     std::atomic<bool> active_{false};
     std::atomic<bool> bypassed_{false};
     int maxBlockFrames_ = 0; ///< written before activation is published
+    int latency_ = 0; ///< written before activation is published
+    DelayLine bypassLine_; ///< the dry path while bypassed, `latency_` long
     SpscQueue<ParameterEvent, kMaxQueuedParameters + 1> parameters_;
     /// Audio thread: changes not given to the processor yet, one per parameter.
     std::array<ParameterEvent, kMaxQueuedParameters> pending_{};

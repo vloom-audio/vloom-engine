@@ -16,17 +16,25 @@ namespace vloom {
 
 namespace {
 
-/// Inserts a mixer state does not list play at unity. Built at start-up: a
-/// function-local static would be built (and allocate) on the audio thread.
-const InsertState kUnityInsert{};
+/// The linear gain of a send, made safe: 0 .. 4, non-finite = 0.
+float sendGain(float gain) noexcept { return std::isfinite(gain) ? std::clamp(gain, 0.0f, 4.0f) : 0.0f; }
 
 } // namespace
 
 Engine::Engine()
-    : busMemory_(static_cast<std::size_t>(2 * (kMaxInserts + 1) * kMaxBlockFrames), 0.0f)
+    : unityMixer_(buildMixerGraph(nullptr, nullptr))
+    , busMemory_(static_cast<std::size_t>(2 * (kMaxInserts + 1) * kMaxBlockFrames), 0.0f)
+    , scratchMemory_(static_cast<std::size_t>(5 * kMaxBlockFrames), 0.0f)
+    , clickLine_(kMaxLatencyFrames, 1)
 {
     for (std::size_t i = 0; i < buses_.size(); ++i)
         buses_[i] = busMemory_.data() + i * static_cast<std::size_t>(kMaxBlockFrames);
+    const auto scratch = [this](std::size_t i) {
+        return scratchMemory_.data() + i * static_cast<std::size_t>(kMaxBlockFrames);
+    };
+    post_ = {scratch(0), scratch(1)};
+    routed_ = {scratch(2), scratch(3)};
+    click_ = scratch(4);
 }
 
 void Engine::prepare(double sampleRate, int /*maxBlockSize*/)
@@ -49,12 +57,26 @@ void Engine::prepare(double sampleRate, int /*maxBlockSize*/)
     // Hosted effects run at the new rate from now on (ADR 0006).
     // Every state the audio thread may play, the one published but not
     // picked up yet included.
-    mixer_.forEachSnapshot([&](const MixerState& mixer) {
-        for (const InsertState& insert : mixer.inserts)
-            for (const auto& effect : insert.effects)
-                if (effect != nullptr)
-                    effect->activate(sampleRate, kMaxBlockFrames);
+    mixer_.forEachSnapshot([&](const MixerGraph& graph) {
+        if (graph.state != nullptr)
+            for (const InsertState& insert : graph.state->inserts)
+                for (const auto& effect : insert.effects)
+                    if (effect != nullptr)
+                        effect->activate(sampleRate, kMaxBlockFrames);
     });
+    // Their latency may have changed with the rate: line the paths up again
+    // (ADR 0007), and drop what the delays held. The graphs are only handed
+    // out as const for the audio thread's sake; it is stopped now.
+    mixer_.forEachSnapshot([](const MixerGraph& graph) {
+        auto& editable = const_cast<MixerGraph&>(graph); // NOLINT(cppcoreguidelines-pro-type-const-cast)
+        editable.compensate(nullptr);
+        for (const MixerRoute& route : editable.routes)
+            route.state->line.clear();
+        for (const auto& line : editable.inputLine)
+            if (line != nullptr)
+                line->clear();
+    });
+    clickLine_.clear();
     sequencer_.activatePlugins(sampleRate, kMaxBlockFrames);
 
     // Commands sent while the device was gone (Stop, Locate ...) still count.
@@ -162,7 +184,13 @@ void Engine::renderPreview(int numFrames) noexcept
     previewPlaying_.store(previewSampler_.activeVoices() > 0, std::memory_order_relaxed);
 }
 
-void Engine::setMixerState(std::unique_ptr<const MixerState> state) { mixer_.publish(std::move(state)); }
+void Engine::setMixerState(std::unique_ptr<const MixerState> state)
+{
+    auto graph = buildMixerGraph(std::move(state), lastMixer_);
+    MixerGraph* published = graph.get();
+    mixer_.publish(std::move(graph)); // deletes lastMixer_ if the audio thread never took it
+    lastMixer_ = published;
+}
 
 float Engine::takeInsertPeak(int insert, int channel) noexcept
 {
@@ -312,11 +340,13 @@ void Engine::measureLoad(double seconds, int numFrames) noexcept
     cpuLoad_.store(smoothedLoad_, std::memory_order_relaxed);
 }
 
-void Engine::renderSegment(float* const* out, int numChannels, int startFrame, int numFrames) noexcept
+void Engine::renderSegment(int startFrame, int numFrames) noexcept
 {
     if (numFrames <= 0)
         return;
-    metronome_.render(out, numChannels, startFrame, numFrames);
+    // Into its own buffer: mixBuses() delays it as much as the music.
+    float* click[1] = {click_};
+    metronome_.render(click, 1, startFrame, numFrames);
     sequencer_.render(startFrame, numFrames);
 }
 
@@ -342,63 +372,148 @@ void Engine::process(float* const* out, int numChannels, int numFrames) noexcept
     measureLoad(std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count(), numFrames);
 }
 
+void Engine::delayInput(const MixerGraph& graph, int node, int numFrames) noexcept
+{
+    const auto index = static_cast<std::size_t>(node);
+    if (inputDelayed_[index])
+        return;
+    inputDelayed_[index] = true;
+    DelayLine* line = graph.inputLine[index].get();
+    if (line == nullptr || (!busUsed_[index] && line->idle()))
+        return; // no delay, or silence in and nothing left inside
+    float* const channels[2] = {buses_[2 * index], buses_[2 * index + 1]};
+    line->process(channels, 2, numFrames, graph.inputDelay[index]);
+    busUsed_[index] = true;
+}
+
+void Engine::mixInsert(
+    const MixerGraph& graph, int insert, int numFrames, const TransportInfo& transport) noexcept
+{
+    const auto index = static_cast<std::size_t>(insert);
+    // By reference: copying would copy the effect chain (allocation and
+    // reference counting on the audio thread).
+    const InsertState& settings = graph.insert(insert);
+    const StereoGain target = balance(settings.gain, settings.pan);
+    StereoGain& applied = insertApplied_[index];
+    const int first = graph.firstRoute[index];
+    const int last = first + graph.routeCount[index];
+
+    // Effects run even on silence: a reverb or delay tail goes on. So do
+    // compensation delays still holding sound.
+    bool ringing = !settings.effects.empty();
+    if (const DelayLine* line = graph.inputLine[index].get(); line != nullptr && !line->idle())
+        ringing = true;
+    for (int r = first; r < last && !ringing; ++r)
+        ringing = !graph.routes[static_cast<std::size_t>(r)].state->line.idle();
+    if (!busUsed_[index] && !ringing) {
+        applied = target; // silent: nothing to ramp
+        insertSounding_[index] = false;
+        return;
+    }
+    if (!insertSounding_[index])
+        applied = target; // was silent: start at the setting, no ramp from a stale one
+    insertSounding_[index] = true;
+
+    delayInput(graph, insert, numFrames);
+    busUsed_[index] = false;
+    float* left = buses_[2 * index];
+    float* right = buses_[2 * index + 1];
+    for (const auto& effect : settings.effects)
+        if (effect != nullptr)
+            effect->process(left, right, numFrames, transport);
+
+    // Volume and pan, ramped from the last block.
+    const float n = static_cast<float>(numFrames);
+    const float stepLeft = (target.left - applied.left) / n;
+    const float stepRight = (target.right - applied.right) / n;
+    float peakLeft = 0.0f;
+    float peakRight = 0.0f;
+    for (int i = 0; i < numFrames; ++i) {
+        const float k = static_cast<float>(i + 1);
+        const float l = left[i] * (applied.left + stepLeft * k);
+        const float r = right[i] * (applied.right + stepRight * k);
+        post_[0][i] = l;
+        post_[1][i] = r;
+        peakLeft = std::max(peakLeft, std::abs(l));
+        peakRight = std::max(peakRight, std::abs(r));
+    }
+    applied = target;
+    for (std::size_t ch = 0; ch < 2; ++ch) {
+        const float peak = ch == 0 ? peakLeft : peakRight;
+        auto& slot = insertPeak_[index][ch];
+        float seen = slot.load(std::memory_order_relaxed);
+        while (peak > seen && !slot.compare_exchange_weak(seen, peak, std::memory_order_relaxed)) { }
+    }
+
+    // Along its routes: the output, then the sends. Targets come later in
+    // the graph's order, so they have not been processed yet.
+    for (int r = first; r < last; ++r) {
+        const MixerRoute& route = graph.routes[static_cast<std::size_t>(r)];
+        MixerRouteState& state = *route.state;
+        const float gain = sendGain(route.gain);
+        if (!state.started.load(std::memory_order_relaxed)) {
+            state.applied.store(gain, std::memory_order_relaxed);
+            state.started.store(true, std::memory_order_relaxed);
+        }
+        const float from = state.applied.load(std::memory_order_relaxed);
+        const float step = (gain - from) / n;
+        state.applied.store(gain, std::memory_order_relaxed);
+        const float* sourceLeft = route.preFader ? left : post_[0];
+        const float* sourceRight = route.preFader ? right : post_[1];
+        delayInput(graph, route.target, numFrames); // its own input first, then what is routed in
+        const auto to = static_cast<std::size_t>(route.target);
+        float* targetLeft = buses_[2 * to];
+        float* targetRight = buses_[2 * to + 1];
+        busUsed_[to] = true;
+        // A route that never had a delay adds straight in. One that had keeps
+        // going through its line even at 0, so the line stays current and
+        // reports itself idle.
+        if (route.delay == 0 && state.line.maxDelay() == 0) {
+            for (int i = 0; i < numFrames; ++i) {
+                const float g = from + step * static_cast<float>(i + 1);
+                targetLeft[i] += sourceLeft[i] * g;
+                targetRight[i] += sourceRight[i] * g;
+            }
+            continue;
+        }
+        for (int i = 0; i < numFrames; ++i) {
+            const float g = from + step * static_cast<float>(i + 1);
+            routed_[0][i] = sourceLeft[i] * g;
+            routed_[1][i] = sourceRight[i] * g;
+        }
+        state.line.process(routed_.data(), 2, numFrames, route.delay);
+        for (int i = 0; i < numFrames; ++i) {
+            targetLeft[i] += routed_[0][i];
+            targetRight[i] += routed_[1][i];
+        }
+    }
+    std::memset(left, 0, sizeof(float) * static_cast<std::size_t>(numFrames));
+    std::memset(right, 0, sizeof(float) * static_cast<std::size_t>(numFrames));
+}
+
 void Engine::mixBuses(
     float* const* out, int numChannels, int numFrames, const TransportInfo& transport) noexcept
 {
-    const MixerState* state = mixer_.acquire();
+    const MixerGraph* acquired = mixer_.acquire();
+    const MixerGraph& graph = acquired != nullptr ? *acquired : *unityMixer_;
+    inputDelayed_.fill(false);
+    for (const int insert : graph.order)
+        mixInsert(graph, insert, numFrames, transport);
+
+    // The master bus: what the channels played into it directly, lined up
+    // with the inserts; then the preview, which is not delayed.
+    delayInput(graph, 0, numFrames);
+    renderPreview(numFrames);
+    const int latency = graph.latency;
+    latency_.store(latency, std::memory_order_relaxed);
+    float* click[1] = {click_};
+    clickLine_.process(click, 1, numFrames, latency);
+    mixer_.release(
+        [](const MixerGraph&) { return true; }); // what an old graph shares is freed on the control thread
+
+    // The master bus and the metronome into the output.
     float* masterLeft = buses_[0];
     float* masterRight = buses_[1];
-    const float n = static_cast<float>(numFrames);
-    for (int insert = 1; insert <= kMaxInserts; ++insert) {
-        const auto index = static_cast<std::size_t>(insert);
-        // By reference: copying would copy the effect chain (allocation and
-        // reference counting on the audio thread).
-        const InsertState& settings
-            = state != nullptr && index <= state->inserts.size() ? state->inserts[index - 1] : kUnityInsert;
-        const StereoGain target = balance(settings.gain, settings.pan);
-        StereoGain& applied = insertApplied_[index];
-        // Effects run even on silence: a reverb or delay tail goes on.
-        const bool hasEffects = !settings.effects.empty();
-        if (!busUsed_[index] && !hasEffects) {
-            applied = target; // silent: nothing to ramp
-            insertSounding_[index] = false;
-            continue;
-        }
-        if (!insertSounding_[index])
-            applied = target; // was silent: start at the setting, no ramp from a stale one
-        insertSounding_[index] = true;
-        busUsed_[index] = false;
-        float* left = buses_[2 * index];
-        float* right = buses_[2 * index + 1];
-        for (const auto& effect : settings.effects)
-            if (effect != nullptr)
-                effect->process(left, right, numFrames, transport);
-        const float stepLeft = (target.left - applied.left) / n;
-        const float stepRight = (target.right - applied.right) / n;
-        float peakLeft = 0.0f;
-        float peakRight = 0.0f;
-        for (int i = 0; i < numFrames; ++i) {
-            const float k = static_cast<float>(i + 1);
-            const float l = left[i] * (applied.left + stepLeft * k);
-            const float r = right[i] * (applied.right + stepRight * k);
-            masterLeft[i] += l;
-            masterRight[i] += r;
-            peakLeft = std::max(peakLeft, std::abs(l));
-            peakRight = std::max(peakRight, std::abs(r));
-            left[i] = 0.0f;
-            right[i] = 0.0f;
-        }
-        applied = target;
-        for (std::size_t ch = 0; ch < 2; ++ch) {
-            const float peak = ch == 0 ? peakLeft : peakRight;
-            auto& slot = insertPeak_[index][ch];
-            float seen = slot.load(std::memory_order_relaxed);
-            while (peak > seen && !slot.compare_exchange_weak(seen, peak, std::memory_order_relaxed)) { }
-        }
-    }
-    mixer_.release([](const MixerState&) { return true; }); // plain values: nothing to wait for
-
-    // The master bus (direct channels plus inserts) into the output.
     for (int i = 0; i < numFrames; ++i) {
         if (numChannels >= 2) {
             out[0][i] += masterLeft[i];
@@ -406,13 +521,16 @@ void Engine::mixBuses(
         } else if (numChannels == 1) {
             out[0][i] += 0.5f * (masterLeft[i] + masterRight[i]);
         }
+        for (int ch = 0; ch < numChannels; ++ch)
+            out[ch][i] += click_[i];
         masterLeft[i] = 0.0f;
         masterRight[i] = 0.0f;
+        click_[i] = 0.0f;
     }
     busUsed_[0] = false;
 }
 
-void Engine::playSpan(float* const* out, int numChannels, int spanStart, int spanFrames) noexcept
+void Engine::playSpan(int spanStart, int spanFrames) noexcept
 {
     int cursor = 0;
 
@@ -502,7 +620,7 @@ void Engine::playSpan(float* const* out, int numChannels, int spanStart, int spa
                 break; // a later block
             const int offset = static_cast<int>(at);
 
-            renderSegment(out, numChannels, spanStart + cursor, offset - cursor);
+            renderSegment(spanStart + cursor, offset - cursor);
             cursor = offset;
             if (fireEnd)
                 sequencer_.endNotes(noteEnd);
@@ -529,7 +647,7 @@ void Engine::playSpan(float* const* out, int numChannels, int spanStart, int spa
         noteFrom_ = std::max(noteFrom_, std::min(noteStart, future));
     }
 
-    renderSegment(out, numChannels, spanStart + cursor, spanFrames - cursor);
+    renderSegment(spanStart + cursor, spanFrames - cursor);
 }
 
 void Engine::processBlock(float* const* out, int numChannels, int numFrames) noexcept
@@ -579,7 +697,7 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
             }
         }
 
-        playSpan(out, numChannels, done, span);
+        playSpan(done, span);
         transport_.advance(span);
         wasRolling_ = transport_.isPlaying();
         expectedTicks_ = transport_.positionTicks();
@@ -599,7 +717,6 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
     }
 
     sequencer_.mix(numFrames, buses_.data(), busUsed_.data(), blockTransport);
-    renderPreview(numFrames);
     mixBuses(out, numChannels, numFrames, blockTransport);
     sequencer_.endBlock();
     applyMasterGain(out, numChannels, numFrames);
