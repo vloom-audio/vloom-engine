@@ -347,7 +347,8 @@ TEST_CASE("A file that is not a plugin fails to load without stopping the app", 
     const std::filesystem::path folder
         = std::filesystem::temp_directory_path() / ("vloom_not_a_plugin_" + std::to_string(stamp));
     std::filesystem::create_directories(folder);
-    for (const char* name : {"bogus.clap", "bogus.vst3"}) {
+    // Names outside the system code page too: the messages must not throw.
+    for (const char8_t* name : {u8"bogus.clap", u8"bogus.vst3", u8"プラグイン.clap", u8"ปลั๊กอิน.vst3"}) {
         const std::filesystem::path file = folder / name;
         std::ofstream(file) << "not a plugin";
         std::string error;

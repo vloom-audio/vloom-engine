@@ -683,29 +683,29 @@ std::shared_ptr<ClapLibrary> ClapLibrary::open(const std::filesystem::path& path
     auto impl = std::make_unique<Impl>();
     impl->path = key;
     if (!std::filesystem::exists(key, ec)) {
-        fail(error, "no such file: " + key.string());
+        fail(error, "no such file: " + plugin_files::utf8(key));
         return nullptr;
     }
     if (!impl->module.load(binaryOf(key), error))
         return nullptr;
     impl->entry = static_cast<const clap_plugin_entry_t*>(impl->module.symbol("clap_entry"));
     if (impl->entry == nullptr) {
-        fail(error, key.string() + " is not a CLAP plugin (no clap_entry)");
+        fail(error, plugin_files::utf8(key) + " is not a CLAP plugin (no clap_entry)");
         return nullptr;
     }
     if (!clap_version_is_compatible(impl->entry->clap_version)) {
-        fail(error, key.string() + " needs a newer CLAP version");
+        fail(error, plugin_files::utf8(key) + " needs a newer CLAP version");
         return nullptr;
     }
-    if (!impl->entry->init(key.string().c_str())) {
-        fail(error, key.string() + " failed to initialise");
+    if (!impl->entry->init(plugin_files::utf8(key).c_str())) {
+        fail(error, plugin_files::utf8(key) + " failed to initialise");
         return nullptr;
     }
     impl->initialised = true;
     impl->factory
         = static_cast<const clap_plugin_factory_t*>(impl->entry->get_factory(CLAP_PLUGIN_FACTORY_ID));
     if (impl->factory == nullptr) {
-        fail(error, key.string() + " has no plugin factory");
+        fail(error, plugin_files::utf8(key) + " has no plugin factory");
         return nullptr;
     }
     const std::uint32_t count = impl->factory->get_plugin_count(impl->factory);
@@ -736,7 +736,7 @@ std::unique_ptr<AudioProcessor> ClapLibrary::create(std::string_view id, std::st
     const auto it = std::find_if(
         impl_->plugins.begin(), impl_->plugins.end(), [&](const PluginInfo& p) { return p.id == id; });
     if (it == impl_->plugins.end()) {
-        fail(error, "no plugin " + std::string(id) + " in " + impl_->path.string());
+        fail(error, "no plugin " + std::string(id) + " in " + plugin_files::utf8(impl_->path));
         return nullptr;
     }
     auto processor = std::make_unique<ClapProcessor>(shared_from_this(), *it);

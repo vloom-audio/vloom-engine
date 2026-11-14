@@ -1362,23 +1362,23 @@ std::shared_ptr<Vst3Library> Vst3Library::open(const std::filesystem::path& path
     auto impl = std::make_unique<Impl>();
     impl->path = key;
     if (!std::filesystem::exists(key, ec)) {
-        fail(error, "no such file: " + key.string());
+        fail(error, "no such file: " + plugin_files::utf8(key));
         return nullptr;
     }
     if (!impl->module.load(binaryOf(key), error))
         return nullptr;
     auto getFactory = functionAt<GetFactory>(impl->module.symbol("GetPluginFactory"));
     if (getFactory == nullptr) {
-        fail(error, key.string() + " is not a VST 3 plugin (no GetPluginFactory)");
+        fail(error, plugin_files::utf8(key) + " is not a VST 3 plugin (no GetPluginFactory)");
         return nullptr;
     }
     if (!impl->enter()) {
-        fail(error, key.string() + " failed to initialise");
+        fail(error, plugin_files::utf8(key) + " failed to initialise");
         return nullptr;
     }
     impl->factory = getFactory();
     if (impl->factory == nullptr) {
-        fail(error, key.string() + " has no plugin factory");
+        fail(error, plugin_files::utf8(key) + " has no plugin factory");
         return nullptr;
     }
     Steinberg::PFactoryInfo factoryInfo{};
@@ -1429,7 +1429,7 @@ std::unique_ptr<AudioProcessor> Vst3Library::create(std::string_view id, std::st
     const auto it = std::find_if(
         impl_->plugins.begin(), impl_->plugins.end(), [&](const PluginInfo& p) { return p.id == id; });
     if (it == impl_->plugins.end() || !parseId(id, wanted)) {
-        fail(error, "no plugin " + std::string(id) + " in " + impl_->path.string());
+        fail(error, "no plugin " + std::string(id) + " in " + plugin_files::utf8(impl_->path));
         return nullptr;
     }
     auto processor = std::make_unique<Vst3Processor>(shared_from_this(), *it);

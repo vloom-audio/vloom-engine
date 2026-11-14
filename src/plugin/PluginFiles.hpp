@@ -24,6 +24,10 @@ namespace vloom::plugin_files {
 /// Sets `*error` to `message` when `error` is given.
 void fail(std::string* error, std::string message);
 
+/// `path` as UTF-8, for messages and for plugins (CLAP takes its path so).
+/// path::string() throws on Windows for names outside the system code page.
+[[nodiscard]] std::string utf8(const std::filesystem::path& path);
+
 /// A loaded shared library: a .clap, or the binary inside a .vst3.
 class SharedLibrary {
 public:

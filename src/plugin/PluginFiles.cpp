@@ -18,13 +18,16 @@ void fail(std::string* error, std::string message)
         *error = std::move(message);
 }
 
+std::string utf8(const std::filesystem::path& path)
+{
+    const std::u8string text = path.u8string();
+    return {text.begin(), text.end()};
+}
+
 bool SharedLibrary::load(const std::filesystem::path& file, std::string* error)
 {
     close();
-    // The path as UTF-8: path::string() throws on Windows for names outside
-    // the system code page.
-    const std::u8string wide = file.u8string();
-    const std::string name(wide.begin(), wide.end());
+    const std::string name = utf8(file);
 #ifdef _WIN32
     // A file that is not a DLL (or one whose own DLLs are missing) makes
     // Windows show a "Bad Image" message box and wait for the user, unless
