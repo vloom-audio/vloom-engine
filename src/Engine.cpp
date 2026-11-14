@@ -417,10 +417,11 @@ void Engine::playSpan(float* const* out, int numChannels, int spanStart, int spa
     int cursor = 0;
 
     if (transport_.isPlaying() && std::isfinite(transport_.positionTicks())) {
-        // Event streams, metronome beats, sequencer steps, note starts and
-        // note ends, merged in time order. Each event fires on the first
-        // sample at or after its exact time: the block is rendered in
-        // segments split at the events. An event within kEpsilon frames of a
+        // Event streams, metronome beats, sequencer steps (pattern mode),
+        // starts (notes; in song mode also the clips' steps and the audio
+        // clips, which sit on any tick) and note ends, merged in time order.
+        // Each event fires on the first sample at or after its exact time:
+        // the block is rendered in segments split at the events. An event within kEpsilon frames of a
         // sample boundary snaps to that sample, so rounding noise never
         // shifts it. At one time, ends go first, so a note can follow the
         // same key.
@@ -451,8 +452,11 @@ void Engine::playSpan(float* const* out, int numChannels, int spanStart, int spa
             nextStep_ = ticksPerStep > 0 ? static_cast<std::int64_t>(std::floor(start / stepTicks)) : 0;
             stepTicksUsed_ = ticksPerStep;
         }
+        // From a frame back: a start less than a frame before the position
+        // still fires (on the first sample), as the steps' and beats' do.
         if (noteFresh)
-            noteFrom_ = static_cast<std::int64_t>(std::floor(start));
+            noteFrom_
+                = std::max<std::int64_t>(0, static_cast<std::int64_t>(std::floor(start - ticksPerSample)));
 
         constexpr double kNever = std::numeric_limits<double>::infinity();
         const auto tickOf = [](std::int64_t event) {
@@ -508,11 +512,11 @@ void Engine::playSpan(float* const* out, int numChannels, int spanStart, int spa
                 ++nextBeat_;
             }
             if (fireStep) {
-                sequencer_.triggerStep(nextStep_, ticksPerSample > 0.0 ? 1.0 / ticksPerSample : 0.0);
+                sequencer_.triggerStep(nextStep_);
                 ++nextStep_;
             }
             if (fireStart) {
-                sequencer_.startNotes(noteStart);
+                sequencer_.startNotes(noteStart, ticksPerSample > 0.0 ? 1.0 / ticksPerSample : 0.0);
                 noteFrom_ = noteStart + 1;
                 noteStart = sequencer_.nextNoteStart(noteFrom_);
             }

@@ -184,7 +184,8 @@ TEST_CASE("Song mode plays the notes of a pattern clip that start inside it", "[
     vloom::SongPattern pattern;
     pattern.notes.push_back({note(kStepTicks, 10), note(8 * kStepTicks, 10)});
     state->patterns.push_back(std::move(pattern));
-    state->patternClips.push_back({0, 4, 4}); // steps 4 .. 7: the second note falls outside
+    state->patternClips.push_back(
+        {0, 4 * kStepTicks, 4 * kStepTicks}); // steps 4 .. 7: the second note falls outside
     engine.setSequencerState(std::move(state));
     engine.play();
     const auto audio = render(engine, 2.5);

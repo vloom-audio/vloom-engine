@@ -97,7 +97,7 @@ TEST_CASE("Song mode plays a pattern clip where it is placed", "[song]")
     prepare(engine);
     auto state = song(constant(1000));
     state->patterns.push_back(stepPattern({1, 0, 0, 0})); // channel 0: step 0
-    state->patternClips.push_back({0, 4, 4}); // steps 4 .. 7
+    state->patternClips.push_back({0, 4 * kTicksPerStep, 4 * kTicksPerStep}); // steps 4 .. 7
     engine.setSequencerState(std::move(state));
     engine.play();
     const auto audio = render(engine, 1.5);
@@ -112,7 +112,7 @@ TEST_CASE("Song mode plays an audio clip from its step, once", "[song]")
     vloom::Engine engine;
     prepare(engine);
     auto state = song(constant(3000, 0.5f));
-    state->audioClips.push_back({0, 2});
+    state->audioClips.push_back({0, 2 * kTicksPerStep});
     engine.setSequencerState(std::move(state));
     engine.play();
     const auto audio = render(engine, 1.0);
@@ -131,7 +131,7 @@ TEST_CASE("Pattern mode ignores the playlist", "[song]")
     state->song = false;
     state->audioClips.push_back({0, 0});
     state->patterns.push_back(stepPattern({1}));
-    state->patternClips.push_back({0, 0, 16});
+    state->patternClips.push_back({0, 0, 16 * kTicksPerStep});
     engine.setSequencerState(std::move(state));
     engine.play();
     CHECK(peak(render(engine, 0.5), 0, 24000) == 0.0f);
@@ -211,9 +211,9 @@ TEST_CASE("Song mode does not allocate on the audio thread", "[song]")
     prepare(engine);
     auto state = song(constant(500));
     state->patterns.push_back(stepPattern({1, 0, 1, 0}));
-    state->patternClips.push_back({0, 0, 64});
+    state->patternClips.push_back({0, 0, 64 * kTicksPerStep});
     for (int i = 0; i < 8; ++i)
-        state->audioClips.push_back({0, i * 3});
+        state->audioClips.push_back({0, i * 3 * kTicksPerStep});
     engine.setSequencerState(std::move(state));
     engine.play();
 
@@ -240,8 +240,8 @@ TEST_CASE("A pattern clip with an offset starts that far into its pattern", "[so
     auto pattern = stepPattern({1, 0, 0, 0, 0, 1, 0, 0});
     pattern.stepCount = 8;
     state->patterns.push_back(std::move(pattern));
-    vloom::SongPatternClip clip{0, 2, 8};
-    clip.offsetSteps = 4;
+    vloom::SongPatternClip clip{0, 2 * kTicksPerStep, 8 * kTicksPerStep};
+    clip.offsetTicks = 4 * kTicksPerStep;
     state->patternClips.push_back(clip); // steps 2 .. 9
     engine.setSequencerState(std::move(state));
     engine.play();
@@ -267,8 +267,8 @@ TEST_CASE("A pattern clip's offset moves its notes too, without a repeat", "[son
     note.velocity = 1.0f;
     pattern.notes[0].push_back(note);
     state->patterns.push_back(std::move(pattern)); // stepCount 0: no repeat
-    vloom::SongPatternClip clip{0, 0, 4};
-    clip.offsetSteps = 2;
+    vloom::SongPatternClip clip{0, 0, 4 * kTicksPerStep};
+    clip.offsetTicks = 2 * kTicksPerStep;
     state->patternClips.push_back(clip);
     engine.setSequencerState(std::move(state));
     engine.play();
@@ -285,8 +285,8 @@ TEST_CASE("An audio clip with an offset plays its sample from there", "[song][cl
     vloom::Engine engine;
     prepare(engine);
     auto state = song(ramp(48000));
-    vloom::SongAudioClip clip{0, 1};
-    clip.offsetSteps = 2; // 12000 frames into the sample
+    vloom::SongAudioClip clip{0, kTicksPerStep};
+    clip.offsetTicks = 2 * kTicksPerStep; // 12000 frames into the sample
     state->audioClips.push_back(clip);
     engine.setSequencerState(std::move(state));
     engine.play();
@@ -304,7 +304,7 @@ TEST_CASE("An audio clip with a length fades out at its end", "[song][clips]")
     prepare(engine);
     auto state = song(constant(48000, 0.5f));
     vloom::SongAudioClip clip{0, 0};
-    clip.lengthSteps = 2;
+    clip.lengthTicks = 2 * kTicksPerStep;
     state->audioClips.push_back(clip);
     engine.setSequencerState(std::move(state));
     engine.play();
@@ -320,8 +320,8 @@ TEST_CASE("Playing from inside a cut audio clip keeps its offset and end", "[son
     prepare(engine);
     auto state = song(ramp(48000));
     vloom::SongAudioClip clip{0, 0};
-    clip.offsetSteps = 1; // 6000 frames in
-    clip.lengthSteps = 3;
+    clip.offsetTicks = kTicksPerStep; // 6000 frames in
+    clip.lengthTicks = 3 * kTicksPerStep;
     state->audioClips.push_back(clip);
     engine.setSequencerState(std::move(state));
     engine.locate(1.0 * kTicksPerStep); // one step into the clip
@@ -344,7 +344,7 @@ TEST_CASE("An audio clip's rate plays its sample faster, offset included", "[son
     auto state = song(ramp(96000));
     vloom::SongAudioClip clip{0, 0};
     clip.rate = 2.0; // fitted to the tempo by resampling
-    clip.offsetSteps = 1; // one step of the song: 6000 frames played, 12000 of the sample
+    clip.offsetTicks = kTicksPerStep; // one step of the song: 6000 frames played, 12000 of the sample
     state->audioClips.push_back(clip);
     engine.setSequencerState(std::move(state));
     engine.play();
@@ -399,4 +399,90 @@ TEST_CASE("A clip's own sample stays alive while it sounds, then is freed", "[so
     render(engine, 0.2);
     engine.collectGarbage();
     CHECK(watch.expired());
+}
+
+TEST_CASE("Clips sit on any tick, not only on steps", "[song][clips]")
+{
+    constexpr int kHalfStep = kTicksPerStep / 2; // a 32nd note: 3000 frames
+    constexpr std::size_t kHalfStepFrames = kStepFrames / 2;
+
+    SECTION("a pattern clip's steps start at the clip, on its own grid")
+    {
+        vloom::Engine engine;
+        prepare(engine);
+        auto state = song(constant(100));
+        state->patterns.push_back(stepPattern({1, 1, 0, 0}));
+        state->patternClips.push_back({0, 2 * kTicksPerStep + kHalfStep, 4 * kTicksPerStep});
+        engine.setSequencerState(std::move(state));
+        engine.play();
+        const auto audio = render(engine, 1.0);
+
+        CHECK(peak(audio, 0, 2 * kStepFrames + kHalfStepFrames) == 0.0f);
+        CHECK(left(audio, 2 * kStepFrames + kHalfStepFrames) == Approx(kCentre).margin(1e-4));
+        CHECK(left(audio, 3 * kStepFrames + kHalfStepFrames) == Approx(kCentre).margin(1e-4));
+        CHECK(peak(audio, 3 * kStepFrames + kHalfStepFrames + 200, audio.size() / 2) == 0.0f);
+    }
+    SECTION("a clip cut half a step in plays the pattern's next step first")
+    {
+        vloom::Engine engine;
+        prepare(engine);
+        auto state = song(constant(100));
+        state->patterns.push_back(stepPattern({1, 1, 0, 0}));
+        vloom::SongPatternClip clip{0, 0, 4 * kTicksPerStep};
+        clip.offsetTicks = kHalfStep; // step 0 is before the clip, step 1 half a step in
+        state->patternClips.push_back(clip);
+        engine.setSequencerState(std::move(state));
+        engine.play();
+        const auto audio = render(engine, 1.0);
+
+        CHECK(peak(audio, 0, kHalfStepFrames) == 0.0f);
+        CHECK(left(audio, kHalfStepFrames) == Approx(kCentre).margin(1e-4));
+        CHECK(peak(audio, kHalfStepFrames + 200, audio.size() / 2) == 0.0f);
+    }
+    SECTION("notes follow a clip placed between steps")
+    {
+        vloom::Engine engine;
+        prepare(engine);
+        auto state = song(constant(48000));
+        vloom::SongPattern pattern;
+        vloom::Note note;
+        note.start = kTicksPerStep;
+        note.length = kTicksPerStep;
+        note.velocity = 1.0f;
+        pattern.notes.push_back({note});
+        state->patterns.push_back(std::move(pattern));
+        state->patternClips.push_back({0, kHalfStep, 4 * kTicksPerStep});
+        engine.setSequencerState(std::move(state));
+        engine.play();
+        const auto audio = render(engine, 1.0);
+
+        CHECK(peak(audio, 0, kStepFrames + kHalfStepFrames) == 0.0f);
+        CHECK(left(audio, kStepFrames + kHalfStepFrames) == Approx(kCentre).margin(1e-4));
+    }
+    SECTION("an audio clip starts on its tick")
+    {
+        vloom::Engine engine;
+        prepare(engine);
+        auto state = song(constant(1000, 0.5f));
+        state->audioClips.push_back({0, kTicksPerStep + kHalfStep});
+        engine.setSequencerState(std::move(state));
+        engine.play();
+        const auto audio = render(engine, 0.5);
+
+        CHECK(peak(audio, 0, kStepFrames + kHalfStepFrames) == 0.0f);
+        CHECK(left(audio, kStepFrames + kHalfStepFrames) == Approx(0.5f * kCentre).margin(1e-4));
+    }
+    SECTION("an audio clip between steps resumes part-way after a jump")
+    {
+        vloom::Engine engine;
+        prepare(engine);
+        auto state = song(ramp(48000));
+        state->audioClips.push_back({0, kHalfStep});
+        engine.setSequencerState(std::move(state));
+        engine.locate(kTicksPerStep); // half a step (3000 frames) into the clip
+        engine.play();
+        const auto audio = render(engine, 0.2);
+
+        CHECK(left(audio, 200) / kCentre == Approx((3000.0 + 200.0) / 48000.0).margin(1e-3));
+    }
 }

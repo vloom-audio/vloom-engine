@@ -22,10 +22,10 @@ namespace {
 double clampTempo(double tempo) { return std::clamp(tempo, Transport::kMinBpm, Transport::kMaxBpm); }
 
 /// A clip whose ticks stay within StepSequencer::kMaxTicks (others never play).
-bool inRange(std::int64_t startStep, std::int64_t lengthSteps, std::int64_t ticksPerStep)
+bool inRange(std::int64_t startTick, std::int64_t lengthTicks)
 {
-    const std::int64_t maxSteps = StepSequencer::kMaxTicks / ticksPerStep;
-    return startStep >= 0 && startStep <= maxSteps && lengthSteps >= 0 && lengthSteps <= maxSteps;
+    constexpr std::int64_t kMax = StepSequencer::kMaxTicks;
+    return startTick >= 0 && startTick <= kMax && lengthTicks >= 0 && lengthTicks <= kMax;
 }
 
 } // namespace
@@ -42,22 +42,22 @@ std::int64_t songEndTicks(const SequencerState& song, double tempo)
     std::int64_t end = 0;
     for (const SongPatternClip& clip : song.patternClips) {
         if (clip.pattern < 0 || static_cast<std::size_t>(clip.pattern) >= song.patterns.size()
-            || clip.lengthSteps <= 0 || !inRange(clip.startStep, clip.lengthSteps, ticksPerStep))
+            || clip.lengthTicks <= 0 || !inRange(clip.startTick, clip.lengthTicks))
             continue;
-        end = std::max(end, (clip.startStep + clip.lengthSteps) * ticksPerStep);
+        end = std::max(end, clip.startTick + clip.lengthTicks);
     }
     // An audio clip lasts as long as its sample, whatever the tempo: in
     // ticks that is longer at a faster tempo.
     const double ticksPerSecond = clampTempo(tempo) / 60.0 * static_cast<double>(kPpq);
     for (const SongAudioClip& clip : song.audioClips) {
         if (clip.channel < 0 || static_cast<std::size_t>(clip.channel) >= song.channels.size()
-            || !inRange(clip.startStep, 0, ticksPerStep))
+            || !inRange(clip.startTick, 0))
             continue;
         const ChannelState& channel = song.channels[static_cast<std::size_t>(clip.channel)];
         const SampleBuffer* sample = StepSequencer::clipSample(clip, channel);
         if (sample == nullptr || sample->empty() || !(sample->sampleRate() > 0.0))
             continue;
-        if (clip.offsetSteps < 0 || clip.lengthSteps < 0 || !inRange(clip.offsetSteps, 0, ticksPerStep))
+        if (clip.lengthTicks < 0 || !inRange(clip.offsetTicks, 0))
             continue;
         // At its rate (fitted by resampling) the sample lasts 1/rate as long.
         const double seconds
@@ -66,16 +66,14 @@ std::int64_t songEndTicks(const SequencerState& song, double tempo)
         // than the clip when it has a length. Capped before the conversion: a
         // sample claiming a tiny rate would otherwise last longer than int64
         // ticks hold (undefined behaviour).
-        double ticks
-            = std::ceil(seconds * ticksPerSecond) - static_cast<double>(clip.offsetSteps * ticksPerStep);
-        if (clip.lengthSteps > 0)
-            ticks
-                = std::min(ticks, static_cast<double>(clip.lengthSteps) * static_cast<double>(ticksPerStep));
+        double ticks = std::ceil(seconds * ticksPerSecond) - static_cast<double>(clip.offsetTicks);
+        if (clip.lengthTicks > 0)
+            ticks = std::min(ticks, static_cast<double>(clip.lengthTicks));
         if (!(ticks > 0.0))
             continue; // starts past the sample's end: silent
         const auto length
             = static_cast<std::int64_t>(std::min(ticks, static_cast<double>(StepSequencer::kMaxTicks)));
-        end = std::max(end, clip.startStep * ticksPerStep + length);
+        end = std::max(end, clip.startTick + length);
     }
     return end;
 }
