@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -21,9 +22,13 @@ namespace vloom::builtin {
 
 inline constexpr std::array<char, 4> kStateMagic{'V', 'L', 'B', '1'};
 
-/// Wraps a vloom-dsp effect as an AudioProcessor (ADR 0008).
+/// Wraps a vloom-dsp effect or instrument as an AudioProcessor (ADR 0008).
+/// An instrument (dsp::Instrument: it has noteOn() and noteOff()) is listed
+/// as one and is given the block's notes; an effect ignores them.
 ///
-/// - Parameter changes are applied at their frame: the block is split there.
+/// - Parameter changes and notes are applied at their frame: the block is
+///   split there (a change before a note at the same frame, so the note
+///   starts with it).
 /// - The latest value of each parameter is kept in an atomic, so saveState()
 ///   on the control thread sees what the audio thread applied.
 /// - loadState() hands the values to the audio thread for its next block.
@@ -39,7 +44,8 @@ public:
     [[nodiscard]] PluginInfo info() const override
     {
         const dsp::ProcessorSpec spec = Effect::spec();
-        return PluginInfo{spec.id, spec.name, "Vloom Audio", spec.version, PluginInfo::Kind::Effect};
+        return PluginInfo{spec.id, spec.name, "Vloom Audio", spec.version,
+            kInstrument ? PluginInfo::Kind::Instrument : PluginInfo::Kind::Effect};
     }
 
     [[nodiscard]] std::vector<ParameterInfo> parameters() const override
@@ -113,17 +119,32 @@ public:
             applyValues();
         const int numChannels = std::clamp(context.numChannels, 0, kMaxChannels);
         const int numFrames = std::max(context.numFrames, 0);
+        const std::span<const ParameterEvent> changes = context.parameters;
+        const std::span<const NoteEvent> notes = kInstrument ? context.notes : std::span<const NoteEvent>();
         int position = 0;
-        for (const ParameterEvent& event : context.parameters) {
-            const int index = indexOf(event.id);
-            if (index < 0 || !std::isfinite(event.value))
-                continue;
-            const int frame = std::clamp(event.frame, position, numFrames);
+        std::size_t change = 0;
+        std::size_t note = 0;
+        // Both lists are in frame order: take whichever comes first.
+        while (change < changes.size() || note < notes.size()) {
+            constexpr int kNever = std::numeric_limits<int>::max();
+            const int changeFrame
+                = change < changes.size() ? std::clamp(changes[change].frame, position, numFrames) : kNever;
+            const int noteFrame
+                = note < notes.size() ? std::clamp(notes[note].frame, position, numFrames) : kNever;
+            const int frame = std::min(changeFrame, noteFrame);
             run(context.channels, numChannels, position, frame - position);
             position = frame;
-            const double value = clampTo(specs()[static_cast<std::size_t>(index)], event.value);
-            values_[static_cast<std::size_t>(index)].store(value, std::memory_order_relaxed);
-            effect_.setParameter(event.id, value);
+            if (changeFrame <= noteFrame) {
+                const ParameterEvent& event = changes[change++];
+                const int index = indexOf(event.id);
+                if (index < 0 || !std::isfinite(event.value))
+                    continue;
+                const double value = clampTo(specs()[static_cast<std::size_t>(index)], event.value);
+                values_[static_cast<std::size_t>(index)].store(value, std::memory_order_relaxed);
+                effect_.setParameter(event.id, value);
+            } else {
+                play(notes[note++]);
+            }
         }
         run(context.channels, numChannels, position, numFrames - position);
     }
@@ -162,6 +183,20 @@ public:
 
 private:
     static constexpr int kMaxChannels = 8;
+    static constexpr bool kInstrument = dsp::Instrument<Effect>;
+
+    /// Starts or ends a note of an instrument.
+    void play(const NoteEvent& note) noexcept
+    {
+        if constexpr (dsp::Instrument<Effect>) {
+            if (note.type == NoteEvent::Type::On)
+                effect_.noteOn(note.key, note.velocity);
+            else
+                effect_.noteOff(note.key);
+        } else {
+            (void)note;
+        }
+    }
 
     [[nodiscard]] static std::span<const dsp::ParameterSpec> specs() noexcept { return Effect::parameters(); }
 

@@ -3,7 +3,9 @@
 #include "vloom/engine/sequencer/StepSequencer.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
+#include <cstdint>
 
 namespace vloom {
 
@@ -98,6 +100,25 @@ std::int64_t framesInto(double ticks, double framesPerTick) noexcept
     return frames > 0.0 ? static_cast<std::int64_t>(std::min(frames, 9.0e18)) : 0;
 }
 
+std::uint64_t mixed(std::uint64_t hash, std::uint64_t value) noexcept
+{
+    hash ^= value + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
+    return hash * 0xff51afd7ed558ccdULL;
+}
+
+/// Tells an audio clip from one placed, cut or fitted differently. Never 0,
+/// so a channel with a clip differs from one without.
+std::uint64_t clipKey(const SongAudioClip& clip) noexcept
+{
+    std::uint64_t hash = 0x2545f4914f6cdd1dULL;
+    hash = mixed(hash, static_cast<std::uint64_t>(clip.startTick));
+    hash = mixed(hash, static_cast<std::uint64_t>(clip.offsetTicks));
+    hash = mixed(hash, static_cast<std::uint64_t>(clip.lengthTicks));
+    hash = mixed(hash, static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(clip.sample.get())));
+    hash = mixed(hash, std::bit_cast<std::uint64_t>(clip.rate));
+    return hash | 1U;
+}
+
 } // namespace
 
 void StepSequencer::publish(std::unique_ptr<SequencerState> state)
@@ -110,6 +131,12 @@ void StepSequencer::publish(std::unique_ptr<SequencerState> state)
         for (SongPattern& pattern : state->patterns)
             for (std::vector<Note>& row : pattern.notes)
                 sortNotes(row);
+        // The sum of its clips' hashes: the same clips in another order
+        // (a clip removed before them) give the same key.
+        state->audioClipKeys.assign(state->channels.size(), 0);
+        for (const SongAudioClip& clip : state->audioClips)
+            if (clip.channel >= 0 && static_cast<std::size_t>(clip.channel) < state->channels.size())
+                state->audioClipKeys[static_cast<std::size_t>(clip.channel)] += clipKey(clip);
     }
     exchange_.publish(std::unique_ptr<const SequencerState>(std::move(state)));
 }
@@ -320,12 +347,15 @@ void StepSequencer::activatePlugins(double sampleRate, int maxBlockFrames)
 
 void StepSequencer::beginBlock() noexcept
 {
+    const SequencerState* before = current_;
     current_ = exchange_.acquire();
+    replaced_ = current_ != before ? before : nullptr;
     eventFrame_ = 0;
 }
 
 void StepSequencer::endBlock() noexcept
 {
+    replaced_ = nullptr; // release() may hand it back
     exchange_.release([this](const SequencerState& old) { return canRelease(old); });
 }
 
@@ -371,6 +401,7 @@ double StepSequencer::clipRate(const SongAudioClip& clip) noexcept
 
 void StepSequencer::resumeAt(double ticks, double framesPerTick) noexcept
 {
+    replaced_ = nullptr; // every clip starts afresh here: nothing left to resync
     if (current_ == nullptr)
         return;
     for (const ChannelState& channel : current_->channels)
@@ -393,14 +424,51 @@ void StepSequencer::resumeAt(double ticks, double framesPerTick) noexcept
         constexpr double kEpsilon = 1e-6; // as in Engine::processBlock
         if ((ticks - start) * framesPerTick < 1.0 - kEpsilon)
             continue;
-        const std::int64_t end = audioClipEnd(clip);
-        if (end != kNoEvent && ticks >= static_cast<double>(end))
-            continue; // the clip is over
-        const auto offsetTicks = static_cast<double>(clip.offsetTicks);
-        const double rate = clipRate(clip);
-        channel->voices->sampler.play(clipSample(clip, *channel),
-            audioClipOptions(framesInto(offsetTicks + ticks - start, framesPerTick * rate), end,
-                rate)); // ignored past the end
+        playClipFrom(clip, *channel, ticks, framesPerTick);
+    }
+}
+
+void StepSequencer::playClipFrom(
+    const SongAudioClip& clip, const ChannelState& channel, double ticks, double framesPerTick) const noexcept
+{
+    const std::int64_t end = audioClipEnd(clip);
+    if (end != kNoEvent && ticks >= static_cast<double>(end))
+        return; // the clip is over
+    const double into = std::max(ticks - static_cast<double>(clip.startTick), 0.0);
+    const double rate = clipRate(clip);
+    channel.voices->sampler.play(clipSample(clip, channel),
+        audioClipOptions(framesInto(static_cast<double>(clip.offsetTicks) + into, framesPerTick * rate), end,
+            rate)); // ignored past the sample's end
+}
+
+void StepSequencer::resyncAudioClips(double ticks, std::int64_t from, double framesPerTick) noexcept
+{
+    const SequencerState* old = replaced_;
+    replaced_ = nullptr;
+    if (old == nullptr || current_ == nullptr || !current_->song || !(framesPerTick > 0.0))
+        return;
+    const auto keyOf = [](const SequencerState& state, std::size_t channel) {
+        return channel < state.audioClipKeys.size() ? state.audioClipKeys[channel] : std::uint64_t{0};
+    };
+    // A channel's clips differ when their key does, or when the channel at
+    // this place is another one (channels were added or removed), or when
+    // the old state was not a song (nothing of its clips was playing).
+    const auto differs = [&](std::size_t c) {
+        if (!old->song || c >= old->channels.size()
+            || old->channels[c].voices != current_->channels[c].voices)
+            return keyOf(*current_, c) != 0;
+        return keyOf(*old, c) != keyOf(*current_, c);
+    };
+    for (std::size_t c = 0; c < current_->channels.size(); ++c)
+        if (differs(c) && current_->channels[c].voices != nullptr)
+            current_->channels[c].voices->sampler.stopAll();
+    for (const SongAudioClip& clip : current_->audioClips) {
+        const ChannelState* channel = clipChannel(clip);
+        if (channel == nullptr || !differs(static_cast<std::size_t>(clip.channel)))
+            continue;
+        if (clip.startTick >= from)
+            continue; // still ahead: startNotes() starts it
+        playClipFrom(clip, *channel, ticks, framesPerTick);
     }
 }
 

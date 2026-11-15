@@ -296,3 +296,108 @@ TEST_CASE("No built-in allocates on the audio thread", "[plugin][builtin]")
             REQUIRE(std::isfinite(sample));
     }
 }
+
+TEST_CASE("Notes played by hand reach an instrument with its next block", "[plugin][builtin]")
+{
+    vloom::PluginInstance synth(vloom::createBuiltinProcessor("vloom.synth"));
+    REQUIRE(synth.activate(kRate, 512));
+    std::vector<float> left(512, 0.0f);
+    std::vector<float> right(512, 0.0f);
+    const auto block = [&] {
+        std::fill(left.begin(), left.end(), 0.0f);
+        std::fill(right.begin(), right.end(), 0.0f);
+        const vloom::test::AllocationCounter counter;
+        synth.process(left.data(), right.data(), 512, vloom::TransportInfo{});
+        CHECK(counter.count() == 0);
+        float most = 0.0f;
+        for (float sample : left)
+            most = std::max(most, std::abs(sample));
+        return most;
+    };
+    CHECK(block() == 0.0f);
+    REQUIRE(synth.playNote(60, 0.9f));
+    CHECK(block() > 0.01f);
+    CHECK(block() > 0.01f); // it holds
+    REQUIRE(synth.stopNote(60));
+    float tail = 1.0f;
+    for (int i = 0; i < 200; ++i)
+        tail = block();
+    CHECK(tail == 0.0f);
+
+    // Bypassed: played notes are dropped, not kept for when it is back.
+    synth.setBypassed(true);
+    REQUIRE(synth.playNote(64, 1.0f));
+    (void)block();
+    synth.setBypassed(false);
+    CHECK(block() == 0.0f);
+
+    // More than the queue holds are refused, and none of it breaks.
+    std::size_t taken = 0;
+    for (int i = 0; i < 200; ++i)
+        taken += synth.playNote(i % 128, 1.0f) ? 1 : 0;
+    CHECK(taken == vloom::PluginInstance::kMaxLiveNotes);
+    CHECK_FALSE(synth.playNote(60, std::numeric_limits<float>::quiet_NaN()));
+    CHECK(block() > 0.0f);
+}
+
+TEST_CASE("The built-in synth is an instrument that plays notes at their frames", "[plugin][builtin]")
+{
+    auto synth = vloom::createBuiltinProcessor("vloom.synth");
+    REQUIRE(synth != nullptr);
+    CHECK(synth->info().kind == vloom::PluginInfo::Kind::Instrument);
+    CHECK(synth->info().name == "Synth");
+    CHECK_FALSE(synth->parameters().empty());
+    REQUIRE(synth->activate(kRate, 512));
+
+    std::vector<float> left(512, 0.0f);
+    std::vector<float> right(512, 0.0f);
+    std::array<float*, 2> channels{left.data(), right.data()};
+    vloom::ProcessContext context;
+    context.channels = channels.data();
+    context.numChannels = 2;
+    context.numFrames = 512;
+    const auto loudest = [&left](std::size_t from, std::size_t to) {
+        float most = 0.0f;
+        for (std::size_t i = from; i < to; ++i)
+            most = std::max(most, std::abs(left[i]));
+        return most;
+    };
+
+    synth->process(context);
+    CHECK(loudest(0, 512) == 0.0f); // no notes: silence
+
+    // A note that starts at frame 200: nothing before it, sound after.
+    const std::array<vloom::NoteEvent, 1> on{vloom::NoteEvent{200, vloom::NoteEvent::Type::On, 60, 1.0f}};
+    context.notes = on;
+    long long allocations = 0;
+    {
+        const vloom::test::AllocationCounter counter;
+        synth->process(context);
+        allocations += counter.count();
+    }
+    CHECK(loudest(0, 200) == 0.0f);
+    CHECK(loudest(200, 512) > 0.01f);
+
+    // Let go at frame 100: it rings out, then it is silent again.
+    const std::array<vloom::NoteEvent, 1> off{vloom::NoteEvent{100, vloom::NoteEvent::Type::Off, 60, 0.0f}};
+    context.notes = off;
+    float tail = 1.0f;
+    for (int block = 0; block < 200; ++block) {
+        std::fill(left.begin(), left.end(), 0.0f);
+        std::fill(right.begin(), right.end(), 0.0f);
+        const vloom::test::AllocationCounter counter;
+        synth->process(context);
+        allocations += counter.count();
+        context.notes = {};
+        tail = loudest(0, 512);
+    }
+    CHECK(tail == 0.0f);
+    CHECK(allocations == 0);
+
+    // An effect is given no notes: the gain ignores them.
+    auto gain = activeGain();
+    context.notes = on;
+    std::fill(left.begin(), left.end(), 0.5f);
+    gain->process(context);
+    CHECK(left[300] == 0.5f);
+}

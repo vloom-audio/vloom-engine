@@ -595,6 +595,10 @@ void Engine::playSpan(int spanStart, int spanFrames) noexcept
         const bool beatFresh = jumped;
         const bool stepFresh = jumped || ticksPerStep != stepTicksUsed_;
         const bool noteFresh = jumped;
+        // Audio clips edited while the song plays: the ones under way are
+        // moved to where they are now (noteFrom_ is still last block's).
+        if (!jumped && ticksPerSample > 0.0)
+            sequencer_.resyncAudioClips(start, noteFrom_, 1.0 / ticksPerSample);
         if (beatFresh)
             nextBeat_ = static_cast<std::int64_t>(std::floor(start / kPpq));
         if (stepFresh) {

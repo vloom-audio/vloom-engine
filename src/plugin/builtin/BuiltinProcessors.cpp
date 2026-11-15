@@ -6,6 +6,7 @@
 
 #include <vloom/dsp/effects/Eq.hpp>
 #include <vloom/dsp/effects/Gain.hpp>
+#include <vloom/dsp/instruments/Synth.hpp>
 
 #include <array>
 
@@ -30,6 +31,7 @@ template <dsp::Effect Effect> constexpr Entry entry()
 constexpr std::array kBuiltins{
     entry<dsp::Eq>(),
     entry<dsp::Gain>(),
+    entry<dsp::Synth>(),
 };
 
 } // namespace

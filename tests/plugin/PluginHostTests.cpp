@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <span>
 #include <thread>
 #include <vector>
 
@@ -209,6 +210,48 @@ TEST_CASE("An inactive, refused or bypassed processor passes audio through", "[p
     CHECK(log.lastParameter == 0.5); // delivered once it processes again
 }
 
+TEST_CASE("The scope keeps the newest output while it is on", "[plugin]")
+{
+    ProbeProcessor::Log log;
+    vloom::PluginInstance probe(std::make_unique<ProbeProcessor>(log, 0.25f));
+    REQUIRE(probe.activate(kRate, 256));
+    std::array<float, 64> seen{};
+    (void)runOnes(probe, 16);
+    CHECK_FALSE(probe.isScopeEnabled());
+    CHECK(probe.readScope(seen) == 0); // off: nothing is kept
+
+    probe.setScopeEnabled(true);
+    CHECK(probe.readScope(seen) == 0); // nothing put out since
+    (void)runOnes(probe, 16);
+    REQUIRE(probe.readScope(seen) == 16);
+    CHECK(seen[0] == Approx(1.25f));
+    CHECK(seen[15] == Approx(1.25f));
+
+    // Bypassed, it shows the dry sound; a shorter read gets the newest frames.
+    probe.setBypassed(true);
+    (void)runOnes(probe, 8);
+    REQUIRE(probe.readScope(std::span<float>(seen).first(12)) == 12);
+    CHECK(seen[0] == Approx(1.25f)); // the last 4 processed frames
+    CHECK(seen[3] == Approx(1.25f));
+    CHECK(seen[4] == 1.0f); // then the 8 dry ones
+    CHECK(seen[11] == 1.0f);
+    probe.setBypassed(false);
+
+    // It remembers kScopeFrames; older output is gone.
+    for (int block = 0; block < 40; ++block)
+        (void)runOnes(probe, 256);
+    std::vector<float> all(vloom::PluginInstance::kScopeFrames + 100, -1.0f);
+    REQUIRE(probe.readScope(all) == vloom::PluginInstance::kScopeFrames);
+    CHECK(all.front() == Approx(1.25f));
+    CHECK(all[vloom::PluginInstance::kScopeFrames - 1] == Approx(1.25f));
+    CHECK(all[vloom::PluginInstance::kScopeFrames] == -1.0f); // untouched past what it returned
+
+    probe.setScopeEnabled(false);
+    CHECK(probe.readScope(seen) == 0);
+    probe.setScopeEnabled(true); // starts empty again
+    CHECK(probe.readScope(seen) == 0);
+}
+
 TEST_CASE("Parameter changes for an inactive processor are kept, and the queue never fills", "[plugin]")
 {
     ProbeProcessor::Log log;
@@ -311,6 +354,7 @@ TEST_CASE("Effects do not allocate on the audio thread", "[plugin]")
     prepare(engine);
     engine.setSequencerState(rackInto(1));
     auto gain = instance(makeGain());
+    gain->setScopeEnabled(true); // allocates here, on the control thread
     engine.setMixerState(withEffects(1, {gain, nullptr, instance(makeGain())}));
     engine.play();
     std::vector<float> l(256), r(256);

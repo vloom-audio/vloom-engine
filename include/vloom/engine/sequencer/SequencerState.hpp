@@ -190,6 +190,11 @@ struct SequencerState {
     std::vector<SongPattern> patterns; ///< song mode
     std::vector<SongPatternClip> patternClips; ///< song mode
     std::vector<SongAudioClip> audioClips; ///< song mode
+
+    /// Set by the engine when the state is published; leave it empty. One
+    /// value per channel that tells its audio clips apart from another
+    /// state's, so the audio thread sees which channels' clips were edited.
+    std::vector<std::uint64_t> audioClipKeys;
 };
 
 } // namespace vloom

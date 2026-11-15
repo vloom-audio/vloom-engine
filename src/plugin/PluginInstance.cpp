@@ -77,6 +77,8 @@ void PluginInstance::process(float* left, float* right, int numFrames, const Tra
     if (!active_.load(std::memory_order_acquire) || numFrames <= 0)
         return;
     if (bypassed_.load(std::memory_order_relaxed)) {
+        NoteEvent dropped; // notes played by hand meanwhile: not kept for later
+        while (liveNotes_.pop(dropped)) { }
         // Notes ending while bypassed never reach the processor, and the
         // host forgets them: end everything it holds as bypass starts, so
         // nothing hangs once it processes again.
@@ -89,6 +91,7 @@ void PluginInstance::process(float* left, float* right, int numFrames, const Tra
         float* dry[2] = {left, right};
         bypassLine_.process(
             dry, 2, numFrames, std::min(latency_.load(std::memory_order_relaxed), bypassLine_.maxDelay()));
+        capture(left, right, numFrames);
         return;
     }
     bypassedLast_ = false;
@@ -101,13 +104,22 @@ void PluginInstance::process(float* left, float* right, int numFrames, const Tra
         const bool last = offset + frames >= numFrames;
         // This chunk's notes, at frames relative to it (out of range: clamped).
         std::size_t count = 0;
+        if (offset == 0) {
+            // Notes played by hand since the last block: at its first frame.
+            NoteEvent live;
+            while (count < kMaxNotes && liveNotes_.pop(live)) {
+                live.frame = 0;
+                chunkNotes_[count++] = live;
+            }
+        }
         while (nextNote < notes.size()) {
             const int frame = std::clamp(notes[nextNote].frame, 0, numFrames - 1);
             if (frame >= offset + frames && !last)
                 break;
             NoteEvent note = notes[nextNote++];
             note.frame = std::clamp(frame - offset, 0, frames - 1);
-            chunkNotes_[count++] = note;
+            if (count < kMaxNotes) // more than fit with the ones played by hand: dropped
+                chunkNotes_[count++] = note;
         }
         channels[0] = left + offset;
         channels[1] = right + offset;
@@ -122,6 +134,59 @@ void PluginInstance::process(float* left, float* right, int numFrames, const Tra
         processor_->process(context);
     }
     pendingCount_ = 0;
+    capture(left, right, numFrames);
+}
+
+bool PluginInstance::playNote(int key, float velocity)
+{
+    if (!std::isfinite(velocity))
+        return false;
+    return liveNotes_.push(NoteEvent{0, NoteEvent::Type::On,
+        static_cast<std::int16_t>(std::clamp(key, 0, 127)), std::clamp(velocity, 0.0f, 1.0f)});
+}
+
+bool PluginInstance::stopNote(int key)
+{
+    return liveNotes_.push(
+        NoteEvent{0, NoteEvent::Type::Off, static_cast<std::int16_t>(std::clamp(key, 0, 127)), 0.0f});
+}
+
+void PluginInstance::setScopeEnabled(bool enabled)
+{
+    if (enabled == scopeOn_.load(std::memory_order_relaxed))
+        return;
+    if (enabled) {
+        if (scope_ == nullptr)
+            scope_ = std::make_unique<std::atomic<float>[]>(kScopeFrames); // zeroed
+        // Start empty: what an earlier run left is not this one's sound. (A
+        // block still being written from that run may undo this; the scope
+        // then shows a moment of the older sound, nothing worse.)
+        scopeWritten_.store(0, std::memory_order_relaxed);
+    }
+    scopeOn_.store(enabled, std::memory_order_release); // after scope_, for the audio thread
+}
+
+void PluginInstance::capture(const float* left, const float* right, int numFrames) noexcept
+{
+    if (!scopeOn_.load(std::memory_order_acquire))
+        return;
+    std::uint64_t written = scopeWritten_.load(std::memory_order_relaxed);
+    for (int i = 0; i < numFrames; ++i, ++written)
+        scope_[written % kScopeFrames].store(0.5f * (left[i] + right[i]), std::memory_order_relaxed);
+    scopeWritten_.store(written, std::memory_order_release);
+}
+
+std::size_t PluginInstance::readScope(std::span<float> out) const noexcept
+{
+    if (!scopeOn_.load(std::memory_order_acquire))
+        return 0;
+    const std::uint64_t written = scopeWritten_.load(std::memory_order_acquire);
+    const std::size_t count
+        = static_cast<std::size_t>(std::min<std::uint64_t>({written, out.size(), kScopeFrames}));
+    const std::uint64_t first = written - count;
+    for (std::size_t i = 0; i < count; ++i)
+        out[i] = scope_[(first + i) % kScopeFrames].load(std::memory_order_relaxed);
+    return count;
 }
 
 void PluginInstance::reset() noexcept
