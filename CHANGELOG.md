@@ -7,11 +7,19 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Built-in instrument `vloom.synth`: a wavetable synthesizer from vloom-dsp
+  (two wavetable oscillators with unison, sub, noise, a filter, three
+  envelopes, four LFOs). Built-in instruments get the block's notes at their frames.
 - Built-in effect `vloom.eq`: a parametric equalizer from vloom-dsp (low and
   high cut, low and high shelf, two bells).
 - `AudioProcessor::parameterValue()`: the value of a parameter as last set,
   for a host that draws its own controls. The built-ins report theirs.
 - `ParameterInfo::group`: what a parameter belongs to ("Low Shelf").
+- `PluginInstance::playNote()` and `stopNote()`: notes played by hand (an
+  editor's keyboard), delivered to the plugin with its next block.
+- `PluginInstance::setScopeEnabled()` and `readScope()`: a copy of the sound
+  a hosted plugin puts out, for an editor that draws it (a spectrum behind an
+  equalizer's curve). Off by default; nothing is copied until it is on.
 
 ### Changed
 - **Breaking:** `AudioProcessor::parameterChangedByHost()` returns `bool`:
@@ -31,6 +39,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   pinned to the commit of its v3.7.1 tag.
 
 ### Fixed
+- Song mode: an audio clip moved, cut, muted, added or removed while the song
+  plays kept sounding as it was until playback was restarted. The channels
+  whose clips changed now fade out and their clips play from where they are
+  now. A clip taken out of a playing song fades at once.
 - Windows: loading a file that is not a plugin (or a plugin whose own DLLs
   are missing) showed a system "Bad Image" message box and waited for the
   user. The loader now asks Windows to return the error, so

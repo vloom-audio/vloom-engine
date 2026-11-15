@@ -96,6 +96,32 @@ public:
     /// Audio thread: forwards to AudioProcessor::reset() when active.
     void reset() noexcept;
 
+    /// Notes played by hand that can wait for the audio thread; more are refused.
+    static constexpr std::size_t kMaxLiveNotes = 63;
+    /// Plays a note that is not in the song (an editor's keyboard, a MIDI
+    /// keyboard): `key` 0 .. 127 starts at `velocity` (0 .. 1) with the next
+    /// block processed, and sounds until stopNote(). False if too many wait.
+    /// While inactive or bypassed they are dropped, like the song's notes.
+    /// Control thread (one thread at a time).
+    bool playNote(int key, float velocity);
+    bool stopNote(int key);
+
+    /// Frames the scope remembers: the most readScope() can return.
+    static constexpr std::size_t kScopeFrames = 8192;
+    /// Switches the scope on or off: while on, the instance keeps a copy of
+    /// the sound it puts out (left and right averaged; the dry sound while
+    /// bypassed) for an editor to draw, e.g. as a spectrum. Off (the
+    /// default) it costs nothing. Control thread; the first call that
+    /// switches it on allocates its memory.
+    void setScopeEnabled(bool enabled);
+    [[nodiscard]] bool isScopeEnabled() const noexcept { return scopeOn_.load(std::memory_order_relaxed); }
+    /// Copies the newest out.size() frames the instance put out into `out`,
+    /// oldest first, and returns how many: fewer than asked when it has not
+    /// put out that many since the scope was switched on, 0 while it is off.
+    /// For drawing only: frames written while this reads may be from either
+    /// side of the write. Any thread but the audio thread.
+    std::size_t readScope(std::span<float> out) const noexcept;
+
 private:
     std::unique_ptr<AudioProcessor> processor_;
     std::atomic<bool> active_{false};
@@ -110,6 +136,16 @@ private:
     bool bypassedLast_ = false; ///< audio thread: the last block was bypassed
     /// Audio thread: the notes of one chunk, their frames made chunk-relative.
     std::array<NoteEvent, kMaxNotes> chunkNotes_{};
+
+    SpscQueue<NoteEvent, kMaxLiveNotes + 1> liveNotes_; ///< played by hand, for the next block
+
+    /// Audio thread: adds `numFrames` of output to the scope when it is on.
+    void capture(const float* left, const float* right, int numFrames) noexcept;
+    /// The scope's ring of kScopeFrames samples; allocated when first switched
+    /// on and kept. Atomic samples: the reader may race the writer.
+    std::unique_ptr<std::atomic<float>[]> scope_;
+    std::atomic<bool> scopeOn_{false};
+    std::atomic<std::uint64_t> scopeWritten_{0}; ///< frames written since it was switched on
 };
 
 } // namespace vloom
