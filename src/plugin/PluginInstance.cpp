@@ -48,10 +48,13 @@ void PluginInstance::deactivate()
 
 bool PluginInstance::setParameter(std::uint32_t id, double value)
 {
-    if (!std::isfinite(value) || !parameters_.push(ParameterEvent{0, id, value}))
+    if (!std::isfinite(value))
         return false;
-    processor_->parameterChangedByHost(id, value); // an open editor follows
-    return true;
+    // An open editor follows. A processor that takes the value itself (the
+    // built-ins) needs no queue: it has it even while no audio runs.
+    if (processor_->parameterChangedByHost(id, value))
+        return true;
+    return parameters_.push(ParameterEvent{0, id, value});
 }
 
 void PluginInstance::process(float* left, float* right, int numFrames, const TransportInfo& transport,

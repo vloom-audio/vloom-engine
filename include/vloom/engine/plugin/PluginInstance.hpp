@@ -46,7 +46,8 @@ public:
     [[nodiscard]] bool isActive() const noexcept { return active_.load(std::memory_order_acquire); }
 
     /// Sets parameter `id` to `value` at the start of the next block. False
-    /// if the queue is full (try again later).
+    /// if the queue is full (try again later). The built-ins take the value
+    /// at once and never refuse (AudioProcessor::parameterChangedByHost()).
     bool setParameter(std::uint32_t id, double value);
     /// A bypassed instance passes audio through, unprocessed. As bypass
     /// starts, the processor is reset (held notes end, tails stop): the

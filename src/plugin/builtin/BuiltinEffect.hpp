@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -46,8 +47,8 @@ public:
         std::vector<ParameterInfo> list;
         list.reserve(specs().size());
         for (const dsp::ParameterSpec& p : specs())
-            list.push_back(
-                ParameterInfo{p.id, p.name, p.unit, p.minValue, p.maxValue, p.defaultValue, p.stepped});
+            list.push_back(ParameterInfo{
+                p.id, p.name, p.unit, p.minValue, p.maxValue, p.defaultValue, p.stepped, p.group});
         return list;
     }
 
@@ -129,6 +130,29 @@ public:
 
     void reset() noexcept override { effect_.reset(); }
 
+    [[nodiscard]] std::optional<double> parameterValue(std::uint32_t id) const override
+    {
+        const int index = indexOf(id);
+        if (index < 0)
+            return std::nullopt;
+        return values_[static_cast<std::size_t>(index)].load(std::memory_order_relaxed);
+    }
+
+    /// Takes the value at once, so saveState() and parameterValue() have it
+    /// while the audio thread is stopped; the audio thread applies it with
+    /// its next block. True: the host does not queue it as an event, where
+    /// an older change could arrive after a newer one taken here.
+    bool parameterChangedByHost(std::uint32_t id, double value) override
+    {
+        const int index = indexOf(id);
+        if (index >= 0 && std::isfinite(value)) {
+            values_[static_cast<std::size_t>(index)].store(
+                clampTo(specs()[static_cast<std::size_t>(index)], value), std::memory_order_relaxed);
+            pending_.store(true, std::memory_order_release);
+        }
+        return true; // unknown ids and NaN are dropped here too
+    }
+
     /// The value of parameter `id` (any thread); its default if unknown.
     [[nodiscard]] double value(std::uint32_t id) const noexcept
     {
@@ -188,7 +212,7 @@ private:
 
     Effect effect_; ///< audio thread, once active
     std::unique_ptr<std::atomic<double>[]> values_; ///< per parameter, in specs() order
-    std::atomic<bool> pending_{false}; ///< loadState() values wait for the audio thread
+    std::atomic<bool> pending_{false}; ///< values set off the audio thread wait for it
     int latency_ = 0; ///< read at activation
 };
 

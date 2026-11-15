@@ -1122,10 +1122,11 @@ public:
         return editorSize();
     }
 
-    void parameterChangedByHost(std::uint32_t id, double value) override
+    bool parameterChangedByHost(std::uint32_t id, double value) override
     {
         if (controller_ != nullptr && std::isfinite(value))
             controller_->setParamNormalized(id, std::clamp(value, 0.0, 1.0));
+        return false; // the processor still gets it as an event
     }
 
 private:
