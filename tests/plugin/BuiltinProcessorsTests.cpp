@@ -248,3 +248,51 @@ TEST_CASE("A built-in reports its values, also those set while no audio runs", "
     }
     CHECK(left.back() == Catch::Approx(kMinus6Db).margin(1e-5));
 }
+
+TEST_CASE("No built-in allocates on the audio thread", "[plugin][builtin]")
+{
+    for (const vloom::PluginInfo& info : vloom::builtinProcessors()) {
+        INFO(info.id);
+        auto processor = vloom::createBuiltinProcessor(info.id);
+        REQUIRE(processor != nullptr);
+        REQUIRE(processor->activate(kRate, 1024));
+        const std::vector<vloom::ParameterInfo> parameters = processor->parameters();
+        const std::vector<std::uint8_t> defaults = processor->saveState();
+
+        // Every parameter moves to an end of its range at some frame.
+        std::vector<vloom::ParameterEvent> up;
+        std::vector<vloom::ParameterEvent> down;
+        for (std::size_t i = 0; i < parameters.size(); ++i) {
+            const int frame = static_cast<int>(i * 30);
+            up.push_back({frame, parameters[i].id, parameters[i].maxValue});
+            down.push_back({frame, parameters[i].id, parameters[i].minValue});
+        }
+        std::vector<float> left(512, 0.25f);
+        std::vector<float> right(512, -0.25f);
+        std::array<float*, 2> channels{left.data(), right.data()};
+        vloom::ProcessContext context;
+        context.channels = channels.data();
+        context.numChannels = 2;
+        context.numFrames = 512;
+
+        long long allocations = 0;
+        for (int block = 0; block < 60; ++block) {
+            if (block % 10 == 5) { // control thread: outside the count
+                REQUIRE(processor->loadState(defaults));
+                if (!parameters.empty())
+                    (void)processor->parameterChangedByHost(parameters[0].id, parameters[0].maxValue);
+            }
+            context.parameters = block % 3 == 0 ? std::span<const vloom::ParameterEvent>(up)
+                : block % 3 == 1                ? std::span<const vloom::ParameterEvent>(down)
+                                                : std::span<const vloom::ParameterEvent>();
+            const vloom::test::AllocationCounter counter;
+            processor->process(context); // block splits, values taken from the host, glides
+            if (block % 20 == 19)
+                processor->reset();
+            allocations += counter.count();
+        }
+        CHECK(allocations == 0);
+        for (const float sample : left)
+            REQUIRE(std::isfinite(sample));
+    }
+}
