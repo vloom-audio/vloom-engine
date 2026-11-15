@@ -21,8 +21,8 @@ namespace vloom {
 class StepSequencer {
 public:
     // ---- control thread
-    /// Sorts the notes by start (the audio thread searches them), then hands
-    /// the state over.
+    /// Sorts the notes by start (the audio thread searches them), fills in
+    /// SequencerState::audioClipKeys, then hands the state over.
     void publish(std::unique_ptr<SequencerState> state);
     std::size_t collect() { return exchange_.collect(); }
     /// Silences every voice of the current and draining states at once.
@@ -54,6 +54,15 @@ public:
     /// later, are left to startNotes(). The channels of the audio clips fade out what they
     /// were playing first.
     void resumeAt(double ticks, double framesPerTick) noexcept;
+    /// Playback runs on at `ticks` and the state picked up in this block has
+    /// other audio clips than the one before (song mode; a clip was moved,
+    /// cut, muted, added or removed while playing): the channels whose clips
+    /// differ fade out what their samplers were playing, and their clips
+    /// already under way start part-way through, as in resumeAt(). Clips
+    /// starting at `from` or later are left to startNotes() (`from`: where
+    /// the scheduler looks for the next start). Does nothing otherwise, and
+    /// only once per block.
+    void resyncAudioClips(double ticks, std::int64_t from, double framesPerTick) noexcept;
 
     /// The sample an audio clip plays (its own, else its channel's); null: none.
     [[nodiscard]] static const SampleBuffer* clipSample(
@@ -106,6 +115,10 @@ private:
 
     SnapshotExchange<SequencerState> exchange_;
     const SequencerState* current_ = nullptr; ///< audio thread
+    /// Audio thread: the state this block replaced (it is draining, so alive
+    /// until endBlock()); null when the block picked up none, or once
+    /// resumeAt() or resyncAudioClips() has dealt with the change.
+    const SequencerState* replaced_ = nullptr;
     std::uint64_t pass_ = 0; ///< audio thread: render() calls so far
     std::uint64_t block_ = 0; ///< audio thread: mix() calls so far
     double pitch_ = 1.0; ///< audio thread
@@ -120,6 +133,10 @@ private:
     [[nodiscard]] std::int64_t audioClipEnd(const SongAudioClip& clip) const noexcept;
     /// Starts `note` on `channel`, ending at `end` ticks.
     void playNote(const ChannelState& channel, const Note& note, std::int64_t end) const noexcept;
+    /// Starts `clip`, already under way at `ticks`, part-way through on
+    /// `channel`; nothing when it is over by then.
+    void playClipFrom(const SongAudioClip& clip, const ChannelState& channel, double ticks,
+        double framesPerTick) const noexcept;
     /// The audio clip's channel, if it can sound.
     [[nodiscard]] const ChannelState* clipChannel(const SongAudioClip& clip) const noexcept;
 };

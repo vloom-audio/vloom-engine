@@ -168,6 +168,101 @@ TEST_CASE("Locating while playing restarts the clips at the new place", "[song]"
     CHECK(left(audio, 500) / kCentre == Approx((48000.0 + 500.0) / 96000.0).margin(1e-3));
 }
 
+namespace {
+
+/// song() again for the same channel (its voices), with one audio clip:
+/// what an edit of the playlist publishes.
+std::unique_ptr<vloom::SequencerState> edited(const vloom::SequencerState& from, vloom::SongAudioClip clip)
+{
+    auto state = std::make_unique<vloom::SequencerState>();
+    state->song = true;
+    state->channels = from.channels;
+    state->audioClips.push_back(clip);
+    return state;
+}
+
+} // namespace
+
+TEST_CASE("An audio clip moved while it plays is heard where it is now", "[song]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    auto state = song(ramp(96000));
+    state->audioClips.push_back({0, 0});
+    const vloom::SequencerState& first = *state;
+    auto later = edited(first, {0, kTicksPerStep}); // one step on: from frame 6000
+    auto earlier = edited(first, {0, 0});
+    engine.setSequencerState(std::move(state));
+    engine.play();
+    render(engine, 0.1); // 4800 frames in
+
+    engine.setSequencerState(std::move(later));
+    auto audio = render(engine, 0.1); // frames 4800 .. 9600
+    CHECK(peak(audio, 600, 1200) == 0.0f); // faded out: the clip has not started yet
+    CHECK(left(audio, 1200 + 500) / kCentre == Approx(500.0 / 96000.0).margin(1e-3));
+
+    engine.setSequencerState(std::move(earlier)); // back to the start: 9600 frames in
+    audio = render(engine, 0.05);
+    CHECK(left(audio, 500) / kCentre == Approx((9600.0 + 500.0) / 96000.0).margin(1e-3));
+}
+
+TEST_CASE("An audio clip moved under the playhead starts part-way", "[song]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    auto state = song(ramp(96000));
+    state->audioClips.push_back({0, 8 * kTicksPerStep}); // a second ahead
+    auto moved = edited(*state, {0, 0});
+    engine.setSequencerState(std::move(state));
+    engine.play();
+    CHECK(peak(render(engine, 0.1), 0, 4800) == 0.0f);
+    engine.setSequencerState(std::move(moved));
+    const auto audio = render(engine, 0.05);
+    CHECK(left(audio, 500) / kCentre == Approx((4800.0 + 500.0) / 96000.0).margin(1e-3));
+}
+
+TEST_CASE("An audio clip removed or cut short while it plays goes quiet", "[song]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    auto state = song(constant(96000));
+    state->audioClips.push_back({0, 0});
+    auto removed = std::make_unique<vloom::SequencerState>();
+    removed->song = true;
+    removed->channels = state->channels;
+    vloom::SongAudioClip shortClip{0, 0};
+    shortClip.lengthTicks = kTicksPerStep / 2; // over by frame 3000
+    auto cut = edited(*state, shortClip);
+    auto whole = edited(*state, {0, 0});
+    engine.setSequencerState(std::move(state));
+    engine.play();
+    render(engine, 0.1);
+    engine.setSequencerState(std::move(cut));
+    CHECK(peak(render(engine, 0.05), 1200, 2400) == 0.0f);
+    engine.setSequencerState(std::move(whole));
+    CHECK(left(render(engine, 0.05), 1200) == Approx(kCentre).margin(1e-3));
+    engine.setSequencerState(std::move(removed));
+    CHECK(peak(render(engine, 0.05), 1200, 2400) == 0.0f);
+}
+
+TEST_CASE("An edit that leaves the audio clips alone does not restart them", "[song]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    auto state = song(ramp(96000));
+    state->audioClips.push_back({0, 0});
+    auto same = edited(*state, {0, 0});
+    same->channels[0].gain = 0.5f; // the channel's volume moved
+    engine.setSequencerState(std::move(state));
+    engine.play();
+    render(engine, 0.1);
+    engine.setSequencerState(std::move(same));
+    const auto audio = render(engine, 0.05);
+    // No fade-in: it plays on, sample for sample (the volume ramps over the first block).
+    CHECK(left(audio, 300) / (0.5f * kCentre) == Approx((4800.0 + 300.0) / 96000.0).margin(1e-4));
+    CHECK(left(audio, 1) / kCentre > 0.02f);
+}
+
 TEST_CASE("Stop fades the audio clips out", "[song]")
 {
     vloom::Engine engine;
@@ -387,9 +482,11 @@ TEST_CASE("A clip's own sample stays alive while it sounds, then is freed", "[so
     engine.play();
     render(engine, 0.1);
 
-    // The clip is gone from the song, but the same channel still plays its
-    // sample: the old state, which alone holds it, must stay.
+    // Pattern mode now, so the clip is gone but rings out (a clip taken out
+    // of a playing song fades at once): the same channel still plays its
+    // sample, and the old state, which alone holds it, must stay.
     auto next = song(constant(10));
+    next->song = false;
     next->channels[0].voices = voices;
     engine.setSequencerState(std::move(next));
     render(engine, 0.05);
