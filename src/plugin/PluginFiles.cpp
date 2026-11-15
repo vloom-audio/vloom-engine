@@ -18,20 +18,36 @@ void fail(std::string* error, std::string message)
         *error = std::move(message);
 }
 
+std::string utf8(const std::filesystem::path& path)
+{
+    const std::u8string text = path.u8string();
+    return {text.begin(), text.end()};
+}
+
 bool SharedLibrary::load(const std::filesystem::path& file, std::string* error)
 {
     close();
+    const std::string name = utf8(file);
 #ifdef _WIN32
+    // A file that is not a DLL (or one whose own DLLs are missing) makes
+    // Windows show a "Bad Image" message box and wait for the user, unless
+    // the thread asks for the error to be returned instead. Without this a
+    // damaged plugin file stops the app, and a test of one hangs CI.
+    DWORD previousMode = 0;
+    const bool modeSet = ::SetThreadErrorMode(SEM_FAILCRITICALERRORS, &previousMode) != 0;
     handle_ = ::LoadLibraryW(file.c_str());
+    const DWORD code = ::GetLastError();
+    if (modeSet)
+        ::SetThreadErrorMode(previousMode, nullptr);
     if (handle_ == nullptr) {
-        fail(error, "cannot load " + file.string() + " (error " + std::to_string(::GetLastError()) + ")");
+        fail(error, "cannot load " + name + " (error " + std::to_string(code) + ")");
         return false;
     }
 #else
     handle_ = ::dlopen(file.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (handle_ == nullptr) {
         const char* reason = ::dlerror();
-        fail(error, "cannot load " + file.string() + (reason != nullptr ? ": " + std::string(reason) : ""));
+        fail(error, "cannot load " + name + (reason != nullptr ? ": " + std::string(reason) : ""));
         return false;
     }
 #endif
