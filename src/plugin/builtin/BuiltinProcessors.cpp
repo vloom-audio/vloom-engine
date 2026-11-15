@@ -4,6 +4,7 @@
 
 #include "plugin/builtin/BuiltinEffect.hpp"
 
+#include <vloom/dsp/effects/Eq.hpp>
 #include <vloom/dsp/effects/Gain.hpp>
 
 #include <array>
@@ -27,6 +28,7 @@ template <dsp::Effect Effect> constexpr Entry entry()
 
 // One line per built-in. Ids are stable: saved projects refer to them.
 constexpr std::array kBuiltins{
+    entry<dsp::Eq>(),
     entry<dsp::Gain>(),
 };
 

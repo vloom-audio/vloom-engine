@@ -6,7 +6,19 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Built-in effect `vloom.eq`: a parametric equalizer from vloom-dsp (low and
+  high cut, low and high shelf, two bells).
+- `AudioProcessor::parameterValue()`: the value of a parameter as last set,
+  for a host that draws its own controls. The built-ins report theirs.
+- `ParameterInfo::group`: what a parameter belongs to ("Low Shelf").
+
 ### Changed
+- **Breaking:** `AudioProcessor::parameterChangedByHost()` returns `bool`:
+  true when the processor has taken the value itself, and
+  `PluginInstance::setParameter()` then does not queue it. The built-ins do,
+  so their values are kept (state, `parameterValue()`) while no audio runs
+  and a full queue can no longer deliver an older value after a newer one.
 - **Breaking:** `plugin/GainProcessor` is removed. Use
   `createBuiltinProcessor("vloom.gain")` instead; the id and parameter 0
   (dB) stay the same. A change now glides over 5 ms rather than over the

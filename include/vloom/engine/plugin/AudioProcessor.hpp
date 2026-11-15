@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -29,6 +30,9 @@ struct ParameterInfo {
     double maxValue = 1.0;
     double defaultValue = 0.0;
     bool stepped = false; ///< whole numbers only (a switch, a choice)
+    /// What it belongs to, for a host that lays out its own controls, e.g.
+    /// "Low Shelf"; parameters of one group follow each other. Empty: none.
+    std::string group{};
 };
 
 /// A parameter change at a frame of the block.
@@ -109,6 +113,15 @@ public:
 
     [[nodiscard]] virtual PluginInfo info() const = 0;
     [[nodiscard]] virtual std::vector<ParameterInfo> parameters() const { return {}; }
+    /// The value of parameter `id` as last set (by the host, a loaded state
+    /// or the processor's defaults), for a host that draws its own controls.
+    /// nullopt: unknown id, or the processor does not report values (plugins
+    /// show theirs in their own editor). Control thread.
+    [[nodiscard]] virtual std::optional<double> parameterValue(std::uint32_t id) const
+    {
+        (void)id;
+        return std::nullopt;
+    }
 
     /// Gets ready to process at `sampleRate`, in blocks of at most
     /// `maxBlockFrames`. False if it cannot (the host then leaves it out).
@@ -157,12 +170,16 @@ public:
         (void)wanted;
         return editorSize();
     }
-    /// The host set parameter `id` to `value` (PluginInstance::setParameter,
-    /// before the audio thread gets it), so an open editor can follow.
-    virtual void parameterChangedByHost(std::uint32_t id, double value)
+    /// The host is setting parameter `id` to `value` (PluginInstance::
+    /// setParameter, before the audio thread gets it), so an open editor can
+    /// follow. True: the processor has taken the value itself and gives it
+    /// to its audio thread with the next block, so the host must not send it
+    /// as a ParameterEvent too. Control thread.
+    virtual bool parameterChangedByHost(std::uint32_t id, double value)
     {
         (void)id;
         (void)value;
+        return false;
     }
 
     /// Processes one block (audio thread).

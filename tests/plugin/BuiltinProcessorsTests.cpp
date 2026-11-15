@@ -3,11 +3,14 @@
 #include "support/Allocations.hpp"
 
 #include <vloom/engine/plugin/BuiltinProcessors.hpp>
+#include <vloom/engine/plugin/PluginInstance.hpp>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -185,4 +188,63 @@ TEST_CASE("A built-in does not allocate on the audio thread", "[plugin][builtin]
         allocations += counter.count();
     }
     CHECK(allocations == 0);
+}
+
+TEST_CASE("The built-in EQ is listed, created and shapes the sound", "[plugin][builtin]")
+{
+    bool listed = false;
+    for (const vloom::PluginInfo& info : vloom::builtinProcessors())
+        listed = listed || (info.id == "vloom.eq" && info.name == "EQ");
+    CHECK(listed);
+
+    auto eq = vloom::createBuiltinProcessor("vloom.eq");
+    REQUIRE(eq != nullptr);
+    CHECK(eq->info().kind == vloom::PluginInfo::Kind::Effect);
+    CHECK(eq->parameters().size() == 14);
+    CHECK_FALSE(eq->hasEditor());
+    REQUIRE(eq->activate(kRate, 1024));
+
+    // At its defaults: unchanged. With the low cut on, steady DC goes away.
+    CHECK(runOnes(*eq, 256).back() == 1.0f);
+    constexpr std::uint32_t kLowCutOn = 0;
+    const std::array events{vloom::ParameterEvent{0, kLowCutOn, 1.0}};
+    (void)runOnes(*eq, 1024, events);
+    float last = 1.0f;
+    for (int block = 0; block < 40; ++block)
+        last = runOnes(*eq, 1024).back();
+    CHECK(std::abs(last) < 1.0e-3f);
+}
+
+TEST_CASE("A built-in reports its values, also those set while no audio runs", "[plugin][builtin]")
+{
+    auto processor = vloom::createBuiltinProcessor("vloom.gain");
+    REQUIRE(processor != nullptr);
+    CHECK(processor->parameterValue(kGain) == 0.0); // the default
+    CHECK_FALSE(processor->parameterValue(99).has_value());
+
+    vloom::PluginInstance instance(std::move(processor));
+    REQUIRE(instance.activate(kRate, 1024));
+    // More changes than a queue would hold, and no block to drain it: a
+    // built-in takes each at once.
+    for (int i = 0; i <= static_cast<int>(vloom::PluginInstance::kMaxQueuedParameters) + 10; ++i)
+        CHECK(instance.setParameter(kGain, -0.01 * i));
+    const double last = -0.01 * (static_cast<int>(vloom::PluginInstance::kMaxQueuedParameters) + 10);
+    CHECK(instance.processor().parameterValue(kGain) == last);
+    CHECK(instance.processor().saveState() == stateOf({{kGain, last}}));
+
+    CHECK(instance.setParameter(kGain, 1000.0));
+    CHECK(instance.processor().parameterValue(kGain) == 12.0); // clamped
+    CHECK_FALSE(instance.setParameter(kGain, std::numeric_limits<double>::quiet_NaN()));
+    CHECK(instance.processor().parameterValue(kGain) == 12.0);
+
+    // The audio thread takes the recorded value with its next block.
+    std::vector<float> left(1024, 1.0f);
+    std::vector<float> right(1024, 1.0f);
+    CHECK(instance.setParameter(kGain, -6.0));
+    for (int block = 0; block < 3; ++block) {
+        std::fill(left.begin(), left.end(), 1.0f);
+        std::fill(right.begin(), right.end(), 1.0f);
+        instance.process(left.data(), right.data(), 1024, vloom::TransportInfo{});
+    }
+    CHECK(left.back() == Catch::Approx(kMinus6Db).margin(1e-5));
 }
