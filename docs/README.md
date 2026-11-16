@@ -13,3 +13,5 @@
   - [0007 Mixer routing and delay compensation](adr/0007-mixer-routing-and-delay-compensation.md)
   - [0008 Built-in processors from vloom-dsp](adr/0008-built-in-processors-from-vloom-dsp.md)
   - [0009 Plugin editors](adr/0009-plugin-editors.md)
+  - [0010 Hosting VST 2 plugins without the VST 2 SDK](adr/0010-vst2-hosting.md)
+  - [0011 A bridge process for plugins the host cannot load](adr/0011-plugin-bridge.md)
