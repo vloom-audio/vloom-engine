@@ -600,7 +600,8 @@ void StepSequencer::mix(
     int numFrames, float* const* buses, bool* used, const TransportInfo& transport) noexcept
 {
     ++block_;
-    const auto mixChannel = [&](const ChannelState& channel) {
+    // `source`: the channel whose notes this one's instrument plays too, if any.
+    const auto mixChannel = [&](const ChannelState& channel, const ChannelVoices* source) {
         ChannelVoices* voices = channel.voices.get();
         if (voices == nullptr || voices->mixedBlock == block_)
             return;
@@ -631,18 +632,19 @@ void StepSequencer::mix(
             };
             // The way notes reach the instrument changed: what it holds the
             // old way is ended, since its note-offs now go elsewhere.
-            bool changed = stages != voices->lastEffectCount;
+            bool changed = stages != voices->lastEffectCount || voices->lastSource != source;
             for (int s = 0; s < stages && !changed; ++s)
                 changed
                     = voices->lastEffects[static_cast<std::size_t>(s)] != chain[static_cast<std::size_t>(s)];
             if (changed) {
                 for (int key = 0; key < 128; ++key) {
                     const auto k = static_cast<std::size_t>(key);
-                    if (voices->lastEffectCount > 0 ? voices->madeHeld[k] : voices->plugin.isHeld(key))
+                    if (voices->madeHeld[k])
                         end(0, key);
                 }
                 voices->madeHeld.fill(false);
                 voices->lastEffectCount = stages;
+                voices->lastSource = source;
                 for (std::size_t s = 0; s < chain.size(); ++s)
                     voices->lastEffects[s] = chain[s];
             }
@@ -694,6 +696,27 @@ void StepSequencer::mix(
                 notes = std::span<const NoteEvent>(madeNotes_.data(), given);
             }
             voices->endMade = false;
+            // Another channel's notes as well, both in frame order.
+            if (source != nullptr && source->sentBlock == block_ && source->sentCount > 0) {
+                const std::span<const NoteEvent> theirs(source->sent.data(), source->sentCount);
+                std::size_t own = 0;
+                std::size_t other = 0;
+                std::size_t merged = 0;
+                while (merged < mergedNotes_.size() && (own < notes.size() || other < theirs.size())) {
+                    const bool mine = other == theirs.size()
+                        || (own < notes.size() && notes[own].frame <= theirs[other].frame);
+                    mergedNotes_[merged++] = mine ? notes[own++] : theirs[other++];
+                }
+                notes = std::span<const NoteEvent>(mergedNotes_.data(), merged);
+            }
+            // What the instrument is given: remembered for a channel that
+            // plays it too, and the keys now down for the day the way changes.
+            voices->sentCount = std::min(notes.size(), voices->sent.size());
+            std::copy_n(notes.begin(), voices->sentCount, voices->sent.begin());
+            voices->sentBlock = block_;
+            for (const NoteEvent& note : notes)
+                if (note.key >= 0 && note.key < 128)
+                    voices->madeHeld[static_cast<std::size_t>(note.key)] = note.type == NoteEvent::Type::On;
             const std::size_t pairs
                 = std::min(channel.pluginOutputs.size(), PluginInstance::kMaxExtraOutputs);
             PluginInstance::Io io;
@@ -777,14 +800,42 @@ void StepSequencer::mix(
         voices->applied = target;
         voices->written = false;
     };
-    if (current_ != nullptr)
-        for (const ChannelState& channel : current_->channels)
-            mixChannel(channel);
+    if (current_ != nullptr) {
+        const auto& channels = current_->channels;
+        const auto sourceOf = [&channels](std::size_t index) -> int {
+            const int from = channels[index].notesFrom;
+            return from >= 0 && static_cast<std::size_t>(from) < channels.size()
+                    && static_cast<std::size_t>(from) != index
+                ? from
+                : -1;
+        };
+        for (std::size_t i = 0; i < channels.size(); ++i) {
+            // A channel whose notes others play is mixed before them: back
+            // along the sources first, then down again.
+            std::array<std::size_t, 8> chain{};
+            std::size_t depth = 0;
+            for (std::size_t at = i;;) {
+                chain[depth++] = at;
+                const int from = sourceOf(at);
+                if (from < 0 || depth == chain.size()
+                    || std::find(chain.begin(), chain.begin() + static_cast<std::ptrdiff_t>(depth),
+                           static_cast<std::size_t>(from))
+                        != chain.begin() + static_cast<std::ptrdiff_t>(depth))
+                    break; // no source, too long, or back where it began
+                at = static_cast<std::size_t>(from);
+            }
+            while (depth-- > 0) {
+                const int from = sourceOf(chain[depth]);
+                mixChannel(channels[chain[depth]],
+                    from >= 0 ? channels[static_cast<std::size_t>(from)].voices.get() : nullptr);
+            }
+        }
+    }
     // Removed channels still fading: through the insert of their last state.
     exchange_.forEachDraining([&](const SequencerState& old) {
         for (const ChannelState& channel : old.channels)
             if (channel.voices != nullptr && !inCurrent(channel.voices.get()))
-                mixChannel(channel);
+                mixChannel(channel, nullptr);
     });
 }
 

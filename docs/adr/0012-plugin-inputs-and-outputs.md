@@ -50,6 +50,13 @@ that orders them and lines up their delays (ADR 0007).
      It ends them itself when the effect is taken away, exchanged, switched
      off or on, and when the song stops or jumps (the effect is reset
      then): the effect's own note-offs can no longer be counted on.
+   **A channel can play another channel's notes.**
+   `ChannelState::notesFrom` names a channel whose notes (what its
+   instrument is given, after its note effects) this channel's instrument
+   plays too: one arpeggiator driving two instruments, a melody doubled on
+   another sound. The source is processed first, whatever the order of the
+   channels; a chain that comes back to itself is cut. Keys held from a
+   source that is taken away are ended by the host.
 5. **Controls are sent to an instance** (`PluginInstance::sendControl()`),
    as notes played by hand are. Each format gets them its own way: MIDI for
    VST 2 and for CLAP plugins that take MIDI; for VST 3 the parameter the
@@ -96,9 +103,8 @@ that orders them and lines up their delays (ADR 0007).
 - A VST 2 plugin's inputs 3 and 4 are taken for the sidechain without the
   plugin saying so: the format has no way to say it. A CLAP plugin's
   second input port counts as one unless it is marked as a main port.
-- Not done, each a piece of work of its own: notes from one channel to
-  another's instrument (the sequencer has no order between channels); MPE
-  (a channel per note); surround.
+- Not done, each a piece of work of its own: MPE (a channel per note);
+  surround.
 - VST 3 controls reach only plugins that say which parameter a control
   moves, asked once for the first event bus and channel.
 - CLAP plugins that take notes as CLAP events only get no pitch bend or

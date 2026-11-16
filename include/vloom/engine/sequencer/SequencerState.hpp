@@ -74,14 +74,21 @@ public:
     std::vector<float> left, right; ///< the channel's signal in the block being rendered; zero otherwise
     bool written = false; ///< something was rendered into left / right this block
     bool rampStarted = false;
-    // What a note effect (ChannelState::noteEffect) has the instrument
-    // play: the host ends these keys itself when the effect is taken away,
-    // switched off or stopped, since no note-off of the effect will come.
+    // The keys the instrument plugin was last told are down, whichever way
+    // the notes came (the channel's own, through note effects, from another
+    // channel): the host ends them itself when that way changes or an
+    // effect is stopped, since their note-offs will then not come.
     std::array<bool, 128> madeHeld{};
     /// The note effects the last block's notes went through (compared, never used).
     std::array<const void*, 8> lastEffects{};
     int lastEffectCount = 0;
     bool endMade = false; ///< stopAll() ran: end the made keys with the next block
+    const void* lastSource = nullptr; ///< the channel whose notes it also played (compared, never used)
+    /// What the instrument plugin was given in the block `sentBlock`, for a
+    /// channel that plays these notes too (ChannelState::notesFrom).
+    std::array<NoteEvent, 256> sent{};
+    std::size_t sentCount = 0;
+    std::uint64_t sentBlock = 0;
     /// The song's controls for the plugin in the block being rendered, in frame order.
     std::array<ControlEvent, 256> controls{};
     std::size_t controlCount = 0;
@@ -147,6 +154,14 @@ struct ChannelState {
     /// More of them, after `noteEffect` and in this order: each gets what
     /// the one before made. Seven at most; more are left out.
     std::vector<std::shared_ptr<PluginInstance>> noteEffects{};
+    /// A channel (index into SequencerState::channels) whose notes `plugin`
+    /// plays as well as this channel's own: what that channel's instrument
+    /// plugin is given, after its note effects. One arpeggiator for two
+    /// instruments, a melody doubled on another sound. The source has to
+    /// have a plugin instrument too. -1, itself or out of range: none. A
+    /// chain of sources that comes back to itself, or is longer than 8, is
+    /// cut.
+    int notesFrom = -1;
     std::shared_ptr<const SampleBuffer> sample; ///< at the engine's sample rate (sample/SampleLoader)
     std::shared_ptr<ChannelVoices> voices; ///< required to sound; keep it across edits
     float gain = 1.0f; ///< channel volume, linear 0 .. 4; changes ramp over one block, ringing notes too

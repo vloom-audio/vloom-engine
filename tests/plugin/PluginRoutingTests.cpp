@@ -625,3 +625,87 @@ TEST_CASE("The song's controls keep their frames in a block longer than the proc
     CHECK(left[149] == 0.5f);
     CHECK(left[150] == 1.0f);
 }
+
+TEST_CASE("A channel's instrument plays another channel's notes too", "[plugin][sequencer][routing]")
+{
+    // One channel has a step and an octaver, and is not heard (its insert
+    // goes nowhere). The other has no notes of its own and plays the first
+    // one's. Whichever comes first in the rack, from the first frame.
+    const auto heard = [](bool sourceFirst) {
+        vloom::Engine engine;
+        prepare(engine);
+        auto state = std::make_unique<vloom::SequencerState>();
+        vloom::ChannelState source = channel(make<Keys>(), 1, true);
+        source.noteEffect = make<Octaver>();
+        vloom::ChannelState target = channel(make<Keys>(), 0);
+        target.notesFrom = sourceFirst ? 0 : 1;
+        if (sourceFirst) {
+            state->channels.push_back(std::move(source));
+            state->channels.push_back(std::move(target));
+        } else {
+            state->channels.push_back(std::move(target));
+            state->channels.push_back(std::move(source));
+        }
+        engine.setSequencerState(std::move(state));
+        auto mixer = std::make_unique<vloom::MixerState>();
+        mixer->inserts.resize(1);
+        mixer->inserts[0].output = -1;
+        engine.setMixerState(std::move(mixer));
+        engine.play();
+        const auto audio = render(engine, 0.3);
+        CHECK(audio[6400 * 2] == 0.0f); // and the notes end with the source's
+        return audio[0];
+    };
+    CHECK(heard(true) == Approx(0.2f)); // the step's key and its octave, as the source's instrument got them
+    CHECK(heard(false) == Approx(0.2f));
+}
+
+TEST_CASE(
+    "Channels that name each other as the source of their notes still play", "[plugin][sequencer][routing]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    auto state = std::make_unique<vloom::SequencerState>();
+    state->channels.push_back(channel(make<Keys>(), 0, true));
+    state->channels.push_back(channel(make<Keys>(), 0, true));
+    state->channels[0].notesFrom = 1;
+    state->channels[1].notesFrom = 0;
+    state->channels[1].rootKey = 72; // another key than the first one's
+    engine.setSequencerState(std::move(state));
+    engine.play();
+    const auto audio = render(engine, 0.3);
+    // The circle is cut at one place: one channel plays both keys, the other its own.
+    CHECK(audio[1000 * 2] == Approx(0.3f));
+    CHECK(audio[6400 * 2] == 0.0f); // and nothing hangs
+}
+
+TEST_CASE("Taking another channel's notes away ends the ones held", "[plugin][sequencer][routing]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    const auto sourcePlugin = make<Keys>();
+    const auto targetPlugin = make<Keys>();
+    const auto sourceVoices = std::make_shared<vloom::ChannelVoices>();
+    const auto targetVoices = std::make_shared<vloom::ChannelVoices>();
+    const auto rack = [&](int from) {
+        auto state = std::make_unique<vloom::SequencerState>();
+        vloom::ChannelState source = channel(sourcePlugin, 1);
+        source.voices = sourceVoices;
+        source.notes = {{0, 960, 60, 1.0f}}; // one long note: 24000 frames
+        vloom::ChannelState target = channel(targetPlugin, 0);
+        target.voices = targetVoices;
+        target.notesFrom = from;
+        state->channels.push_back(std::move(source));
+        state->channels.push_back(std::move(target));
+        return state;
+    };
+    engine.setSequencerState(rack(0));
+    auto mixer = std::make_unique<vloom::MixerState>();
+    mixer->inserts.resize(1);
+    mixer->inserts[0].output = -1; // the source is not heard
+    engine.setMixerState(std::move(mixer));
+    engine.play();
+    CHECK(render(engine, 0.1)[2000 * 2] == Approx(0.1f)); // the source's note, on the other channel
+    engine.setSequencerState(rack(-1)); // no longer: its note-off would never come
+    CHECK(render(engine, 0.1)[2000 * 2] == 0.0f);
+}

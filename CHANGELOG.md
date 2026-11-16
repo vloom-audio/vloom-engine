@@ -7,6 +7,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- A channel's instrument can play another channel's notes as well as its
+  own: `ChannelState::notesFrom`, taken after the source's note effects.
 - Pitch bend, controllers and pressure can be written into the song:
   `ChannelState::controls` (pattern mode) and `SongPattern::controls`
   (song mode) are `ControlPoint`s that play at their ticks, on their exact

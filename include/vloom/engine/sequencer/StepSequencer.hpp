@@ -139,6 +139,7 @@ private:
     /// Audio thread: what goes into a chain of note effects, and between its stages.
     std::array<NoteEvent, PluginInstance::kMaxNotes> effectIn_{};
     std::array<std::array<NoteEvent, PluginInstance::kMaxNotes>, 2> stageNotes_{};
+    std::array<NoteEvent, PluginInstance::kMaxNotes> mergedNotes_{}; ///< with another channel's
     /// Plays one step of `channel`: its sample, or on a synth or plugin its
     /// root key until tick `end`.
     void playStep(const ChannelState& channel, std::int64_t end) const noexcept;
