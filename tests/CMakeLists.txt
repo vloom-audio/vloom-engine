@@ -23,6 +23,7 @@ add_executable(vloom_engine_tests
     plugin/ClapHostTests.cpp
     plugin/EditorRunLoopTests.cpp
     plugin/PluginHostTests.cpp
+    plugin/Vst2HostTests.cpp
     plugin/Vst3HostTests.cpp
     render/SongExportTests.cpp
     render/WavWriterTests.cpp
@@ -62,6 +63,35 @@ if(MSVC)
 endif()
 add_dependencies(vloom_engine_tests vloom_test_vst3)
 target_compile_definitions(vloom_engine_tests PRIVATE VLOOM_TEST_VST3="$<TARGET_FILE:vloom_test_vst3>")
+
+# Two real VST 2 plugins for the VST 2 host tests (plugin/Vst2HostTests.cpp):
+# a VST 2 file holds one plugin, so the one source is built twice.
+if(WIN32)
+    set(VLOOM_TEST_VST2_SUFFIX ".dll")
+elseif(APPLE)
+    set(VLOOM_TEST_VST2_SUFFIX ".vst")
+else()
+    set(VLOOM_TEST_VST2_SUFFIX ".so")
+endif()
+foreach(kind level keys)
+    add_library(vloom_test_vst2_${kind} MODULE plugin/vst2/TestPlugins.cpp)
+    set_target_properties(vloom_test_vst2_${kind} PROPERTIES
+        PREFIX "" SUFFIX "${VLOOM_TEST_VST2_SUFFIX}" OUTPUT_NAME "vloom-test-vst2-${kind}")
+    target_include_directories(vloom_test_vst2_${kind} PRIVATE ${PROJECT_SOURCE_DIR}/src) # plugin/Vst2Abi.hpp
+    target_compile_features(vloom_test_vst2_${kind} PRIVATE cxx_std_20)
+    if(MSVC)
+        target_compile_definitions(vloom_test_vst2_${kind} PRIVATE _CRT_SECURE_NO_WARNINGS) # strcpy into the host's buffers
+    endif()
+    add_dependencies(vloom_engine_tests vloom_test_vst2_${kind})
+endforeach()
+target_compile_definitions(vloom_test_vst2_keys PRIVATE VLOOM_TEST_VST2_KEYS)
+if(TARGET vloom-plugin-bridge)
+    add_dependencies(vloom_engine_tests vloom-plugin-bridge)
+    target_compile_definitions(vloom_engine_tests PRIVATE VLOOM_TEST_BRIDGE="$<TARGET_FILE:vloom-plugin-bridge>")
+endif()
+target_compile_definitions(vloom_engine_tests PRIVATE
+    VLOOM_TEST_VST2_LEVEL="$<TARGET_FILE:vloom_test_vst2_level>"
+    VLOOM_TEST_VST2_KEYS="$<TARGET_FILE:vloom_test_vst2_keys>")
 target_link_libraries(vloom_engine_tests PRIVATE vloom::engine Catch2::Catch2WithMain)
 vloom_set_warnings(vloom_engine_tests)
 

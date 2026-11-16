@@ -74,6 +74,14 @@ jobs:
       - name: Test
         run: ctest --preset release
 
+      # The bridge for 32-bit plugins (ADR 0011) is the same source built
+      # with the 32-bit compiler: this keeps it building.
+      - name: Build the 32-bit plugin bridge
+        if: runner.os == 'Windows'
+        run: |
+          cmake -S tools/vloom-plugin-bridge -B build/bridge32 -A Win32
+          cmake --build build/bridge32 --config Release
+
       - name: Render smoke test
         shell: bash
         run: |
