@@ -86,7 +86,7 @@ TEST_CASE("A .vst3 is loaded and lists its audio plugins", "[plugin][vst3]")
     auto library = vloom::Vst3Library::open(kTestVst3, &error);
     INFO(error);
     REQUIRE(library != nullptr);
-    REQUIRE(library->plugins().size() == 2); // the controller class is not a plugin
+    REQUIRE(library->plugins().size() == 3); // the controller class is not a plugin
     const auto& level = library->plugins()[0];
     CHECK(level.name == "Level");
     CHECK(level.vendor == "Vloom Tests");
@@ -102,6 +102,30 @@ TEST_CASE("A .vst3 is loaded and lists its audio plugins", "[plugin][vst3]")
     error.clear();
     CHECK(vloom::Vst3Library::open(kTestVst3.parent_path() / "missing.vst3", &error) == nullptr);
     CHECK_FALSE(error.empty());
+}
+
+TEST_CASE("The factory is told its host, so a shell's controllers are found", "[plugin][vst3]")
+{
+    // The test module lists and creates the Keys controller only once the
+    // host has called IPluginFactory3::setHostContext (as WaveShell does).
+    auto keys = load("Keys");
+    const auto parameters = keys->processor().parameters();
+    REQUIRE(parameters.size() == 1);
+    CHECK(parameters[0].id == 9);
+    CHECK(parameters[0].name == "Tune");
+}
+
+TEST_CASE("A VST 3 instrument with many output buses plays through its main one", "[plugin][vst3]")
+{
+    // 40 stereo outputs, like a drum machine with a bus per pad; it refuses
+    // a block that lacks a buffer for any of them.
+    vloom::Engine engine;
+    prepare(engine);
+    engine.setSequencerState(pluginChannel(load("Drums"), {1}));
+    engine.play();
+    const auto audio = render(engine, 0.05);
+    CHECK(audio[1000 * 2] == Approx(0.1f));
+    CHECK(audio[1000 * 2 + 1] == Approx(0.04f)); // told the song is in 4/4
 }
 
 TEST_CASE("The plugin scan finds .vst3 files", "[plugin][vst3]")
@@ -147,7 +171,11 @@ TEST_CASE("The host's state stream refuses positions out of range", "[plugin][vs
     // The Keys plugin's getState() tries overflowing and huge seeks and a
     // write past the stream's cap; it fails the save unless all are refused.
     auto keys = load("Keys");
-    CHECK_FALSE(keys->processor().saveState().empty());
+    // Its controller refuses to write a state of its own (as Sylenth1, Nexus
+    // and others do): the component's is saved all the same, and loads.
+    const auto state = keys->processor().saveState();
+    CHECK_FALSE(state.empty());
+    CHECK(load("Keys")->processor().loadState(state));
 }
 
 TEST_CASE("A VST 3 effect on an insert", "[plugin][vst3][mixer]")

@@ -12,6 +12,12 @@
 // - "vloom.test.keys" (instrument): no input; outputs 0.1 per held key from
 //   the frame the note-on lands on, so a test can read note timing off the
 //   audio. Its right channel is the tempo / 1000 while playing.
+// - "vloom.test.pads" (instrument): like the keys, but with 40 stereo output
+//   ports and a note port that takes MIDI only, so it counts keys from MIDI
+//   events and ignores CLAP note events. It refuses to start without the
+//   host's thread check, and a block that lacks a port or comes from a
+//   thread the host does not call the audio thread. Its right channel is the
+//   time signature's beats per bar / 100.
 #include <algorithm>
 #include <clap/clap.h>
 #include <cstring>
@@ -33,6 +39,7 @@ struct Plugin {
     clap_plugin_t clap{};
     const clap_host_t* host = nullptr;
     bool instrument = false;
+    bool pads = false;
     bool guiCreated = false;
     std::uint32_t width = 300;
     std::uint32_t height = 200;
@@ -52,6 +59,9 @@ const clap_plugin_descriptor_t kLevelDescriptor = {CLAP_VERSION_INIT, "vloom.tes
     "Vloom Tests", "", "", "", "1.0", "", kEffectFeatures};
 const clap_plugin_descriptor_t kKeysDescriptor = {CLAP_VERSION_INIT, "vloom.test.keys", "Test Keys",
     "Vloom Tests", "", "", "", "1.0", "", kInstrumentFeatures};
+const clap_plugin_descriptor_t kPadsDescriptor = {CLAP_VERSION_INIT, "vloom.test.pads", "Test Pads",
+    "Vloom Tests", "", "", "", "1.0", "", kInstrumentFeatures};
+constexpr std::uint32_t kPadsOutputs = 40;
 
 // ---- params
 std::uint32_t paramCount(const clap_plugin_t* p) { return self(p)->instrument ? 0 : 1; }
@@ -102,21 +112,40 @@ const clap_plugin_params_t kParams
     = {paramCount, paramInfo, paramValue, paramToText, paramFromText, paramFlush};
 
 // ---- audio ports
-std::uint32_t portCount(const clap_plugin_t* p, bool input) { return input && self(p)->instrument ? 0 : 1; }
-bool portInfo(const clap_plugin_t*, std::uint32_t index, bool input, clap_audio_port_info_t* info)
+std::uint32_t portCount(const clap_plugin_t* p, bool input)
 {
-    if (index != 0)
+    if (input)
+        return self(p)->instrument ? 0 : 1;
+    return self(p)->pads ? kPadsOutputs : 1;
+}
+bool portInfo(const clap_plugin_t* p, std::uint32_t index, bool input, clap_audio_port_info_t* info)
+{
+    if (index >= portCount(p, input))
         return false;
     *info = {};
-    info->id = input ? 0 : 1;
+    info->id = input ? 0 : 1 + index;
     std::strcpy(info->name, input ? "In" : "Out");
-    info->flags = CLAP_AUDIO_PORT_IS_MAIN;
+    info->flags = index == 0 ? CLAP_AUDIO_PORT_IS_MAIN : 0;
     info->channel_count = 2;
     info->port_type = CLAP_PORT_STEREO;
     info->in_place_pair = CLAP_INVALID_ID;
     return true;
 }
 const clap_plugin_audio_ports_t kPorts = {portCount, portInfo};
+
+// ---- note ports (the pads: MIDI only)
+std::uint32_t notePortCount(const clap_plugin_t*, bool input) { return input ? 1 : 0; }
+bool notePortInfo(const clap_plugin_t*, std::uint32_t index, bool input, clap_note_port_info_t* info)
+{
+    if (index != 0 || !input)
+        return false;
+    *info = {};
+    info->supported_dialects = CLAP_NOTE_DIALECT_MIDI;
+    info->preferred_dialect = CLAP_NOTE_DIALECT_MIDI;
+    std::strcpy(info->name, "Notes");
+    return true;
+}
+const clap_plugin_note_ports_t kNotePorts = {notePortCount, notePortInfo};
 
 // ---- state, latency
 bool save(const clap_plugin_t* p, const clap_ostream_t* stream)
@@ -220,7 +249,15 @@ void onTimer(const clap_plugin_t* p, clap_id)
 const clap_plugin_timer_support_t kTimer = {onTimer};
 
 // ---- plugin
-bool init(const clap_plugin_t*) { return true; }
+bool init(const clap_plugin_t* p)
+{
+    Plugin* plugin = self(p);
+    if (!plugin->pads)
+        return true;
+    const auto* threads = hostExtension<clap_host_thread_check_t>(plugin, CLAP_EXT_THREAD_CHECK);
+    return threads != nullptr && threads->is_main_thread(plugin->host)
+        && !threads->is_audio_thread(plugin->host);
+}
 void destroy(const clap_plugin_t* p) { delete self(p); }
 bool activate(const clap_plugin_t*, double, std::uint32_t, std::uint32_t) { return true; }
 void deactivate(const clap_plugin_t*) { }
@@ -241,6 +278,17 @@ void handle(Plugin* plugin, const clap_event_header_t* e)
         const auto* param = reinterpret_cast<const clap_event_param_value_t*>(e);
         if (param->param_id == kLevel)
             plugin->level = param->value;
+    } else if (plugin->pads) {
+        if (e->type != CLAP_EVENT_MIDI)
+            return; // CLAP note events are not for it
+        const auto* midi = reinterpret_cast<const clap_event_midi_t*>(e);
+        const int status = midi->data[0] & 0xF0;
+        if ((status != 0x90 && status != 0x80) || midi->data[1] > 127)
+            return;
+        int& held = plugin->held[midi->data[1]];
+        const int was = held;
+        held = status == 0x90 && midi->data[2] > 0 ? 1 : 0;
+        plugin->count += held - was;
     } else if (e->type == CLAP_EVENT_NOTE_ON || e->type == CLAP_EVENT_NOTE_OFF) {
         const auto* note = reinterpret_cast<const clap_event_note_t*>(e);
         if (note->key < 0 || note->key > 127)
@@ -255,6 +303,12 @@ void handle(Plugin* plugin, const clap_event_header_t* e)
 clap_process_status process(const clap_plugin_t* p, const clap_process_t* process)
 {
     Plugin* plugin = self(p);
+    if (plugin->pads) {
+        const auto* threads = hostExtension<clap_host_thread_check_t>(plugin, CLAP_EXT_THREAD_CHECK);
+        if (process->audio_outputs_count != kPadsOutputs || threads == nullptr
+            || !threads->is_audio_thread(plugin->host) || threads->is_main_thread(plugin->host))
+            return CLAP_PROCESS_ERROR;
+    }
     const std::uint32_t events = process->in_events->size(process->in_events);
     std::uint32_t next = 0;
     float* const* out = process->audio_outputs[0].data32;
@@ -269,7 +323,13 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proces
         }
         if (plugin->instrument) {
             out[0][i] = 0.1f * static_cast<float>(plugin->count);
-            out[1][i] = playing ? static_cast<float>(process->transport->tempo / 1000.0) : 0.0f;
+            if (plugin->pads)
+                out[1][i] = process->transport != nullptr
+                        && (process->transport->flags & CLAP_TRANSPORT_HAS_TIME_SIGNATURE) != 0
+                    ? static_cast<float>(process->transport->tsig_num) / 100.0f
+                    : 0.0f;
+            else
+                out[1][i] = playing ? static_cast<float>(process->transport->tempo / 1000.0) : 0.0f;
         } else {
             float* const* in = process->audio_inputs[0].data32;
             out[0][i] = in[0][i] * static_cast<float>(plugin->level);
@@ -284,6 +344,8 @@ const void* extension(const clap_plugin_t* p, const char* id)
 {
     if (std::strcmp(id, CLAP_EXT_AUDIO_PORTS) == 0)
         return &kPorts;
+    if (self(p)->pads && std::strcmp(id, CLAP_EXT_NOTE_PORTS) == 0)
+        return &kNotePorts;
     if (self(p)->instrument)
         return nullptr;
     if (std::strcmp(id, CLAP_EXT_PARAMS) == 0)
@@ -302,21 +364,27 @@ const void* extension(const clap_plugin_t* p, const char* id)
 void onMainThread(const clap_plugin_t*) { }
 
 // ---- factory, entry
-std::uint32_t pluginCount(const clap_plugin_factory_t*) { return 2; }
+std::uint32_t pluginCount(const clap_plugin_factory_t*) { return 3; }
 const clap_plugin_descriptor_t* descriptor(const clap_plugin_factory_t*, std::uint32_t index)
 {
-    return index == 0 ? &kLevelDescriptor : index == 1 ? &kKeysDescriptor : nullptr;
+    const clap_plugin_descriptor_t* const all[] = {&kLevelDescriptor, &kKeysDescriptor, &kPadsDescriptor};
+    return index < 3 ? all[index] : nullptr;
 }
 const clap_plugin_t* create(const clap_plugin_factory_t*, const clap_host_t* host, const char* id)
 {
     const bool keys = std::strcmp(id, kKeysDescriptor.id) == 0;
-    if (!keys && std::strcmp(id, kLevelDescriptor.id) != 0)
+    const bool pads = std::strcmp(id, kPadsDescriptor.id) == 0;
+    if (!keys && !pads && std::strcmp(id, kLevelDescriptor.id) != 0)
         return nullptr;
     auto* plugin = new Plugin;
     plugin->host = host;
-    plugin->instrument = keys;
-    plugin->clap = {keys ? &kKeysDescriptor : &kLevelDescriptor, plugin, init, destroy, activate, deactivate,
-        startProcessing, stopProcessing, reset, process, extension, onMainThread};
+    plugin->instrument = keys || pads;
+    plugin->pads = pads;
+    plugin->clap = {pads ? &kPadsDescriptor
+            : keys       ? &kKeysDescriptor
+                         : &kLevelDescriptor,
+        plugin, init, destroy, activate, deactivate, startProcessing, stopProcessing, reset, process,
+        extension, onMainThread};
     return &plugin->clap;
 }
 const clap_plugin_factory_t kFactory = {pluginCount, descriptor, create};

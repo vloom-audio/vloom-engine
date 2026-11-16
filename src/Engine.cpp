@@ -698,8 +698,15 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
 
     // What hosted plugins are told: the song as at the block's first frame
     // (they process the block at once, after the transport has moved on).
-    const TransportInfo blockTransport{transport_.isPlaying(), transport_.tempo(),
-        std::isfinite(transport_.positionTicks()) ? transport_.positionTicks() : 0.0};
+    TransportInfo blockTransport;
+    blockTransport.playing = transport_.isPlaying();
+    blockTransport.tempo = transport_.tempo();
+    blockTransport.positionTicks
+        = std::isfinite(transport_.positionTicks()) ? transport_.positionTicks() : 0.0;
+    if (loopEnd_ > loopStart_) {
+        blockTransport.loopStartTicks = loopStart_;
+        blockTransport.loopEndTicks = loopEnd_;
+    }
 
     // The block is played in spans that end where the loop jumps back or
     // the transport stops, each on its exact sample. A jump looks like a

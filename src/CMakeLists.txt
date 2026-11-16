@@ -36,6 +36,8 @@ target_sources(vloom_engine PRIVATE
     plugin/EditorRunLoop.cpp
     plugin/PluginFiles.cpp
     plugin/PluginInstance.cpp
+    plugin/Vst2Bridge.cpp
+    plugin/Vst2Host.cpp
     plugin/Vst3Host.cpp
     plugin/builtin/BuiltinProcessors.cpp
 
@@ -60,6 +62,9 @@ vloom_set_warnings(vloom_engine)
 find_package(Threads REQUIRED)
 # CLAP headers; loading .clap files needs the dynamic loader (dl on Linux).
 target_link_libraries(vloom_engine PRIVATE Threads::Threads vloom_clap_headers vloom_vst3_interfaces ${CMAKE_DL_LIBS})
+if(WIN32)
+    target_link_libraries(vloom_engine PRIVATE advapi32) # the registry: where VST 2 plugins were installed
+endif()
 # Built-in effects: their DSP comes from vloom-dsp (ADR 0008).
 target_link_libraries(vloom_engine PRIVATE vloom::dsp)
 

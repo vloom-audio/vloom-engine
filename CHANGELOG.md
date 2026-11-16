@@ -7,6 +7,34 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- VST 2 plugins are hosted (ADR 0010): `plugin/Vst2Host` has `Vst2Library`
+  (`open`, `plugins`, `create`), `vst2SearchPaths()` and `findVst2Files()`.
+  Effects and instruments, 32-bit audio, notes as MIDI, parameters, state,
+  latency, and editors on Windows and macOS. The interface is described in
+  the engine itself; no Steinberg SDK is used. Shell files and editors on
+  Linux are not hosted.
+- Windows: 32-bit VST 2 plugins run in a 64-bit host (ADR 0011). The new
+  `vloom-plugin-bridge` tool loads the plugin in a process of its own and
+  shares audio and requests with the engine through memory. Built for 32
+  bits it is `vloom-plugin-bridge32.exe`; `Vst2Library::open()` uses it by
+  itself for a 32-bit file when it lies next to the application (or where
+  `VLOOM_PLUGIN_BRIDGE32` says). `Vst2Library::openBridged()` runs any
+  VST 2 plugin that way, so that a crash of the plugin ends the bridge and
+  not the host.
+- `AudioProcessor::hasFailed()`: true once a processor has stopped for good
+  (a bridged plugin whose process ended). Its `saveState()` then gives
+  nothing, so a host can keep the state it last had.
+- VST 2 plugins report `parameterValue()`, for a host that draws its own
+  controls.
+- `TransportInfo` carries the loop region (`loopStartTicks`, `loopEndTicks`)
+  and the time signature (`beatsPerBar`, `beatUnit`; the engine counts in
+  4/4). CLAP, VST 3 and VST 2 plugins are told both, and where the bar
+  starts, so tempo-synced effects can follow the bar.
+- CLAP: a plugin whose note port takes MIDI only gets its notes as MIDI
+  events. Before, it got CLAP note events and stayed silent.
+- CLAP: the host offers the `thread-check`, `log`, `latency`, `state`,
+  `audio-ports` and `note-ports` extensions, for plugins that do not start
+  without them.
 - Built-in instrument `vloom.synth`: a wavetable synthesizer from vloom-dsp
   (two wavetable oscillators with unison, sub, noise, a filter, three
   envelopes, four LFOs). Built-in instruments get the block's notes at their frames.
@@ -39,6 +67,21 @@ and the project uses [Semantic Versioning](https://semver.org/).
   pinned to the commit of its v3.7.1 tag.
 
 ### Fixed
+- VST 3: the host gives the module's factory its host context
+  (`IPluginFactory3::setHostContext`) before it reads the classes. A plugin
+  shell (WaveShell) lists its edit controllers only after that, so its
+  plugins loaded without parameters or an editor, or not at all.
+- VST 3: `saveState()` returned nothing for a plugin whose edit controller
+  refuses to write a state of its own (Sylenth1, Nexus, Kickstart 2,
+  Addictive Drums 2 and others), so a saved project lost everything set in
+  those plugins. The component's state is saved without it now, and
+  `loadState()` gives each part only to where it came from.
+- VST 3: a plugin with more than 16 audio buses in one direction (Battery,
+  Kontakt and other multi-output instruments) could not be activated. The
+  limit is 128 now.
+- CLAP: the same limit of 16 audio ports in one direction is 128 now.
+- Windows: a plugin's own folder is searched first for the DLLs it brings
+  along. Before, a plugin with a DLL beside it could fail to load.
 - Song mode: an audio clip moved, cut, muted, added or removed while the song
   plays kept sounding as it was until playback was restarted. The channels
   whose clips changed now fade out and their clips play from where they are

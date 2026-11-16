@@ -11,6 +11,11 @@
 //   "Keys"   instrument, a component with a separate controller connected
 //            to it: left = 0.1 per held key, right = tempo / 1000 while the
 //            host plays. No audio input.
+//   "Drums"  "Keys" with 40 stereo outputs, like a drum machine with one
+//            bus per pad; it refuses a block that does not carry them all.
+//            Its right channel is the time signature's beats per bar / 100.
+// Like a plugin shell, the factory lists and creates the controller class
+// only once the host has given it a context (IPluginFactory3).
 #include "pluginterfaces/base/ibstream.h"
 #include "pluginterfaces/base/ipluginbase.h"
 #include "pluginterfaces/gui/iplugview.h"
@@ -18,6 +23,7 @@
 #include "pluginterfaces/vst/ivstcomponent.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "pluginterfaces/vst/ivstevents.h"
+#include "pluginterfaces/vst/ivsthostapplication.h"
 #include "pluginterfaces/vst/ivstmessage.h"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
 #include "pluginterfaces/vst/ivstprocesscontext.h"
@@ -38,6 +44,7 @@ bool same(const TUID a, const FUID& b) { return FUnknownPrivate::iidEqual(a, b.t
 const TUID kLevelId = INLINE_UID(0x564C4F4F, 0x4D544553, 0x544C4556, 0x454C0001);
 const TUID kKeysId = INLINE_UID(0x564C4F4F, 0x4D544553, 0x544B4559, 0x53000002);
 const TUID kKeysControllerId = INLINE_UID(0x564C4F4F, 0x4D544553, 0x544B4559, 0x53430003);
+const TUID kDrumsId = INLINE_UID(0x564C4F4F, 0x4D544553, 0x5444524D, 0x53000004);
 
 void copyName(String128 out, const char* name)
 {
@@ -63,9 +70,10 @@ void copyName(String128 out, const char* name)
 /// processor, with buses as given.
 class ProcessorBase : public IComponent, public IAudioProcessor {
 public:
-    ProcessorBase(int audioInputs, int eventInputs)
+    ProcessorBase(int audioInputs, int eventInputs, int audioOutputs = 1)
         : audioInputs_(audioInputs)
         , eventInputs_(eventInputs)
+        , audioOutputs_(audioOutputs)
     {
     }
     virtual ~ProcessorBase() = default;
@@ -76,19 +84,19 @@ public:
     int32 PLUGIN_API getBusCount(MediaType type, BusDirection dir) override
     {
         if (type == kAudio)
-            return dir == kInput ? audioInputs_ : 1;
+            return dir == kInput ? audioInputs_ : audioOutputs_;
         return dir == kInput ? eventInputs_ : 0;
     }
     tresult PLUGIN_API getBusInfo(MediaType type, BusDirection dir, int32 index, BusInfo& bus) override
     {
-        if (index != 0 || index >= getBusCount(type, dir))
+        if (index < 0 || index >= getBusCount(type, dir))
             return kInvalidArgument;
         bus = {};
         bus.mediaType = type;
         bus.direction = dir;
         bus.channelCount = type == kAudio ? 2 : 16;
-        bus.busType = kMain;
-        bus.flags = BusInfo::kDefaultActive;
+        bus.busType = index == 0 ? kMain : kAux;
+        bus.flags = index == 0 ? BusInfo::kDefaultActive : 0;
         copyName(bus.name, type == kAudio ? "Main" : "Notes");
         return kResultOk;
     }
@@ -108,7 +116,7 @@ public:
     tresult PLUGIN_API setBusArrangements(
         SpeakerArrangement* inputs, int32 numIns, SpeakerArrangement* outputs, int32 numOuts) override
     {
-        if (setUp_ || numIns != audioInputs_ || numOuts != 1)
+        if (setUp_ || numIns != audioInputs_ || numOuts != audioOutputs_)
             return kResultFalse; // arrangements come before setupProcessing
         for (int32 i = 0; i < numIns; ++i)
             if (inputs[i] != SpeakerArr::kStereo)
@@ -116,9 +124,9 @@ public:
         arranged_ = outputs[0] == SpeakerArr::kStereo;
         return arranged_ ? kResultOk : kResultFalse;
     }
-    tresult PLUGIN_API getBusArrangement(BusDirection, int32 index, SpeakerArrangement& arr) override
+    tresult PLUGIN_API getBusArrangement(BusDirection dir, int32 index, SpeakerArrangement& arr) override
     {
-        if (index != 0)
+        if (index < 0 || index >= getBusCount(kAudio, dir))
             return kInvalidArgument;
         arr = SpeakerArr::kStereo;
         return kResultOk;
@@ -138,6 +146,7 @@ public:
 protected:
     int32 audioInputs_;
     int32 eventInputs_;
+    int32 audioOutputs_;
     bool arranged_ = false;
     bool setUp_ = false;
 };
@@ -338,8 +347,8 @@ private:
 
 class Keys final : public ProcessorBase, public IConnectionPoint {
 public:
-    Keys()
-        : ProcessorBase(0, 1)
+    explicit Keys(int audioOutputs = 1)
+        : ProcessorBase(0, 1, audioOutputs)
     {
     }
 
@@ -396,8 +405,8 @@ public:
 
     tresult PLUGIN_API process(ProcessData& data) override
     {
-        if (data.numOutputs < 1)
-            return kResultOk;
+        if (data.numOutputs != audioOutputs_)
+            return kResultFalse; // the host gives a buffer for every bus
         float* left = data.outputs[0].channelBuffers32[0];
         float* right = data.outputs[0].channelBuffers32[1];
         const ProcessContext* song = data.processContext;
@@ -417,7 +426,12 @@ public:
             }
             const auto down = static_cast<float>(std::count(held_.begin(), held_.end(), true));
             left[i] = 0.1f * down;
-            right[i] = playing ? tempo / 1000.0f : 0.0f;
+            if (audioOutputs_ > 1) // "Drums": the time signature's beats per bar / 100
+                right[i] = song != nullptr && (song->state & ProcessContext::kTimeSigValid) != 0
+                    ? static_cast<float>(song->timeSigNumerator) / 100.0f
+                    : 0.0f;
+            else
+                right[i] = playing ? tempo / 1000.0f : 0.0f;
         }
         return kResultOk;
     }
@@ -449,14 +463,28 @@ public:
     tresult PLUGIN_API terminate() override { return kResultOk; }
     tresult PLUGIN_API setComponentState(IBStream*) override { return kResultOk; }
     tresult PLUGIN_API setState(IBStream*) override { return kResultOk; }
-    tresult PLUGIN_API getState(IBStream*) override { return kResultOk; }
-    int32 PLUGIN_API getParameterCount() override { return 0; }
-    tresult PLUGIN_API getParameterInfo(int32, ParameterInfo&) override { return kInvalidArgument; }
+    /// Like many real controllers, it keeps nothing and says so: the host
+    /// must still save what the component wrote.
+    tresult PLUGIN_API getState(IBStream*) override { return kNotImplemented; }
+    /// One parameter ("Tune", id 9), which nothing reads: it shows the host
+    /// found this controller.
+    int32 PLUGIN_API getParameterCount() override { return 1; }
+    tresult PLUGIN_API getParameterInfo(int32 index, ParameterInfo& info) override
+    {
+        if (index != 0)
+            return kInvalidArgument;
+        info = {};
+        info.id = 9;
+        copyName(info.title, "Tune");
+        info.defaultNormalizedValue = 0.5;
+        info.flags = ParameterInfo::kCanAutomate;
+        return kResultOk;
+    }
     tresult PLUGIN_API getParamStringByValue(ParamID, ParamValue, String128) override { return kResultFalse; }
     tresult PLUGIN_API getParamValueByString(ParamID, TChar*, ParamValue&) override { return kResultFalse; }
     ParamValue PLUGIN_API normalizedParamToPlain(ParamID, ParamValue value) override { return value; }
     ParamValue PLUGIN_API plainParamToNormalized(ParamID, ParamValue value) override { return value; }
-    ParamValue PLUGIN_API getParamNormalized(ParamID) override { return 0.0; }
+    ParamValue PLUGIN_API getParamNormalized(ParamID) override { return 0.5; }
     tresult PLUGIN_API setParamNormalized(ParamID, ParamValue) override { return kResultOk; }
     tresult PLUGIN_API setComponentHandler(IComponentHandler*) override { return kResultOk; }
     IPlugView* PLUGIN_API createView(FIDString) override { return nullptr; }
@@ -472,12 +500,12 @@ private:
     ~KeysController() = default;
 };
 
-class Factory final : public IPluginFactory2 {
+class Factory final : public IPluginFactory3 {
 public:
     tresult PLUGIN_API queryInterface(const TUID wanted, void** obj) override
     {
         if (same(wanted, FUnknown::iid) || same(wanted, IPluginFactory::iid)
-            || same(wanted, IPluginFactory2::iid)) {
+            || same(wanted, IPluginFactory2::iid) || same(wanted, IPluginFactory3::iid)) {
             *obj = this;
             return kResultOk; // static: no count to keep
         }
@@ -495,7 +523,7 @@ public:
         info->flags = PFactoryInfo::kNoFlags;
         return kResultOk;
     }
-    int32 PLUGIN_API countClasses() override { return 3; }
+    int32 PLUGIN_API countClasses() override { return hostKnown_ ? 4 : 3; }
     tresult PLUGIN_API getClassInfo(int32 index, PClassInfo* info) override
     {
         PClassInfo2 full{};
@@ -528,6 +556,14 @@ public:
             std::strcpy(info->subCategories, "Instrument|Synth");
             return kResultOk;
         case 2:
+            std::memcpy(info->cid, kDrumsId, sizeof(TUID));
+            std::strcpy(info->category, kVstAudioEffectClass);
+            std::strcpy(info->name, "Drums");
+            std::strcpy(info->subCategories, "Instrument|Drum");
+            return kResultOk;
+        case 3:
+            if (!hostKnown_)
+                return kInvalidArgument;
             std::memcpy(info->cid, kKeysControllerId, sizeof(TUID));
             std::strcpy(info->category, kVstComponentControllerClass);
             std::strcpy(info->name, "Keys Controller");
@@ -536,6 +572,19 @@ public:
             return kInvalidArgument;
         }
     }
+    tresult PLUGIN_API getClassInfoUnicode(int32, PClassInfoW*) override { return kResultFalse; }
+    tresult PLUGIN_API setHostContext(FUnknown* context) override
+    {
+        IHostApplication* host = nullptr;
+        if (context == nullptr
+            || context->queryInterface(IHostApplication::iid.toTUID(), reinterpret_cast<void**>(&host))
+                != kResultOk
+            || host == nullptr)
+            return kResultFalse;
+        host->release();
+        hostKnown_ = true;
+        return kResultOk;
+    }
     tresult PLUGIN_API createInstance(FIDString cid, FIDString wanted, void** obj) override
     {
         FUnknown* made = nullptr;
@@ -543,7 +592,9 @@ public:
             made = static_cast<IComponent*>(new Level);
         else if (std::memcmp(cid, kKeysId, sizeof(TUID)) == 0)
             made = static_cast<IComponent*>(new Keys);
-        else if (std::memcmp(cid, kKeysControllerId, sizeof(TUID)) == 0)
+        else if (std::memcmp(cid, kDrumsId, sizeof(TUID)) == 0)
+            made = static_cast<IComponent*>(new Keys(40));
+        else if (hostKnown_ && std::memcmp(cid, kKeysControllerId, sizeof(TUID)) == 0)
             made = static_cast<IEditController*>(new KeysController);
         if (made == nullptr) {
             *obj = nullptr;
@@ -553,6 +604,9 @@ public:
         made->release(); // the query holds it now, or nothing does
         return result;
     }
+
+private:
+    bool hostKnown_ = false;
 };
 
 Factory factory;

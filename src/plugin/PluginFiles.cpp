@@ -3,8 +3,11 @@
 #include "plugin/PluginFiles.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
+#include <fstream>
 #include <system_error>
+#include <vector>
 
 #ifndef _WIN32
 #include <dlfcn.h>
@@ -24,6 +27,155 @@ std::string utf8(const std::filesystem::path& path)
     return {text.begin(), text.end()};
 }
 
+namespace {
+
+/// True if `text` is well-formed UTF-8 with no control characters.
+bool cleanUtf8(const std::string& text)
+{
+    for (std::size_t i = 0; i < text.size();) {
+        const auto lead = static_cast<unsigned char>(text[i]);
+        std::size_t more = 0;
+        std::uint32_t code = lead;
+        if (lead < 0x80) {
+            if (lead < 0x20 || lead == 0x7F)
+                return false;
+        } else if (lead >= 0xC2 && lead <= 0xDF) {
+            more = 1;
+            code = lead & 0x1Fu;
+        } else if (lead >= 0xE0 && lead <= 0xEF) {
+            more = 2;
+            code = lead & 0x0Fu;
+        } else if (lead >= 0xF0 && lead <= 0xF4) {
+            more = 3;
+            code = lead & 0x07u;
+        } else {
+            return false;
+        }
+        if (text.size() - i <= more)
+            return false;
+        for (std::size_t k = 1; k <= more; ++k) {
+            const auto next = static_cast<unsigned char>(text[i + k]);
+            if ((next & 0xC0) != 0x80)
+                return false;
+            code = (code << 6) | (next & 0x3Fu);
+        }
+        // No overlong forms, no surrogates, nothing past the last code point.
+        if ((more == 2 && code < 0x800) || (more == 3 && code < 0x10000) || (code >= 0xD800 && code <= 0xDFFF)
+            || code > 0x10FFFF || (code >= 0x80 && code < 0xA0))
+            return false;
+        i += more + 1;
+    }
+    return true;
+}
+
+std::uint32_t le16(const unsigned char* p) { return static_cast<std::uint32_t>(p[0] | (p[1] << 8)); }
+std::uint32_t le32(const unsigned char* p) { return le16(p) | (le16(p + 2) << 16); }
+
+} // namespace
+
+std::string printable(std::string text)
+{
+    if (!cleanUtf8(text))
+        for (char& c : text)
+            if (static_cast<unsigned char>(c) < 0x20 || static_cast<unsigned char>(c) > 0x7E)
+                c = '?';
+    while (!text.empty() && text.back() == ' ')
+        text.pop_back();
+    return text;
+}
+
+ModuleFacts readModule(const std::filesystem::path& file, std::initializer_list<std::string_view> exportNames)
+{
+    ModuleFacts facts;
+    std::ifstream in(file, std::ios::binary);
+    // `count` bytes at `offset` of the file; false if they are not there.
+    const auto read = [&in](std::uint64_t offset, unsigned char* to, std::size_t count) {
+        in.clear();
+        return static_cast<bool>(in.seekg(static_cast<std::streamoff>(offset)))
+            && static_cast<bool>(in.read(reinterpret_cast<char*>(to), static_cast<std::streamsize>(count)));
+    };
+    std::array<unsigned char, 64> dos{};
+    if (!in || !read(0, dos.data(), dos.size()) || dos[0] != 'M' || dos[1] != 'Z')
+        return facts;
+    const std::uint64_t pe = le32(dos.data() + 0x3C);
+    // "PE\0\0", then the 20 bytes that say what it is for and how large the rest is.
+    std::array<unsigned char, 24> coff{};
+    if (!read(pe, coff.data(), coff.size()) || coff[0] != 'P' || coff[1] != 'E' || coff[2] != 0
+        || coff[3] != 0)
+        return facts;
+    facts.module = true;
+    facts.machine = static_cast<std::uint16_t>(le16(coff.data() + 4));
+    if (exportNames.size() == 0)
+        return facts;
+    const std::uint32_t sectionCount = std::min<std::uint32_t>(le16(coff.data() + 6), 96);
+    const std::uint32_t optionalSize = le16(coff.data() + 20);
+    const std::uint64_t optional = pe + coff.size();
+    std::array<unsigned char, 2> magic{};
+    if (!read(optional, magic.data(), magic.size()))
+        return facts;
+    // Where the table of exports is said to be: at a different place in a
+    // 32-bit and a 64-bit module.
+    const std::uint32_t directories = le16(magic.data()) == 0x020B ? 112u : 96u;
+    std::array<unsigned char, 8> exportEntry{};
+    if (optionalSize < directories + exportEntry.size()
+        || !read(optional + directories, exportEntry.data(), exportEntry.size()))
+        return facts;
+    // The file holds the module in sections; an address in the loaded
+    // module is turned into a place in the file through them.
+    struct Section {
+        std::uint32_t address, size, fileOffset, fileSize;
+    };
+    std::vector<Section> sections;
+    for (std::uint32_t i = 0; i < sectionCount; ++i) {
+        std::array<unsigned char, 40> header{};
+        if (!read(optional + optionalSize + std::uint64_t{i} * header.size(), header.data(), header.size()))
+            return facts;
+        sections.push_back({le32(header.data() + 12), le32(header.data() + 8), le32(header.data() + 20),
+            le32(header.data() + 16)});
+    }
+    const auto place = [&sections](std::uint32_t address, std::uint64_t& offset) {
+        for (const Section& s : sections)
+            if (address >= s.address && address - s.address < s.fileSize) {
+                offset = std::uint64_t{s.fileOffset} + (address - s.address);
+                return true;
+            }
+        return false;
+    };
+    std::uint64_t table = 0;
+    std::array<unsigned char, 40> exports{};
+    if (le32(exportEntry.data()) == 0 || !place(le32(exportEntry.data()), table)
+        || !read(table, exports.data(), exports.size()))
+        return facts;
+    const std::uint32_t nameCount = std::min<std::uint32_t>(le32(exports.data() + 24), 65536);
+    std::uint64_t names = 0;
+    if (!place(le32(exports.data() + 32), names))
+        return facts;
+    for (std::uint32_t i = 0; i < nameCount && !facts.exports; ++i) {
+        std::array<unsigned char, 4> entry{};
+        std::uint64_t at = 0;
+        if (!read(names + std::uint64_t{i} * 4, entry.data(), entry.size()) || !place(le32(entry.data()), at))
+            return facts;
+        // Long enough for the names asked for, and one more to see the end.
+        std::array<unsigned char, 64> name{};
+        in.clear();
+        in.seekg(static_cast<std::streamoff>(at));
+        in.read(reinterpret_cast<char*>(name.data()), static_cast<std::streamsize>(name.size() - 1));
+        const std::string_view found(reinterpret_cast<const char*>(name.data()));
+        for (const std::string_view wanted : exportNames)
+            facts.exports = facts.exports || found == wanted;
+    }
+    return facts;
+}
+
+std::string hex8(std::uint32_t value)
+{
+    static constexpr char kDigits[] = "0123456789ABCDEF";
+    std::string out(8, '0');
+    for (int i = 7; i >= 0; --i, value >>= 4)
+        out[static_cast<std::size_t>(i)] = kDigits[value & 0xF];
+    return out;
+}
+
 bool SharedLibrary::load(const std::filesystem::path& file, std::string* error)
 {
     close();
@@ -35,7 +187,10 @@ bool SharedLibrary::load(const std::filesystem::path& file, std::string* error)
     // damaged plugin file stops the app, and a test of one hangs CI.
     DWORD previousMode = 0;
     const bool modeSet = ::SetThreadErrorMode(SEM_FAILCRITICALERRORS, &previousMode) != 0;
-    handle_ = ::LoadLibraryW(file.c_str());
+    // With the module's own folder searched first for the DLLs it brings
+    // along (a full path is needed for that; relative ones load as before).
+    handle_ = file.is_absolute() ? ::LoadLibraryExW(file.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH)
+                                 : ::LoadLibraryW(file.c_str());
     const DWORD code = ::GetLastError();
     if (modeSet)
         ::SetThreadErrorMode(previousMode, nullptr);

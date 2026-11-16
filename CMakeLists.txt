@@ -34,6 +34,11 @@ if(VLOOM_ENGINE_BUILD_TOOLS)
     add_subdirectory(tools/vloom-cli)
 endif()
 
+# The plugin bridge (ADR 0011), Windows only: the tests run plugins in it.
+if(WIN32 AND (VLOOM_ENGINE_BUILD_TOOLS OR VLOOM_ENGINE_BUILD_TESTS))
+    add_subdirectory(tools/vloom-plugin-bridge)
+endif()
+
 if(VLOOM_ENGINE_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
