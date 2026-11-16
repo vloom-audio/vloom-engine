@@ -34,7 +34,8 @@ that process and the host pass audio and requests to each other.
    host process itself), and gives it their numbers on its command line. A
    block for state is passed by copying its handle between the two
    processes. No other process can open any of it.
-4. **The audio thread waits for the bridge**, at most two seconds. If the
+4. **The audio thread waits for the bridge**, for twice the time the block
+   lasts (at least 50 ms, at most 200 ms). If the
    bridge has ended, the plugin is given up for good: it passes audio
    through and `hasFailed()` says so. If the bridge is only slow (a sampler
    loading), the audio passes through until it answers, and then the plugin
@@ -89,8 +90,8 @@ that process and the host pass audio and requests to each other.
 - A bridged plugin costs two thread switches per block and one process.
   Only its first two inputs and outputs cross the bridge.
 - The audio thread waits on another process for every block of a bridged
-  plugin, and can block for up to two seconds, once, when a bridge stops
-  answering. This is the one place the engine's rule against waiting on
+  plugin, for up to twice the block's length when a bridge is slow to
+  answer. This is the one place the engine's rule against waiting on
   the audio thread (ADR 0005) is set aside.
 - The bridge keeps crashes out of the host. It is not a sandbox: the
   plugin's code runs with the user's rights there as it would in the host.

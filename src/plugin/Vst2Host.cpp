@@ -571,10 +571,18 @@ std::mutex& cacheMutex()
     return m;
 }
 
-std::map<std::filesystem::path, std::weak_ptr<Vst2Library>>& cache()
+/// The open libraries: those whose plugins run in this process, and those
+/// whose plugins run in a bridge. The same file can be open both ways.
+std::map<std::filesystem::path, std::weak_ptr<Vst2Library>>& cache(bool bridged)
 {
-    static std::map<std::filesystem::path, std::weak_ptr<Vst2Library>> c;
-    return c;
+    static std::array<std::map<std::filesystem::path, std::weak_ptr<Vst2Library>>, 2> c;
+    return c[bridged ? 1 : 0];
+}
+
+std::shared_ptr<Vst2Library> cached(const std::filesystem::path& key, bool bridged)
+{
+    const auto it = cache(bridged).find(key);
+    return it != cache(bridged).end() ? it->second.lock() : nullptr;
 }
 
 } // namespace
@@ -617,9 +625,9 @@ std::shared_ptr<Vst2Library> Vst2Library::open(
     const std::filesystem::path canonical = std::filesystem::weakly_canonical(path, ec);
     const std::filesystem::path key = ec ? path : canonical;
     const std::lock_guard lock(cacheMutex());
-    if (auto it = cache().find(key); it != cache().end())
-        if (auto library = it->second.lock())
-            return library;
+    // Open already, the way that was asked for: that one.
+    if (auto library = cached(key, !bridge.empty()))
+        return library;
 
     auto impl = std::make_unique<Impl>();
     impl->path = key;
@@ -637,6 +645,8 @@ std::shared_ptr<Vst2Library> Vst2Library::open(
                     + " is a 32-bit plugin, and vloom-plugin-bridge32.exe, which runs those, was not found");
             return nullptr;
         }
+        if (auto library = cached(key, true))
+            return library;
     }
     std::string reason;
     if (!bridge.empty()) {
@@ -650,7 +660,7 @@ std::shared_ptr<Vst2Library> Vst2Library::open(
         impl->plugins.push_back(probe->info());
         impl->spare = std::move(probe); // the first create() takes it: the bridge is not started twice
         std::shared_ptr<Vst2Library> bridged(new Vst2Library(std::move(impl)));
-        cache()[key] = bridged;
+        cache(true)[key] = bridged;
         return bridged;
     }
 #if defined(_WIN32)
@@ -683,7 +693,7 @@ std::shared_ptr<Vst2Library> Vst2Library::open(
         }
         library->impl_->plugins.push_back(probe.info());
     }
-    cache()[key] = library;
+    cache(false)[key] = library;
     return library;
 }
 
