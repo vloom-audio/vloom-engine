@@ -171,7 +171,7 @@ public:
         dispatch(vst2::kSetBlockSize, 0, maxBlockFrames);
         dispatch(vst2::kMainsChanged, 0, 1);
         dispatch(vst2::kStartProcess);
-        held_.fill(false);
+        held_.fill(0);
         resetPending_ = false;
         active_ = true;
         return true;
@@ -310,18 +310,20 @@ public:
 
         // Notes as MIDI. After a reset, every held key ends first.
         std::size_t count = 0;
-        const auto note = [&](int frame, bool on, int key, float velocity) {
+        const auto note = [&](int frame, bool on, int key, float velocity, int channel) {
             if (count == kMaxEvents)
                 return;
             vst2::MidiEvent& e = midi_[count++];
             e.deltaFrames = std::clamp(frame, 0, context.numFrames - 1);
-            e.midiData[0] = static_cast<char>(on ? 0x90 : 0x80);
+            e.midiData[0] = static_cast<char>((on ? 0x90 : 0x80) | channel);
             e.midiData[1] = static_cast<char>(key);
             // A note-on at velocity 0 would mean note-off.
             e.midiData[2]
                 = static_cast<char>(on ? std::clamp<long>(std::lround(velocity * 127.0f), 1, 127) : 0);
             e.midiData[3] = 0;
-            held_[static_cast<std::size_t>(key)] = on;
+            std::uint16_t& channels = held_[static_cast<std::size_t>(key)];
+            channels
+                = static_cast<std::uint16_t>(on ? channels | (1u << channel) : channels & ~(1u << channel));
         };
         // Controls as MIDI, before the notes (they come at the block's start).
         for (const ControlEvent& control : context.controls) {
@@ -330,21 +332,22 @@ public:
                 break;
             vst2::MidiEvent& e = midi_[count++];
             e.deltaFrames = std::clamp(control.frame, 0, context.numFrames - 1);
+            const int controlChannel = std::clamp<int>(control.channel, 0, 15);
             const auto seven = [](float value) {
                 return static_cast<char>(std::clamp<long>(std::lround(value * 127.0f), 0, 127));
             };
             if (control.type == ControlEvent::Type::PitchBend) {
                 const long bend
                     = std::clamp<long>(std::lround((control.value + 1.0f) * 0.5f * 16383.0f), 0, 16383);
-                e.midiData[0] = static_cast<char>(0xE0);
+                e.midiData[0] = static_cast<char>(0xE0 | controlChannel);
                 e.midiData[1] = static_cast<char>(bend & 0x7F);
                 e.midiData[2] = static_cast<char>(bend >> 7);
             } else if (control.type == ControlEvent::Type::Controller) {
-                e.midiData[0] = static_cast<char>(0xB0);
+                e.midiData[0] = static_cast<char>(0xB0 | controlChannel);
                 e.midiData[1] = static_cast<char>(std::clamp<int>(control.number, 0, 127));
                 e.midiData[2] = seven(control.value);
             } else {
-                e.midiData[0] = static_cast<char>(0xD0);
+                e.midiData[0] = static_cast<char>(0xD0 | controlChannel);
                 e.midiData[1] = seven(control.value);
                 e.midiData[2] = 0;
             }
@@ -352,11 +355,13 @@ public:
         }
         if (resetPending_.exchange(false, std::memory_order_relaxed))
             for (int key = 0; key < 128; ++key)
-                if (held_[static_cast<std::size_t>(key)])
-                    note(0, false, key, 0.0f);
+                for (int channel = 0; channel < 16; ++channel)
+                    if (((held_[static_cast<std::size_t>(key)] >> channel) & 1u) != 0)
+                        note(0, false, key, 0.0f, channel);
         for (const NoteEvent& n : context.notes)
             if (n.key >= 0 && n.key < 128)
-                note(n.frame, n.type == NoteEvent::Type::On, n.key, std::clamp(n.velocity, 0.0f, 1.0f));
+                note(n.frame, n.type == NoteEvent::Type::On, n.key, std::clamp(n.velocity, 0.0f, 1.0f),
+                    std::clamp<int>(n.channel, 0, 15));
 
         // The song, for a plugin that asks during the block.
         const TransportInfo& song = context.transport;
@@ -578,7 +583,8 @@ private:
                 const bool on = status == 0x90 && velocity > 0;
                 made_[madeCount_++]
                     = NoteEvent{e->deltaFrames, on ? NoteEvent::Type::On : NoteEvent::Type::Off,
-                        static_cast<std::int16_t>(key), static_cast<float>(velocity) / 127.0f};
+                        static_cast<std::int16_t>(key), static_cast<float>(velocity) / 127.0f,
+                        static_cast<std::int16_t>(static_cast<unsigned char>(e->midiData[0]) & 0x0F)};
             }
             return 1;
         }
@@ -663,7 +669,7 @@ private:
     double sampleRate_ = 48000.0;
     int blockFrames_ = 0;
     std::atomic<bool> resetPending_{false};
-    std::array<bool, 128> held_{}; ///< audio thread: keys it was told are down
+    std::array<std::uint16_t, 128> held_{}; ///< audio thread: per key, the channels it was told it is down on
     vst2::TimeInfo time_{}; ///< audio thread, as of the block being processed
     bool makesNotes_ = false; ///< it says it sends MIDI to the host
     std::array<NoteEvent, PluginInstance::kMaxNotes> made_{}; ///< audio thread: the notes it sent this block

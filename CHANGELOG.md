@@ -7,6 +7,13 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- MPE (ADR 0013): `NoteEvent`, `ControlEvent` and `ControlPoint` carry a
+  MIDI channel, and `PluginInstance::playNote()`, `stopNote()` and
+  `sendControl()` take one. CLAP, VST 3 and VST 2 plugins (bridged ones
+  too) get each note and control on its channel, and the notes they put
+  out come back with theirs, so an MPE instrument can bend and shape each
+  note on its own. Channel 0 by default: nothing changes for code that
+  knows no channels.
 - A channel's instrument can play another channel's notes as well as its
   own: `ChannelState::notesFrom`, taken after the source's note effects.
 - Pitch bend, controllers and pressure can be written into the song:

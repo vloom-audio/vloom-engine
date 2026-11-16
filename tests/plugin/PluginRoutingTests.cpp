@@ -159,6 +159,38 @@ private:
     bool backwards_;
 };
 
+/// An instrument that tells notes on different channels apart, as an MPE
+/// one does. Left: 0.1 per note held, a note being a key on a channel.
+/// Right: the pitch bends of the channels that have a note held, added up.
+class Poly final : public vloom::AudioProcessor {
+public:
+    [[nodiscard]] vloom::PluginInfo info() const override { return {"test.poly", "Poly", "Tests", "1", {}}; }
+    bool activate(double, int) override { return true; }
+    void process(const vloom::ProcessContext& context) noexcept override
+    {
+        for (const vloom::ControlEvent& control : context.controls)
+            if (control.type == vloom::ControlEvent::Type::PitchBend)
+                bend_[static_cast<std::size_t>(control.channel)] = control.value;
+        for (const vloom::NoteEvent& note : context.notes)
+            held_[static_cast<std::size_t>(note.channel)][static_cast<std::size_t>(note.key)]
+                = note.type == vloom::NoteEvent::Type::On;
+        int notes = 0;
+        float bends = 0.0f;
+        for (std::size_t channel = 0; channel < 16; ++channel) {
+            const auto down = std::count(held_[channel].begin(), held_[channel].end(), true);
+            notes += static_cast<int>(down);
+            if (down > 0)
+                bends += bend_[channel];
+        }
+        std::fill_n(context.channels[0], context.numFrames, 0.1f * static_cast<float>(notes));
+        std::fill_n(context.channels[1], context.numFrames, bends);
+    }
+
+private:
+    std::array<std::array<bool, 128>, 16> held_{};
+    std::array<float, 16> bend_{};
+};
+
 /// An effect with latency: it puts its input out 100 frames late and says so.
 class Late final : public vloom::AudioProcessor {
 public:
@@ -761,4 +793,88 @@ TEST_CASE("Note-effect chains, shared notes, the song's controls and a delayed s
     }
     CHECK(onAudioThread == 0);
     CHECK(heard > 0.0f); // and it did play
+}
+
+TEST_CASE(
+    "Notes and controls keep their MIDI channel, so each note bends on its own", "[plugin][routing][mpe]")
+{
+    using Type = vloom::ControlEvent::Type;
+    auto poly = make<Poly>();
+    std::vector<float> left(64), right(64);
+    // The same key twice, on two channels: two notes for an MPE instrument.
+    REQUIRE(poly->playNote(60, 1.0f, 1));
+    REQUIRE(poly->playNote(60, 1.0f, 2));
+    REQUIRE(poly->sendControl(Type::PitchBend, 0, 0.5f, 2));
+    REQUIRE(poly->sendControl(Type::PitchBend, 0, 0.25f, 7)); // a channel with no note on it
+    poly->process(left.data(), right.data(), 64, {});
+    CHECK(left[0] == Approx(0.2f));
+    CHECK(right[0] == Approx(0.5f)); // channel 2's bend, and no other
+    REQUIRE(poly->stopNote(60, 2)); // ends the one on channel 2 only
+    poly->process(left.data(), right.data(), 64, {});
+    CHECK(left[0] == Approx(0.1f));
+    CHECK(right[0] == 0.0f);
+    // Out of range: put on the nearest channel, not past the instrument's tables.
+    REQUIRE(poly->playNote(61, 1.0f, 99));
+    REQUIRE(poly->stopNote(60, 1));
+    poly->process(left.data(), right.data(), 64, {});
+    CHECK(left[0] == Approx(0.1f));
+}
+
+TEST_CASE("A control written into the song goes out on its channel", "[plugin][sequencer][routing][mpe]")
+{
+    using Type = vloom::ControlEvent::Type;
+    vloom::Engine engine;
+    prepare(engine);
+    auto poly = make<Poly>();
+    auto state = std::make_unique<vloom::SequencerState>();
+    state->channels.push_back(channel(poly, 0));
+    state->channels[0].controls = {{0, Type::PitchBend, 0, 0.5f, 3}, {0, Type::PitchBend, 0, 1.0f, 4}};
+    engine.setSequencerState(std::move(state));
+    REQUIRE(poly->playNote(64, 1.0f, 3));
+    engine.play();
+    const auto audio = render(engine, 0.05);
+    CHECK(audio[1000 * 2] == Approx(0.1f));
+    CHECK(audio[1000 * 2 + 1] == Approx(0.5f)); // channel 3's bend reached the note on channel 3
+}
+
+TEST_CASE("Stopping the song centres the pitch on every channel it was bent on",
+    "[plugin][sequencer][routing][mpe]")
+{
+    using Type = vloom::ControlEvent::Type;
+    vloom::Engine engine;
+    prepare(engine);
+    auto poly = make<Poly>();
+    auto state = std::make_unique<vloom::SequencerState>();
+    state->channels.push_back(channel(poly, 0));
+    state->channels[0].controls = {{0, Type::PitchBend, 0, 0.5f, 3}, {0, Type::PitchBend, 0, 1.0f, 4}};
+    engine.setSequencerState(std::move(state));
+    REQUIRE(poly->playNote(64, 1.0f, 3));
+    REQUIRE(poly->playNote(65, 1.0f, 4));
+    engine.play();
+    CHECK(render(engine, 0.05)[1000 * 2 + 1] == Approx(1.5f)); // both bends in force
+    engine.stop();
+    const auto stopped = render(engine, 0.05);
+    CHECK(stopped[2000 * 2] == Approx(0.2f)); // the notes played by hand are still down
+    CHECK(stopped[2000 * 2 + 1] == 0.0f); // and both channels are back at the centre
+}
+
+TEST_CASE(
+    "A note the host has to end is ended on the channel it is down on", "[plugin][sequencer][routing][mpe]")
+{
+    // A note played on channel 5 goes through a note effect that never ends
+    // notes. Switching the effect off, the host ends it: on channel 5, or
+    // an instrument that tells channels apart would go on holding it.
+    vloom::Engine engine;
+    prepare(engine);
+    auto poly = make<Poly>();
+    auto effect = make<Latch>();
+    auto state = std::make_unique<vloom::SequencerState>();
+    state->channels.push_back(channel(poly, 0));
+    state->channels[0].noteEffect = effect;
+    engine.setSequencerState(std::move(state));
+    REQUIRE(poly->playNote(60, 1.0f, 5));
+    engine.play();
+    CHECK(render(engine, 0.05)[1000 * 2] == Approx(0.1f));
+    effect->setBypassed(true);
+    CHECK(render(engine, 0.05)[1000 * 2] == 0.0f);
 }

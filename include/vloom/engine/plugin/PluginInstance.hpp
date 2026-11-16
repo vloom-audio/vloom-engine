@@ -128,8 +128,10 @@ public:
     /// block processed, and sounds until stopNote(). False if too many wait.
     /// While inactive or bypassed they are dropped, like the song's notes.
     /// Control thread (one thread at a time).
-    bool playNote(int key, float velocity);
-    bool stopNote(int key);
+    /// `channel` is the MIDI channel, 0 .. 15: an MPE controller plays each
+    /// note on one of its own (ADR 0013).
+    bool playNote(int key, float velocity, int channel = 0);
+    bool stopNote(int key, int channel = 0);
     /// Audio thread: takes the notes played by hand that wait, into `out`
     /// (at frame 0), instead of the next process() playing them: for a host
     /// that sends them through something else first (a note effect).
@@ -142,7 +144,7 @@ public:
     /// wheels and pedals) with the next block processed. False if too many
     /// wait or the value is not a number. Dropped while inactive or
     /// bypassed. Control thread (one thread at a time).
-    bool sendControl(ControlEvent::Type type, int number, float value);
+    bool sendControl(ControlEvent::Type type, int number, float value, int channel = 0);
 
     /// Frames the scope remembers: the most readScope() can return.
     static constexpr std::size_t kScopeFrames = 8192;
