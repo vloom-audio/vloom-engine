@@ -30,6 +30,7 @@ struct MixerRoute {
     int target = 0; ///< 0 = the master, 1 .. kMaxInserts
     float gain = 1.0f;
     bool preFader = false;
+    bool sidechain = false; ///< into the target's sidechain, not its sound
     int slot = 0; ///< 0 = the output, n = send n - 1
     int delay = 0; ///< frames of compensation (ADR 0007)
     std::shared_ptr<MixerRouteState> state;

@@ -23,6 +23,7 @@ add_executable(vloom_engine_tests
     plugin/ClapHostTests.cpp
     plugin/EditorRunLoopTests.cpp
     plugin/PluginHostTests.cpp
+    plugin/PluginRoutingTests.cpp
     plugin/Vst2HostTests.cpp
     plugin/Vst3HostTests.cpp
     render/SongExportTests.cpp
@@ -85,6 +86,18 @@ foreach(kind level keys)
     add_dependencies(vloom_engine_tests vloom_test_vst2_${kind})
 endforeach()
 target_compile_definitions(vloom_test_vst2_keys PRIVATE VLOOM_TEST_VST2_KEYS)
+# A third one for what goes beyond a plugin's main sound.
+add_library(vloom_test_vst2_multi MODULE plugin/vst2/MultiPlugin.cpp)
+set_target_properties(vloom_test_vst2_multi PROPERTIES
+    PREFIX "" SUFFIX "${VLOOM_TEST_VST2_SUFFIX}" OUTPUT_NAME "vloom-test-vst2-multi")
+target_include_directories(vloom_test_vst2_multi PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_features(vloom_test_vst2_multi PRIVATE cxx_std_20)
+if(MSVC)
+    target_compile_definitions(vloom_test_vst2_multi PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
+add_dependencies(vloom_engine_tests vloom_test_vst2_multi)
+target_compile_definitions(vloom_engine_tests PRIVATE
+    VLOOM_TEST_VST2_MULTI="$<TARGET_FILE:vloom_test_vst2_multi>")
 if(TARGET vloom-plugin-bridge)
     add_dependencies(vloom_engine_tests vloom-plugin-bridge)
     target_compile_definitions(vloom_engine_tests PRIVATE VLOOM_TEST_BRIDGE="$<TARGET_FILE:vloom-plugin-bridge>")

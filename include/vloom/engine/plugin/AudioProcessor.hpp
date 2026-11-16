@@ -51,6 +51,16 @@ struct NoteEvent {
     float velocity = 1.0f; ///< 0 .. 1
 };
 
+/// What an instrument is played with besides notes: MIDI's continuous
+/// messages, at a frame of the block.
+struct ControlEvent {
+    enum class Type : std::uint8_t { PitchBend, Controller, Pressure };
+    int frame = 0;
+    Type type = Type::Controller;
+    std::int16_t number = 0; ///< Controller: which one, 0 .. 127 (1 = the mod wheel)
+    float value = 0.0f; ///< PitchBend: -1 .. +1 (0 = centre); the others: 0 .. 1
+};
+
 /// What the host tells a processor about the song while it processes.
 struct TransportInfo {
     bool playing = false;
@@ -75,6 +85,18 @@ struct ProcessContext {
     std::span<const ParameterEvent> parameters; ///< in frame order
     std::span<const NoteEvent> notes; ///< in frame order
     TransportInfo transport;
+    std::span<const ControlEvent> controls{}; ///< in frame order
+    /// A second input, e.g. what a compressor listens to (its sidechain):
+    /// two channels of numFrames, or null when the host routes none to it.
+    const float* const* sidechain = nullptr;
+    /// Room for the outputs a processor has after its main one, two
+    /// channels each: [2k] and [2k + 1] are output k + 2. The processor
+    /// writes all of them, silence where it has no such output.
+    std::span<float* const> extraOutputs{};
+    /// Where a processor that makes notes (an arpeggiator) puts them, in
+    /// frame order; it sets *notesOutCount. Empty: the host wants none.
+    std::span<NoteEvent> notesOut{};
+    int* notesOutCount = nullptr;
 };
 
 /// The size of a plugin's editor: pixels on Windows and Linux, points on
@@ -128,6 +150,27 @@ public:
     {
         (void)id;
         return std::nullopt;
+    }
+
+    /// Stereo outputs it has after the main one (a drum machine's pads, a
+    /// sampler's groups), for a host that routes them apart. As of the
+    /// last activate(); 0 before. Control thread.
+    [[nodiscard]] virtual int extraOutputCount() const { return 0; }
+    /// True if it has a second input (a sidechain). As extraOutputCount().
+    [[nodiscard]] virtual bool hasSidechain() const { return false; }
+    /// True if it puts out notes (ProcessContext::notesOut).
+    [[nodiscard]] virtual bool makesNotes() const { return false; }
+
+    /// The names of the programs (presets) it lists for a host to choose
+    /// from; empty if it lists none. Control thread.
+    [[nodiscard]] virtual std::vector<std::string> programs() const { return {}; }
+    /// The program it is on, as an index into programs(); -1: unknown.
+    [[nodiscard]] virtual int currentProgram() const { return -1; }
+    /// Switches to program `index`; false if it cannot.
+    virtual bool setProgram(int index)
+    {
+        (void)index;
+        return false;
     }
 
     /// True once the processor has stopped working for good, e.g. a plugin

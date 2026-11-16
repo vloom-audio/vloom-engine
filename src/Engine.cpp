@@ -24,11 +24,14 @@ float sendGain(float gain) noexcept { return std::isfinite(gain) ? std::clamp(ga
 Engine::Engine()
     : unityMixer_(buildMixerGraph(nullptr, nullptr))
     , busMemory_(static_cast<std::size_t>(2 * (kMaxInserts + 1) * kMaxBlockFrames), 0.0f)
+    , sideMemory_(static_cast<std::size_t>(2 * (kMaxInserts + 1) * kMaxBlockFrames), 0.0f)
     , scratchMemory_(static_cast<std::size_t>(5 * kMaxBlockFrames), 0.0f)
     , clickLine_(kMaxLatencyFrames, 1)
 {
-    for (std::size_t i = 0; i < buses_.size(); ++i)
+    for (std::size_t i = 0; i < buses_.size(); ++i) {
         buses_[i] = busMemory_.data() + i * static_cast<std::size_t>(kMaxBlockFrames);
+        sideBuses_[i] = sideMemory_.data() + i * static_cast<std::size_t>(kMaxBlockFrames);
+    }
     const auto scratch = [this](std::size_t i) {
         return scratchMemory_.data() + i * static_cast<std::size_t>(kMaxBlockFrames);
     };
@@ -412,6 +415,29 @@ void Engine::delayInput(const MixerGraph& graph, int node, int numFrames) noexce
     busUsed_[index] = true;
 }
 
+namespace {
+/// An empty chain, made before any audio runs: making one allocates in some builds.
+const std::vector<std::shared_ptr<PluginInstance>> kNoEffects;
+} // namespace
+
+void Engine::processEffects(const std::vector<std::shared_ptr<PluginInstance>>& effects, std::size_t index,
+    float* left, float* right, int numFrames, const TransportInfo& transport) noexcept
+{
+    PluginInstance::Io io;
+    if (sideUsed_[index]) {
+        io.sidechainLeft = sideBuses_[2 * index];
+        io.sidechainRight = sideBuses_[2 * index + 1];
+    }
+    for (const auto& effect : effects)
+        if (effect != nullptr)
+            effect->process(left, right, numFrames, transport, {}, io);
+    if (sideUsed_[index]) { // heard: empty for the next block
+        std::memset(sideBuses_[2 * index], 0, sizeof(float) * static_cast<std::size_t>(numFrames));
+        std::memset(sideBuses_[2 * index + 1], 0, sizeof(float) * static_cast<std::size_t>(numFrames));
+        sideUsed_[index] = false;
+    }
+}
+
 void Engine::mixInsert(
     const MixerGraph& graph, int insert, int numFrames, const TransportInfo& transport) noexcept
 {
@@ -434,6 +460,8 @@ void Engine::mixInsert(
     if (!busUsed_[index] && !ringing) {
         applied = target; // silent: nothing to ramp
         insertSounding_[index] = false;
+        processEffects(
+            kNoEffects, index, nullptr, nullptr, numFrames, transport); // no one to hear its sidechain
         return;
     }
     if (!insertSounding_[index])
@@ -444,9 +472,7 @@ void Engine::mixInsert(
     busUsed_[index] = false;
     float* left = buses_[2 * index];
     float* right = buses_[2 * index + 1];
-    for (const auto& effect : settings.effects)
-        if (effect != nullptr)
-            effect->process(left, right, numFrames, transport);
+    processEffects(settings.effects, index, left, right, numFrames, transport);
 
     // Volume and pan, ramped from the last block.
     const float n = static_cast<float>(numFrames);
@@ -486,11 +512,17 @@ void Engine::mixInsert(
         state.applied.store(gain, std::memory_order_relaxed);
         const float* sourceLeft = route.preFader ? left : post_[0];
         const float* sourceRight = route.preFader ? right : post_[1];
-        delayInput(graph, route.target, numFrames); // its own input first, then what is routed in
         const auto to = static_cast<std::size_t>(route.target);
-        float* targetLeft = buses_[2 * to];
-        float* targetRight = buses_[2 * to + 1];
-        busUsed_[to] = true;
+        float* targetLeft = sideBuses_[2 * to];
+        float* targetRight = sideBuses_[2 * to + 1];
+        if (route.sidechain) {
+            sideUsed_[to] = true; // beside the target's sound, not into it
+        } else {
+            delayInput(graph, route.target, numFrames); // its own input first, then what is routed in
+            targetLeft = buses_[2 * to];
+            targetRight = buses_[2 * to + 1];
+            busUsed_[to] = true;
+        }
         // A route that never had a delay adds straight in. One that had keeps
         // going through its line even at 0, so the line stays current and
         // reports itself idle.
@@ -530,10 +562,8 @@ void Engine::mixBuses(
     // with the inserts; then its effects (a tail goes on, so every block);
     // then the preview, which is neither delayed nor processed.
     delayInput(graph, 0, numFrames);
-    if (graph.state != nullptr)
-        for (const auto& effect : graph.state->masterEffects)
-            if (effect != nullptr)
-                effect->process(buses_[0], buses_[1], numFrames, transport);
+    processEffects(graph.state != nullptr ? graph.state->masterEffects : kNoEffects, 0, buses_[0], buses_[1],
+        numFrames, transport);
     renderPreview(numFrames);
     const int latency = graph.latency;
     latency_.store(latency, std::memory_order_relaxed);

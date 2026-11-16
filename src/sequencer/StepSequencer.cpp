@@ -335,12 +335,22 @@ void StepSequencer::resetVoices() noexcept
     exchange_.forEachDraining(reset);
 }
 
+StepSequencer::StepSequencer()
+    : extraMemory_(extraBuffers_.size() * static_cast<std::size_t>(kMaxBlockFrames), 0.0f)
+{
+    for (std::size_t i = 0; i < extraBuffers_.size(); ++i)
+        extraBuffers_[i] = extraMemory_.data() + i * static_cast<std::size_t>(kMaxBlockFrames);
+}
+
 void StepSequencer::activatePlugins(double sampleRate, int maxBlockFrames)
 {
     const auto activate = [&](const SequencerState& state) {
-        for (const ChannelState& channel : state.channels)
+        for (const ChannelState& channel : state.channels) {
             if (channel.plugin != nullptr)
                 channel.plugin->activate(sampleRate, maxBlockFrames);
+            if (channel.noteEffect != nullptr)
+                channel.noteEffect->activate(sampleRate, maxBlockFrames);
+        }
     };
     exchange_.forEachSnapshot(activate); // the one not picked up yet too
 }
@@ -521,8 +531,43 @@ void StepSequencer::mix(
         // The instrument plugin plays the whole block at once, its notes at
         // their frames; every block while set, so its tail rings out.
         if (channel.plugin != nullptr) {
+            const auto frames = static_cast<std::size_t>(numFrames);
+            std::span<const NoteEvent> notes = voices->plugin.events();
+            // A note effect first: the instrument plays what it makes.
+            if (channel.noteEffect != nullptr) {
+                float* unusedLeft = extraBuffers_[extraBuffers_.size() - 2];
+                float* unusedRight = extraBuffers_[extraBuffers_.size() - 1];
+                std::fill_n(unusedLeft, frames, 0.0f);
+                std::fill_n(unusedRight, frames, 0.0f);
+                int made = 0;
+                PluginInstance::Io noteIo;
+                noteIo.notesOut = madeNotes_;
+                noteIo.notesOutCount = &made;
+                channel.noteEffect->process(unusedLeft, unusedRight, numFrames, transport, notes, noteIo);
+                notes = std::span<const NoteEvent>(madeNotes_.data(), static_cast<std::size_t>(made));
+            }
+            const std::size_t pairs
+                = std::min(channel.pluginOutputs.size(), PluginInstance::kMaxExtraOutputs);
+            PluginInstance::Io io;
+            io.extraOutputs = std::span<float* const>(extraBuffers_.data(), 2 * pairs);
             channel.plugin->process(
-                voices->left.data(), voices->right.data(), numFrames, transport, voices->plugin.events());
+                voices->left.data(), voices->right.data(), numFrames, transport, notes, io);
+            // Its other outputs, each into the insert chosen for it.
+            const StereoGain extraGain = balance(channel.gain, channel.pan);
+            for (std::size_t k = 0; k < pairs; ++k) {
+                const int to = channel.pluginOutputs[k];
+                if (to < 0 || to > kMaxInserts)
+                    continue;
+                const float* fromLeft = extraBuffers_[2 * k];
+                const float* fromRight = extraBuffers_[2 * k + 1];
+                float* toLeft = buses[2 * to];
+                float* toRight = buses[2 * to + 1];
+                used[to] = true;
+                for (std::size_t i = 0; i < frames; ++i) {
+                    toLeft[i] += fromLeft[i] * extraGain.left;
+                    toRight[i] += fromRight[i] * extraGain.right;
+                }
+            }
             bool sounding = false;
             for (int i = 0; i < numFrames && !sounding; ++i)
                 sounding = std::abs(voices->left[i]) > 1e-6f || std::abs(voices->right[i]) > 1e-6f;

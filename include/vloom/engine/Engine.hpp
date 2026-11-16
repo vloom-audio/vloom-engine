@@ -212,6 +212,13 @@ private:
     std::vector<float> busMemory_;
     std::array<float*, 2 * (kMaxInserts + 1)> buses_{};
     std::array<bool, kMaxInserts + 1> busUsed_{};
+    /// audio thread: per node, what was sent to its sidechain this block
+    std::vector<float> sideMemory_;
+    std::array<float*, 2 * (kMaxInserts + 1)> sideBuses_{};
+    std::array<bool, kMaxInserts + 1> sideUsed_{};
+    /// Runs `effects` on `left` / `right` with node `index`'s sidechain, and empties it.
+    void processEffects(const std::vector<std::shared_ptr<PluginInstance>>& effects, std::size_t index,
+        float* left, float* right, int numFrames, const TransportInfo& transport) noexcept;
     std::array<StereoGain, kMaxInserts + 1> insertApplied_{}; ///< audio thread: ramp start per insert
     std::array<bool, kMaxInserts + 1> insertSounding_{}; ///< audio thread: the insert had sound last block
     std::array<std::array<std::atomic<float>, 2>, kMaxInserts + 1> insertPeak_{};

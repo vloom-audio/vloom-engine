@@ -60,6 +60,20 @@ bool PluginInstance::setParameter(std::uint32_t id, double value)
 void PluginInstance::process(float* left, float* right, int numFrames, const TransportInfo& transport,
     std::span<const NoteEvent> notes) noexcept
 {
+    process(left, right, numFrames, transport, notes, Io{});
+}
+
+void PluginInstance::process(float* left, float* right, int numFrames, const TransportInfo& transport,
+    std::span<const NoteEvent> notes, const Io& io) noexcept
+{
+    if (io.notesOutCount != nullptr)
+        *io.notesOutCount = 0;
+    const std::size_t extras = std::min(io.extraOutputs.size(), 2 * kMaxExtraOutputs);
+    const auto silenceExtras = [&] {
+        for (std::size_t i = 0; i < extras; ++i)
+            if (io.extraOutputs[i] != nullptr && numFrames > 0)
+                std::fill_n(io.extraOutputs[i], static_cast<std::size_t>(numFrames), 0.0f);
+    };
     // Changes queued since the last block, at its first frame; the latest
     // value per parameter. While inactive or bypassed they are kept (not
     // dropped) and reach the processor with the first block it processes:
@@ -74,11 +88,16 @@ void PluginInstance::process(float* left, float* right, int numFrames, const Tra
         else if (pendingCount_ < pending_.size())
             pending_[pendingCount_++] = event;
     }
-    if (!active_.load(std::memory_order_acquire) || numFrames <= 0)
+    if (!active_.load(std::memory_order_acquire) || numFrames <= 0) {
+        silenceExtras();
         return;
+    }
     if (bypassed_.load(std::memory_order_relaxed)) {
+        silenceExtras();
         NoteEvent dropped; // notes played by hand meanwhile: not kept for later
         while (liveNotes_.pop(dropped)) { }
+        ControlEvent droppedControl;
+        while (liveControls_.pop(droppedControl)) { }
         // Notes ending while bypassed never reach the processor, and the
         // host forgets them: end everything it holds as bypass starts, so
         // nothing hangs once it processes again.
@@ -99,6 +118,15 @@ void PluginInstance::process(float* left, float* right, int numFrames, const Tra
     if (notes.size() > kMaxNotes)
         notes = notes.first(kMaxNotes);
     std::size_t nextNote = 0;
+    // Controls sent since the last block: at its first frame.
+    std::size_t controlCount = 0;
+    for (ControlEvent control; controlCount < blockControls_.size() && liveControls_.pop(control);) {
+        control.frame = 0;
+        blockControls_[controlCount++] = control;
+    }
+    const bool sidechain = io.sidechainLeft != nullptr && io.sidechainRight != nullptr;
+    std::array<float*, 2 * kMaxExtraOutputs> extraChunk{};
+    std::size_t notesMade = 0;
     for (int offset = 0; offset < numFrames; offset += maxBlockFrames_) {
         const int frames = std::min(maxBlockFrames_, numFrames - offset);
         const bool last = offset + frames >= numFrames;
@@ -127,12 +155,42 @@ void PluginInstance::process(float* left, float* right, int numFrames, const Tra
         context.channels = channels;
         context.numChannels = 2;
         context.numFrames = frames;
-        if (offset == 0)
+        if (offset == 0) {
             context.parameters = std::span<const ParameterEvent>(pending_.data(), pendingCount_);
+            context.controls = std::span<const ControlEvent>(blockControls_.data(), controlCount);
+        }
         context.notes = std::span<const NoteEvent>(chunkNotes_.data(), count);
         context.transport = transport;
+        const float* const sidechainChunk[2] = {sidechain ? io.sidechainLeft + offset : nullptr,
+            sidechain ? io.sidechainRight + offset : nullptr};
+        if (sidechain)
+            context.sidechain = sidechainChunk;
+        for (std::size_t i = 0; i < extras; ++i) {
+            extraChunk[i] = io.extraOutputs[i] != nullptr ? io.extraOutputs[i] + offset : nullptr;
+            if (extraChunk[i] != nullptr)
+                std::fill_n(extraChunk[i], static_cast<std::size_t>(frames), 0.0f);
+        }
+        // Only whole pairs with both buffers there.
+        std::size_t usable = 0;
+        while (usable + 1 < extras && extraChunk[usable] != nullptr && extraChunk[usable + 1] != nullptr)
+            usable += 2;
+        context.extraOutputs = std::span<float* const>(extraChunk.data(), usable);
+        int made = 0;
+        if (io.notesOutCount != nullptr && notesMade < io.notesOut.size()) {
+            context.notesOut = io.notesOut.subspan(notesMade);
+            context.notesOutCount = &made;
+        }
         processor_->process(context);
+        // The notes it made, at frames of the whole block.
+        made = std::clamp(made, 0, static_cast<int>(context.notesOut.size()));
+        for (int i = 0; i < made; ++i) {
+            NoteEvent& note = io.notesOut[notesMade + static_cast<std::size_t>(i)];
+            note.frame = std::clamp(note.frame, 0, frames - 1) + offset;
+        }
+        notesMade += static_cast<std::size_t>(made);
     }
+    if (io.notesOutCount != nullptr)
+        *io.notesOutCount = static_cast<int>(notesMade);
     pendingCount_ = 0;
     capture(left, right, numFrames);
 }
@@ -143,6 +201,15 @@ bool PluginInstance::playNote(int key, float velocity)
         return false;
     return liveNotes_.push(NoteEvent{0, NoteEvent::Type::On,
         static_cast<std::int16_t>(std::clamp(key, 0, 127)), std::clamp(velocity, 0.0f, 1.0f)});
+}
+
+bool PluginInstance::sendControl(ControlEvent::Type type, int number, float value)
+{
+    if (!std::isfinite(value))
+        return false;
+    const float low = type == ControlEvent::Type::PitchBend ? -1.0f : 0.0f;
+    return liveControls_.push(ControlEvent{
+        0, type, static_cast<std::int16_t>(std::clamp(number, 0, 127)), std::clamp(value, low, 1.0f)});
 }
 
 bool PluginInstance::stopNote(int key)

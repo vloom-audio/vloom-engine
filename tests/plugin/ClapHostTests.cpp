@@ -375,3 +375,17 @@ TEST_CASE("A file that is not a plugin fails to load without stopping the app", 
     std::error_code ec;
     std::filesystem::remove_all(folder, ec);
 }
+
+TEST_CASE("A CLAP instrument's other output ports are there for the host to route", "[plugin][clap][routing]")
+{
+    auto pads = load("vloom.test.pads");
+    CHECK(pads->processor().extraOutputCount() == static_cast<int>(vloom::PluginInstance::kMaxExtraOutputs));
+    CHECK_FALSE(pads->processor().hasSidechain());
+    std::vector<float> left(64), right(64), second(64, 9.0f), secondRight(64, 9.0f);
+    std::array<float*, 2> extra{second.data(), secondRight.data()};
+    vloom::PluginInstance::Io io;
+    io.extraOutputs = extra;
+    pads->process(left.data(), right.data(), 64, {}, {}, io);
+    CHECK(second[10] == Approx(0.2f));
+    CHECK(secondRight[10] == Approx(0.2f));
+}

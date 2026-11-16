@@ -107,6 +107,16 @@ struct ChannelState {
     /// notes and tail finish after a switch. One instance per channel: two
     /// channels must not share one.
     std::shared_ptr<PluginInstance> plugin;
+    /// Where the plugin's outputs after its main one play (a drum machine's
+    /// pads, a sampler's groups): pluginOutputs[k] is the insert for its
+    /// output k + 2, 0 = the master; negative or out of range: not played.
+    /// They get the channel's volume and pan. At most
+    /// PluginInstance::kMaxExtraOutputs; see AudioProcessor::extraOutputCount().
+    std::vector<int> pluginOutputs{};
+    /// A plugin that makes notes out of the channel's (an arpeggiator, a
+    /// chord maker): it gets the channel's notes and `plugin` gets what it
+    /// puts out instead. Activated like `plugin`; its sound is not used.
+    std::shared_ptr<PluginInstance> noteEffect{};
     std::shared_ptr<const SampleBuffer> sample; ///< at the engine's sample rate (sample/SampleLoader)
     std::shared_ptr<ChannelVoices> voices; ///< required to sound; keep it across edits
     float gain = 1.0f; ///< channel volume, linear 0 .. 4; changes ramp over one block, ringing notes too

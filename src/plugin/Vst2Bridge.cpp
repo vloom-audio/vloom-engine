@@ -374,6 +374,32 @@ public:
             m.data[3] = 0;
             held_[static_cast<std::size_t>(key)] = on;
         };
+        // Controls as MIDI, before the notes (they come at the block's start).
+        for (const ControlEvent& control : context.controls) {
+            if (count == bridge::kMaxEvents || !std::isfinite(control.value))
+                break;
+            bridge::MidiMessage& m = audio.midi[count++];
+            m.frame = std::clamp(control.frame, 0, context.numFrames - 1);
+            const auto seven = [](float value) {
+                return static_cast<std::uint8_t>(std::clamp<long>(std::lround(value * 127.0f), 0, 127));
+            };
+            if (control.type == ControlEvent::Type::PitchBend) {
+                const long bend
+                    = std::clamp<long>(std::lround((control.value + 1.0f) * 0.5f * 16383.0f), 0, 16383);
+                m.data[0] = 0xE0;
+                m.data[1] = static_cast<std::uint8_t>(bend & 0x7F);
+                m.data[2] = static_cast<std::uint8_t>(bend >> 7);
+            } else if (control.type == ControlEvent::Type::Controller) {
+                m.data[0] = 0xB0;
+                m.data[1] = static_cast<std::uint8_t>(std::clamp<int>(control.number, 0, 127));
+                m.data[2] = seven(control.value);
+            } else {
+                m.data[0] = 0xD0;
+                m.data[1] = seven(control.value);
+                m.data[2] = 0;
+            }
+            m.data[3] = 0;
+        }
         if (resetPending_.exchange(false, std::memory_order_relaxed))
             for (int key = 0; key < 128; ++key)
                 if (held_[static_cast<std::size_t>(key)])

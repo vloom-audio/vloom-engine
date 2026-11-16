@@ -5,6 +5,7 @@
 #include "plugin/EditorRunLoop.hpp"
 #include "plugin/PluginFiles.hpp"
 #include "vloom/engine/core/SpscQueue.hpp"
+#include "vloom/engine/plugin/PluginInstance.hpp"
 #include "vloom/engine/time/MusicalTime.hpp"
 
 #include <algorithm>
@@ -124,8 +125,11 @@ public:
         // editor) go to the control thread; everything else is dropped.
         outEvents_.ctx = this;
         outEvents_.try_push = [](const clap_output_events_t* list, const clap_event_header_t* e) {
+            auto* p = static_cast<ClapProcessor*>(list->ctx);
             if (const auto edit = editOf(e))
-                static_cast<ClapProcessor*>(list->ctx)->edits_.push(*edit);
+                p->edits_.push(*edit);
+            else
+                p->collectNote(e);
             return true;
         };
         // Control thread (a flush while inactive): straight to the listener.
@@ -174,8 +178,11 @@ public:
         // note port takes nothing else.
         const auto* notePorts = static_cast<const clap_plugin_note_ports_t*>(
             plugin_->get_extension(plugin_, CLAP_EXT_NOTE_PORTS));
+        makesNotes_ = notePorts != nullptr && notePorts->count(plugin_, false) > 0;
         if (notePorts != nullptr && notePorts->count(plugin_, true) > 0) {
             clap_note_port_info_t port{};
+            if (notePorts->get(plugin_, 0, true, &port))
+                midiControls_ = (port.supported_dialects & CLAP_NOTE_DIALECT_MIDI) != 0;
             if (notePorts->get(plugin_, 0, true, &port))
                 midiNotes_ = (port.supported_dialects & CLAP_NOTE_DIALECT_CLAP) == 0
                     && (port.supported_dialects & CLAP_NOTE_DIALECT_MIDI) != 0;
@@ -237,6 +244,14 @@ public:
         plugin_->deactivate(plugin_);
         active_ = false;
     }
+
+    [[nodiscard]] int extraOutputCount() const override
+    {
+        return std::min(std::max(static_cast<int>(outputs_.size()) - 1, 0),
+            static_cast<int>(PluginInstance::kMaxExtraOutputs));
+    }
+    [[nodiscard]] bool hasSidechain() const override { return inputs_.size() > 1; }
+    [[nodiscard]] bool makesNotes() const override { return makesNotes_; }
 
     [[nodiscard]] int latencyFrames() const override
     {
@@ -391,6 +406,32 @@ public:
             e.key = -1;
             e.value = p.value;
         }
+        // Controls as MIDI, for a plugin whose note port takes MIDI.
+        for (const ControlEvent& control : context.controls) {
+            if (eventCount_ == kMaxEvents || !midiControls_ || !std::isfinite(control.value))
+                break;
+            clap_event_midi_t& midi = events_[eventCount_++].midi;
+            midi = {};
+            midi.header = header(sizeof(midi), control.frame, CLAP_EVENT_MIDI);
+            midi.port_index = 0;
+            const auto seven = [](float value) {
+                return static_cast<std::uint8_t>(std::clamp<long>(std::lround(value * 127.0f), 0, 127));
+            };
+            if (control.type == ControlEvent::Type::PitchBend) {
+                const long bend
+                    = std::clamp<long>(std::lround((control.value + 1.0f) * 0.5f * 16383.0f), 0, 16383);
+                midi.data[0] = 0xE0;
+                midi.data[1] = static_cast<std::uint8_t>(bend & 0x7F);
+                midi.data[2] = static_cast<std::uint8_t>(bend >> 7);
+            } else if (control.type == ControlEvent::Type::Controller) {
+                midi.data[0] = 0xB0;
+                midi.data[1] = static_cast<std::uint8_t>(std::clamp<int>(control.number, 0, 127));
+                midi.data[2] = seven(control.value);
+            } else {
+                midi.data[0] = 0xD0;
+                midi.data[1] = seven(control.value);
+            }
+        }
         for (const NoteEvent& n : context.notes) {
             if (eventCount_ == kMaxEvents)
                 break;
@@ -423,7 +464,12 @@ public:
         for (std::size_t port = 0; port < inputs_.size(); ++port)
             for (std::size_t ch = 0; ch < inputs_[port].channels.size(); ++ch) {
                 float* dst = inputs_[port].pointers[ch];
-                if (port != 0)
+                if (port == 1 && context.sidechain != nullptr && ch < 2 && inputs_[port].channels.size() > 1)
+                    std::copy_n(context.sidechain[ch], frames, dst);
+                else if (port == 1 && context.sidechain != nullptr && inputs_[port].channels.size() == 1)
+                    for (std::size_t i = 0; i < frames; ++i)
+                        dst[i] = 0.5f * (context.sidechain[0][i] + context.sidechain[1][i]);
+                else if (port != 0)
                     std::fill_n(dst, frames, 0.0f);
                 else if (inputs_[port].channels.size() == 1)
                     for (std::size_t i = 0; i < frames; ++i)
@@ -474,10 +520,32 @@ public:
         call.audio_outputs_count = static_cast<std::uint32_t>(outputBuffers_.size());
         call.in_events = &inEvents_;
         call.out_events = &outEvents_;
+        madeCount_ = 0;
         const clap_process_status status = plugin_->process(plugin_, &call);
         steadyTime_ += static_cast<std::int64_t>(frames);
-        if (status == CLAP_PROCESS_ERROR || outputs_.empty())
+        if (status == CLAP_PROCESS_ERROR)
             return; // the audio stays as it came
+        // The notes it made (an arpeggiator), for the host to pass on.
+        if (context.notesOutCount != nullptr) {
+            const std::size_t made = std::min(madeCount_, context.notesOut.size());
+            for (std::size_t i = 0; i < made; ++i) {
+                context.notesOut[i] = made_[i];
+                context.notesOut[i].frame = std::clamp(made_[i].frame, 0, context.numFrames - 1);
+            }
+            *context.notesOutCount = static_cast<int>(made);
+        }
+        // Its output ports after the main one, for the host to route apart.
+        for (std::size_t k = 0; k + 1 < context.extraOutputs.size(); k += 2) {
+            const std::size_t port = k / 2 + 1;
+            if (port >= outputs_.size())
+                break; // no such port: the host's silence stays
+            const PortBuffers& extra = outputs_[port];
+            std::copy_n(extra.pointers[0], frames, context.extraOutputs[k]);
+            std::copy_n(
+                extra.pointers[extra.pointers.size() > 1 ? 1 : 0], frames, context.extraOutputs[k + 1]);
+        }
+        if (outputs_.empty())
+            return;
 
         // The main output back. A plugin with no audio input (an
         // instrument) adds to what is there; an effect replaces it.
@@ -740,6 +808,37 @@ private:
     bool active_ = false;
     bool processing_ = false; ///< audio thread, once active
     bool midiNotes_ = false; ///< the plugin takes notes as MIDI only
+    bool midiControls_ = false; ///< its note port takes MIDI: pitch bend and controllers go as that
+    bool makesNotes_ = false; ///< it has a note port out
+    std::array<NoteEvent, PluginInstance::kMaxNotes>
+        made_{}; ///< audio thread: the notes it put out this block
+    std::size_t madeCount_ = 0;
+
+    /// Audio thread: keeps `e` if it is a note the plugin made.
+    void collectNote(const clap_event_header_t* e) noexcept
+    {
+        if (e == nullptr || e->space_id != CLAP_CORE_EVENT_SPACE_ID || madeCount_ == made_.size())
+            return;
+        const int frame = static_cast<int>(std::min<std::uint32_t>(e->time, 1u << 30));
+        if ((e->type == CLAP_EVENT_NOTE_ON || e->type == CLAP_EVENT_NOTE_OFF)
+            && e->size >= sizeof(clap_event_note_t)) {
+            const auto* note = reinterpret_cast<const clap_event_note_t*>(e);
+            if (note->key < 0 || note->key > 127 || !std::isfinite(note->velocity))
+                return;
+            made_[madeCount_++]
+                = NoteEvent{frame, e->type == CLAP_EVENT_NOTE_ON ? NoteEvent::Type::On : NoteEvent::Type::Off,
+                    note->key, static_cast<float>(std::clamp(note->velocity, 0.0, 1.0))};
+        } else if (e->type == CLAP_EVENT_MIDI && e->size >= sizeof(clap_event_midi_t)) {
+            const auto* midi = reinterpret_cast<const clap_event_midi_t*>(e);
+            const int status = midi->data[0] & 0xF0;
+            if (status != 0x90 && status != 0x80)
+                return;
+            const bool on = status == 0x90 && (midi->data[2] & 0x7F) > 0;
+            made_[madeCount_++] = NoteEvent{frame, on ? NoteEvent::Type::On : NoteEvent::Type::Off,
+                static_cast<std::int16_t>(midi->data[1] & 0x7F),
+                static_cast<float>(midi->data[2] & 0x7F) / 127.0f};
+        }
+    }
     std::thread::id mainThread_; ///< the thread that created the plugin
     std::atomic<std::thread::id> audioThread_{};
     std::atomic<bool> inAudioCall_{false};

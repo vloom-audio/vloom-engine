@@ -6,6 +6,7 @@
 #include "plugin/Vst2Abi.hpp"
 #include "plugin/Vst2Bridge.hpp"
 #include "vloom/engine/core/SpscQueue.hpp"
+#include "vloom/engine/plugin/PluginInstance.hpp"
 #include "vloom/engine/time/MusicalTime.hpp"
 
 #include <algorithm>
@@ -109,6 +110,8 @@ public:
         info_.id = plugin_files::hex8(static_cast<std::uint32_t>(effect_->uniqueId));
         info_.kind = (effect_->flags & vst2::kIsSynth) != 0 ? PluginInfo::Kind::Instrument
                                                             : PluginInfo::Kind::Effect;
+        std::array<char, 32> sends{"sendVstMidiEvent"};
+        makesNotes_ = dispatch(vst2::kCanDo, 0, 0, sends.data()) == 1;
         // The values it starts with are the nearest thing to defaults.
         const int count = parameterCount();
         defaults_.resize(static_cast<std::size_t>(count));
@@ -191,6 +194,40 @@ public:
         const float value = effect_->getParameter(effect_, static_cast<std::int32_t>(id));
         return std::isfinite(value) ? std::optional<double>(std::clamp(static_cast<double>(value), 0.0, 1.0))
                                     : std::nullopt;
+    }
+
+    [[nodiscard]] int extraOutputCount() const override
+    {
+        return std::min(std::max(static_cast<int>(outputs_.size()) - 2, 0) / 2,
+            static_cast<int>(PluginInstance::kMaxExtraOutputs));
+    }
+    [[nodiscard]] bool hasSidechain() const override { return inputs_.size() >= 4; }
+    [[nodiscard]] bool makesNotes() const override { return makesNotes_; }
+
+    [[nodiscard]] std::vector<std::string> programs() const override
+    {
+        std::vector<std::string> names;
+        const int count = programCount();
+        // A plugin with one program has nothing to choose from.
+        for (int i = 0; count > 1 && i < count; ++i) {
+            names.push_back(text(vst2::kGetProgramNameIndexed, i));
+            if (names.back().empty())
+                names.back() = "Program " + std::to_string(i + 1);
+        }
+        return names;
+    }
+    [[nodiscard]] int currentProgram() const override
+    {
+        const int count = programCount();
+        const std::intptr_t program = dispatch(vst2::kGetProgram);
+        return count > 1 && program >= 0 && program < count ? static_cast<int>(program) : -1;
+    }
+    bool setProgram(int index) override
+    {
+        if (index < 0 || index >= programCount())
+            return false;
+        dispatch(vst2::kSetProgram, 0, index);
+        return true;
     }
 
     [[nodiscard]] int latencyFrames() const override
@@ -285,6 +322,32 @@ public:
             e.midiData[3] = 0;
             held_[static_cast<std::size_t>(key)] = on;
         };
+        // Controls as MIDI, before the notes (they come at the block's start).
+        for (const ControlEvent& control : context.controls) {
+            if (count == kMaxEvents || !std::isfinite(control.value))
+                break;
+            vst2::MidiEvent& e = midi_[count++];
+            e.deltaFrames = std::clamp(control.frame, 0, context.numFrames - 1);
+            const auto seven = [](float value) {
+                return static_cast<char>(std::clamp<long>(std::lround(value * 127.0f), 0, 127));
+            };
+            if (control.type == ControlEvent::Type::PitchBend) {
+                const long bend
+                    = std::clamp<long>(std::lround((control.value + 1.0f) * 0.5f * 16383.0f), 0, 16383);
+                e.midiData[0] = static_cast<char>(0xE0);
+                e.midiData[1] = static_cast<char>(bend & 0x7F);
+                e.midiData[2] = static_cast<char>(bend >> 7);
+            } else if (control.type == ControlEvent::Type::Controller) {
+                e.midiData[0] = static_cast<char>(0xB0);
+                e.midiData[1] = static_cast<char>(std::clamp<int>(control.number, 0, 127));
+                e.midiData[2] = seven(control.value);
+            } else {
+                e.midiData[0] = static_cast<char>(0xD0);
+                e.midiData[1] = seven(control.value);
+                e.midiData[2] = 0;
+            }
+            e.midiData[3] = 0;
+        }
         if (resetPending_.exchange(false, std::memory_order_relaxed))
             for (int key = 0; key < 128; ++key)
                 if (held_[static_cast<std::size_t>(key)])
@@ -321,18 +384,37 @@ public:
                     dst[i] = 0.5f * (left[i] + right[i]);
             else if (ch < 2)
                 std::copy_n(ch == 0 ? left : right, frames, dst);
+            else if (ch < 4 && context.sidechain != nullptr)
+                std::copy_n(context.sidechain[ch - 2], frames, dst); // inputs 3 and 4: the sidechain
             else
                 std::fill_n(dst, frames, 0.0f);
         }
         for (float* dst : outputPointers_)
             std::fill_n(dst, frames, 0.0f);
 
+        madeCount_ = 0;
         if (count > 0) {
             events_.numEvents = static_cast<std::int32_t>(count);
             dispatch(vst2::kProcessEvents, 0, 0, &events_);
         }
         effect_->processReplacing(effect_, inputPointers_.data(), outputPointers_.data(), context.numFrames);
         audioThread_.store(std::thread::id{}, std::memory_order_relaxed);
+        // The notes it sent the host during the block (an arpeggiator).
+        if (context.notesOutCount != nullptr) {
+            const std::size_t made = std::min(madeCount_, context.notesOut.size());
+            for (std::size_t i = 0; i < made; ++i) {
+                context.notesOut[i] = made_[i];
+                context.notesOut[i].frame = std::clamp(made_[i].frame, 0, context.numFrames - 1);
+            }
+            *context.notesOutCount = static_cast<int>(made);
+        }
+        // Its outputs after the first two, in pairs, for the host to route apart.
+        for (std::size_t k = 0; k + 1 < context.extraOutputs.size(); k += 2) {
+            if (k + 3 >= outputPointers_.size())
+                break; // no such pair: the host's silence stays
+            std::copy_n(outputPointers_[k + 2], frames, context.extraOutputs[k]);
+            std::copy_n(outputPointers_[k + 3], frames, context.extraOutputs[k + 1]);
+        }
         if (outputs_.empty())
             return; // the audio stays as it came
 
@@ -473,6 +555,28 @@ private:
                 listener_->parameterEdited(edit.id, edit.value);
             return 0;
         }
+        case vst2::kHostProcessEvents: {
+            // Notes from the plugin, taken only while it processes a block.
+            const auto* sent = static_cast<const vst2::Events*>(ptr);
+            if (sent == nullptr || std::this_thread::get_id() != audioThread_.load(std::memory_order_relaxed))
+                return 0;
+            const std::int32_t events = std::clamp(sent->numEvents, 0, 1024);
+            for (std::int32_t i = 0; i < events && madeCount_ < made_.size(); ++i) {
+                const vst2::MidiEvent* e = sent->events[i];
+                if (e == nullptr || e->type != vst2::kMidiEventType)
+                    continue;
+                const int status = static_cast<unsigned char>(e->midiData[0]) & 0xF0;
+                const int key = static_cast<unsigned char>(e->midiData[1]) & 0x7F;
+                const int velocity = static_cast<unsigned char>(e->midiData[2]) & 0x7F;
+                if (status != 0x90 && status != 0x80)
+                    continue;
+                const bool on = status == 0x90 && velocity > 0;
+                made_[madeCount_++]
+                    = NoteEvent{e->deltaFrames, on ? NoteEvent::Type::On : NoteEvent::Type::Off,
+                        static_cast<std::int16_t>(key), static_cast<float>(velocity) / 127.0f};
+            }
+            return 1;
+        }
         case vst2::kHostGetTime:
             return reinterpret_cast<std::intptr_t>(&time_);
         case vst2::kHostSizeWindow:
@@ -556,6 +660,11 @@ private:
     std::atomic<bool> resetPending_{false};
     std::array<bool, 128> held_{}; ///< audio thread: keys it was told are down
     vst2::TimeInfo time_{}; ///< audio thread, as of the block being processed
+    bool makesNotes_ = false; ///< it says it sends MIDI to the host
+    std::array<NoteEvent, PluginInstance::kMaxNotes> made_{}; ///< audio thread: the notes it sent this block
+    std::size_t madeCount_ = 0;
+
+    [[nodiscard]] int programCount() const noexcept { return std::clamp(effect_->numPrograms, 0, 4096); }
 
     std::vector<std::vector<float>> inputs_, outputs_;
     std::vector<float*> inputPointers_, outputPointers_;

@@ -323,6 +323,10 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proces
         }
         if (plugin->instrument) {
             out[0][i] = 0.1f * static_cast<float>(plugin->count);
+            if (plugin->pads) { // its second port carries 0.2
+                process->audio_outputs[1].data32[0][i] = 0.2f;
+                process->audio_outputs[1].data32[1][i] = 0.2f;
+            }
             if (plugin->pads)
                 out[1][i] = process->transport != nullptr
                         && (process->transport->flags & CLAP_TRANSPORT_HAS_TIME_SIGNATURE) != 0

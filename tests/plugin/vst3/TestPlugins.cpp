@@ -426,6 +426,10 @@ public:
             }
             const auto down = static_cast<float>(std::count(held_.begin(), held_.end(), true));
             left[i] = 0.1f * down;
+            if (audioOutputs_ > 1 && data.numOutputs > 1 && data.outputs[1].numChannels > 1) {
+                data.outputs[1].channelBuffers32[0][i] = 0.2f; // "Drums": its second output
+                data.outputs[1].channelBuffers32[1][i] = 0.2f;
+            }
             if (audioOutputs_ > 1) // "Drums": the time signature's beats per bar / 100
                 right[i] = song != nullptr && (song->state & ProcessContext::kTimeSigValid) != 0
                     ? static_cast<float>(song->timeSigNumerator) / 100.0f

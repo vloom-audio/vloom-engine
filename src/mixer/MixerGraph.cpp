@@ -45,7 +45,10 @@ const MixerRoute* sameRoute(const MixerGraph* previous, const MixerRoute& route)
     for (int i = first; i < first + previous->routeCount[source]; ++i) {
         const MixerRoute& old = previous->routes[static_cast<std::size_t>(i)];
         if (old.slot == route.slot)
-            return old.target == route.target && old.preFader == route.preFader ? &old : nullptr;
+            return old.target == route.target && old.preFader == route.preFader
+                    && old.sidechain == route.sidechain
+                ? &old
+                : nullptr;
     }
     return nullptr;
 }
@@ -99,6 +102,7 @@ std::unique_ptr<MixerGraph> buildMixerGraph(
             send.target = insert.sends[s].target;
             send.gain = insert.sends[s].gain;
             send.preFader = insert.sends[s].preFader;
+            send.sidechain = insert.sends[s].sidechain;
             send.slot = static_cast<int>(s) + 1;
             add(send);
         }

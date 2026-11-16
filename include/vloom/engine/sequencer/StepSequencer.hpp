@@ -3,10 +3,13 @@
 #pragma once
 
 #include "vloom/engine/core/SnapshotExchange.hpp"
+#include "vloom/engine/plugin/PluginInstance.hpp"
 #include "vloom/engine/sequencer/SequencerState.hpp"
 
+#include <array>
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 namespace vloom {
 
@@ -20,6 +23,8 @@ namespace vloom {
 /// real-time safe.
 class StepSequencer {
 public:
+    StepSequencer();
+
     // ---- control thread
     /// Sorts the notes by start (the audio thread searches them), fills in
     /// SequencerState::audioClipKeys, then hands the state over.
@@ -126,6 +131,11 @@ private:
     /// Audio thread: the frame of the block events fire at now (where the
     /// next render() starts), for the note events of instrument plugins.
     int eventFrame_ = 0;
+    /// Audio thread: room for one channel's extra plugin outputs, for the
+    /// (unused) sound of a note effect, and for the notes it makes.
+    std::vector<float> extraMemory_;
+    std::array<float*, 2 * PluginInstance::kMaxExtraOutputs + 2> extraBuffers_{};
+    std::array<NoteEvent, PluginInstance::kMaxNotes> madeNotes_{};
     /// Plays one step of `channel`: its sample, or on a synth or plugin its
     /// root key until tick `end`.
     void playStep(const ChannelState& channel, std::int64_t end) const noexcept;

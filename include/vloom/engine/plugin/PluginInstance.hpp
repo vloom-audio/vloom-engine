@@ -93,6 +93,25 @@ public:
     /// processed.
     void process(float* left, float* right, int numFrames, const TransportInfo& transport,
         std::span<const NoteEvent> notes = {}) noexcept;
+
+    /// Stereo outputs after the main one that one process() call can fill.
+    static constexpr std::size_t kMaxExtraOutputs = 16;
+    /// What else one process() call may carry (all optional).
+    struct Io {
+        /// The sidechain: two channels of numFrames each, or both null.
+        const float* sidechainLeft = nullptr;
+        const float* sidechainRight = nullptr;
+        /// Buffers of numFrames for the outputs after the main one, as in
+        /// ProcessContext::extraOutputs; at most 2 * kMaxExtraOutputs.
+        /// Written with silence while the instance is inactive or bypassed.
+        std::span<float* const> extraOutputs{};
+        /// Room for the notes the processor makes, and how many it made.
+        std::span<NoteEvent> notesOut{};
+        int* notesOutCount = nullptr;
+    };
+    /// As above, with a sidechain, extra outputs and notes out.
+    void process(float* left, float* right, int numFrames, const TransportInfo& transport,
+        std::span<const NoteEvent> notes, const Io& io) noexcept;
     /// Audio thread: forwards to AudioProcessor::reset() when active.
     void reset() noexcept;
 
@@ -105,6 +124,14 @@ public:
     /// Control thread (one thread at a time).
     bool playNote(int key, float velocity);
     bool stopNote(int key);
+
+    /// Controls that can wait for the audio thread; more are refused.
+    static constexpr std::size_t kMaxLiveControls = 255;
+    /// Sends a pitch bend, a controller or pressure (a MIDI keyboard's
+    /// wheels and pedals) with the next block processed. False if too many
+    /// wait or the value is not a number. Dropped while inactive or
+    /// bypassed. Control thread (one thread at a time).
+    bool sendControl(ControlEvent::Type type, int number, float value);
 
     /// Frames the scope remembers: the most readScope() can return.
     static constexpr std::size_t kScopeFrames = 8192;
@@ -138,6 +165,9 @@ private:
     std::array<NoteEvent, kMaxNotes> chunkNotes_{};
 
     SpscQueue<NoteEvent, kMaxLiveNotes + 1> liveNotes_; ///< played by hand, for the next block
+    SpscQueue<ControlEvent, kMaxLiveControls + 1> liveControls_;
+    /// Audio thread: the controls of one block (they go with its first chunk).
+    std::array<ControlEvent, kMaxLiveControls> blockControls_{};
 
     /// Audio thread: adds `numFrames` of output to the scope when it is on.
     void capture(const float* left, const float* right, int numFrames) noexcept;

@@ -329,3 +329,18 @@ TEST_CASE("A VST 3 editor's edits do not allocate on the audio thread", "[plugin
     CHECK(counter.count() == 0);
     plugin->processor().closeEditor();
 }
+
+TEST_CASE(
+    "A VST 3 instrument's other output buses are there for the host to route", "[plugin][vst3][routing]")
+{
+    auto drums = load("Drums");
+    CHECK(drums->processor().extraOutputCount() == static_cast<int>(vloom::PluginInstance::kMaxExtraOutputs));
+    CHECK_FALSE(drums->processor().hasSidechain());
+    std::vector<float> left(64), right(64), second(64, 9.0f), secondRight(64, 9.0f);
+    std::array<float*, 2> extra{second.data(), secondRight.data()};
+    vloom::PluginInstance::Io io;
+    io.extraOutputs = extra;
+    drums->process(left.data(), right.data(), 64, {}, {}, io);
+    CHECK(second[10] == Approx(0.2f));
+    CHECK(secondRight[10] == Approx(0.2f));
+}

@@ -29,6 +29,12 @@ struct Send {
     /// True: taken after the effects, before the insert's volume and pan
     /// (so muting the insert does not mute it). False: after them.
     bool preFader = false;
+    /// True: the copy does not join the target's sound. It goes to the
+    /// target's sidechain: what its effects with a second input (a
+    /// compressor that ducks to a kick, a vocoder's carrier) listen to. All
+    /// sidechain sends to one insert are added up; every such effect of the
+    /// insert hears the same.
+    bool sidechain = false;
 };
 
 /// One insert, as the audio thread sees it. The host folds mute and solo into

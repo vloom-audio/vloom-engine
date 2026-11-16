@@ -16,8 +16,10 @@
 #include "pluginterfaces/vst/ivstmessage.h"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
 #include "pluginterfaces/vst/ivstprocesscontext.h"
+#include "pluginterfaces/vst/ivstunits.h"
 #include "pluginterfaces/vst/vstspeaker.h"
 #include "vloom/engine/core/SpscQueue.hpp"
+#include "vloom/engine/plugin/PluginInstance.hpp"
 #include "vloom/engine/time/MusicalTime.hpp"
 
 #include <algorithm>
@@ -735,6 +737,7 @@ public:
                 controller_->terminate();
         }
         drop(controller_);
+        drop(units_);
         drop(processor_);
         if (component_ != nullptr)
             component_->terminate();
@@ -790,6 +793,36 @@ public:
                 if (componentConnection_ != nullptr && controllerConnection_ != nullptr) {
                     componentConnection_->connect(controllerConnection_);
                     controllerConnection_->connect(componentConnection_);
+                }
+            }
+            // Which of its parameters a pitch bend, a controller or
+            // pressure moves: VST 3 has no events for those. Asked once,
+            // here: the audio thread must not call the controller.
+            vst::IMidiMapping* mapping = nullptr;
+            if (controller_->queryInterface(
+                    vst::IMidiMapping::iid.toTUID(), reinterpret_cast<void**>(&mapping))
+                    == kResultOk
+                && mapping != nullptr) {
+                for (std::size_t control = 0; control < controlParameter_.size(); ++control) {
+                    vst::ParamID moved = 0;
+                    controlMapped_[control] = mapping->getMidiControllerAssignment(
+                                                  0, 0, static_cast<vst::CtrlNumber>(control), moved)
+                        == kResultOk;
+                    controlParameter_[control] = moved;
+                }
+                mapping->release();
+            }
+            if (controller_->queryInterface(vst::IUnitInfo::iid.toTUID(), reinterpret_cast<void**>(&units_))
+                != kResultOk)
+                units_ = nullptr;
+            // The parameter that switches programs, if it has one.
+            const int32 count = controller_->getParameterCount();
+            for (int32 i = 0; i < count && !hasProgramParameter_; ++i) {
+                vst::ParameterInfo p{};
+                if (controller_->getParameterInfo(i, p) == kResultOk
+                    && (p.flags & vst::ParameterInfo::kIsProgramChange) != 0) {
+                    hasProgramParameter_ = true;
+                    programParameter_ = p.id;
                 }
             }
             MemoryStream state;
@@ -857,6 +890,50 @@ public:
         processing_ = false;
         component_->setActive(false);
         active_ = false;
+    }
+
+    [[nodiscard]] int extraOutputCount() const override { return extraOutputs_; }
+    [[nodiscard]] bool hasSidechain() const override { return hasSidechain_; }
+    [[nodiscard]] bool makesNotes() const override { return hasEventOutput_; }
+
+    [[nodiscard]] std::vector<std::string> programs() const override
+    {
+        std::vector<std::string> names;
+        vst::ProgramListInfo list{};
+        if (units_ == nullptr || !hasProgramParameter_ || units_->getProgramListCount() < 1
+            || units_->getProgramListInfo(0, list) != kResultOk)
+            return names;
+        const int32 count = std::clamp<int32>(list.programCount, 0, kMaxPrograms);
+        for (int32 i = 0; i < count; ++i) {
+            vst::String128 name{};
+            if (units_->getProgramName(list.id, i, name) != kResultOk)
+                name[0] = 0;
+            names.push_back(utf8(name, 128));
+            if (names.back().empty())
+                names.back() = "Program " + std::to_string(i + 1);
+        }
+        return names;
+    }
+
+    [[nodiscard]] int currentProgram() const override
+    {
+        const int count = programCount();
+        if (count < 1)
+            return -1;
+        const double value = controller_->getParamNormalized(programParameter_);
+        return std::isfinite(value)
+            ? std::clamp(static_cast<int>(std::lround(value * (count - 1))), 0, count - 1)
+            : -1;
+    }
+
+    bool setProgram(int index) override
+    {
+        const int count = programCount();
+        if (index < 0 || index >= count)
+            return false;
+        const double value = count > 1 ? static_cast<double>(index) / (count - 1) : 0.0;
+        controller_->setParamNormalized(programParameter_, value);
+        return edits_.push(Edit{programParameter_, value}); // to the processor with its next block
     }
 
     [[nodiscard]] int latencyFrames() const override
@@ -959,6 +1036,22 @@ public:
             if (vst::IParamValueQueue* queue = changes_.addParameterData(p.id, index); queue != nullptr)
                 queue->addPoint(std::max(p.frame, 0), std::clamp(p.value, 0.0, 1.0), index);
         }
+        // Controls: as changes of the parameters the plugin mapped them to.
+        for (const ControlEvent& control : context.controls) {
+            const std::size_t which = control.type == ControlEvent::Type::PitchBend ? 129u
+                : control.type == ControlEvent::Type::Pressure
+                ? 128u
+                : static_cast<std::size_t>(std::clamp<int>(control.number, 0, 127));
+            if (!controlMapped_[which] || !std::isfinite(control.value))
+                continue;
+            const double value = control.type == ControlEvent::Type::PitchBend
+                ? 0.5 * (static_cast<double>(control.value) + 1.0)
+                : static_cast<double>(control.value);
+            int32 index = 0;
+            if (vst::IParamValueQueue* queue = changes_.addParameterData(controlParameter_[which], index);
+                queue != nullptr)
+                queue->addPoint(std::max(control.frame, 0), std::clamp(value, 0.0, 1.0), index);
+        }
         // Notes: after a reset, every held key ends first.
         events_.clear();
         const auto note = [&](int frame, bool on, int key, float velocity) {
@@ -995,7 +1088,12 @@ public:
         for (std::size_t bus = 0; bus < inputs_.size(); ++bus)
             for (std::size_t ch = 0; ch < inputs_[bus].pointers.size(); ++ch) {
                 float* dst = inputs_[bus].pointers[ch];
-                if (bus != 0 || ch >= 2)
+                if (bus == 1 && context.sidechain != nullptr && ch < 2 && inputs_[bus].pointers.size() > 1)
+                    std::copy_n(context.sidechain[ch], frames, dst);
+                else if (bus == 1 && context.sidechain != nullptr && inputs_[bus].pointers.size() == 1)
+                    for (std::size_t i = 0; i < frames; ++i)
+                        dst[i] = 0.5f * (context.sidechain[0][i] + context.sidechain[1][i]);
+                else if (bus != 0 || ch >= 2)
                     std::fill_n(dst, frames, 0.0f);
                 else if (inputs_[bus].pointers.size() == 1)
                     for (std::size_t i = 0; i < frames; ++i)
@@ -1054,9 +1152,43 @@ public:
         data.outputs = outputBuffers_.empty() ? nullptr : outputBuffers_.data();
         data.inputParameterChanges = &changes_;
         data.inputEvents = hasEventInput_ ? &events_ : nullptr;
+        madeEvents_.clear();
+        data.outputEvents = hasEventOutput_ ? &madeEvents_ : nullptr;
         data.processContext = &song;
-        if (processor_->process(data) != kResultOk || outputs_.empty())
+        if (processor_->process(data) != kResultOk)
             return; // the audio stays as it came
+        // The notes it made (an arpeggiator), for the host to pass on.
+        if (context.notesOutCount != nullptr) {
+            std::size_t made = 0;
+            const int32 count = madeEvents_.getEventCount();
+            for (int32 i = 0; i < count && made < context.notesOut.size(); ++i) {
+                vst::Event e{};
+                if (madeEvents_.getEvent(i, e) != kResultOk
+                    || (e.type != vst::Event::kNoteOnEvent && e.type != vst::Event::kNoteOffEvent))
+                    continue;
+                const bool on = e.type == vst::Event::kNoteOnEvent;
+                const int key = on ? e.noteOn.pitch : e.noteOff.pitch;
+                const float velocity = on ? e.noteOn.velocity : e.noteOff.velocity;
+                if (key < 0 || key > 127)
+                    continue;
+                context.notesOut[made++] = NoteEvent{std::clamp(e.sampleOffset, 0, context.numFrames - 1),
+                    on ? NoteEvent::Type::On : NoteEvent::Type::Off, static_cast<std::int16_t>(key),
+                    std::isfinite(velocity) ? std::clamp(velocity, 0.0f, 1.0f) : 0.0f};
+            }
+            *context.notesOutCount = static_cast<int>(made);
+        }
+        // Its outputs after the main one, for the host to route apart.
+        for (std::size_t k = 0; k + 1 < context.extraOutputs.size(); k += 2) {
+            const std::size_t bus = k / 2 + 1;
+            if (bus >= outputs_.size() || outputs_[bus].pointers.empty())
+                continue; // no such output: the host's silence stays
+            const BusBuffers& extra = outputs_[bus];
+            std::copy_n(extra.pointers[0], frames, context.extraOutputs[k]);
+            std::copy_n(
+                extra.pointers[extra.pointers.size() > 1 ? 1 : 0], frames, context.extraOutputs[k + 1]);
+        }
+        if (outputs_.empty())
+            return;
 
         // The main output back. A plugin with no audio input (an
         // instrument) adds to what is there; an effect replaces it.
@@ -1215,13 +1347,25 @@ private:
                 for (auto& channel : bus.channels)
                     bus.pointers.push_back(channel.data());
                 buses.push_back(std::move(bus));
-                component_->activateBus(vst::kAudio, direction, i, i == 0);
+                // The main bus, the sidechain, and the outputs a host may route apart.
+                const bool wanted = direction == vst::kInput
+                    ? i < 2
+                    : i <= static_cast<int32>(PluginInstance::kMaxExtraOutputs);
+                component_->activateBus(vst::kAudio, direction, i, wanted);
             }
             return true;
         };
         if (!size(inCount, vst::kInput, inputs_, inputBuffers_)
             || !size(outCount, vst::kOutput, outputs_, outputBuffers_))
             return false;
+        hasSidechain_ = inputs_.size() > 1 && !inputs_[1].pointers.empty();
+        extraOutputs_ = 0;
+        for (std::size_t bus = 1; bus < outputs_.size() && bus <= PluginInstance::kMaxExtraOutputs; ++bus)
+            if (!outputs_[bus].pointers.empty())
+                extraOutputs_ = static_cast<int>(bus);
+        hasEventOutput_ = component_->getBusCount(vst::kEvent, vst::kOutput) > 0;
+        if (hasEventOutput_)
+            component_->activateBus(vst::kEvent, vst::kOutput, 0, true);
         hasEventInput_ = component_->getBusCount(vst::kEvent, vst::kInput) > 0;
         if (hasEventInput_)
             component_->activateBus(vst::kEvent, vst::kInput, 0, true);
@@ -1249,6 +1393,27 @@ private:
     bool active_ = false;
     bool processing_ = false; ///< audio thread, once active
     bool hasEventInput_ = false;
+    bool hasEventOutput_ = false;
+    bool hasSidechain_ = false; ///< it has a second audio input bus
+    int extraOutputs_ = 0; ///< its output buses after the main one that a host can route
+    /// Per MIDI control (0 .. 127 controllers, 128 pressure, 129 pitch
+    /// bend): the parameter the plugin moves for it, if any.
+    std::array<bool, 130> controlMapped_{};
+    std::array<vst::ParamID, 130> controlParameter_{};
+    vst::IUnitInfo* units_ = nullptr; ///< where its program names are
+    bool hasProgramParameter_ = false;
+    vst::ParamID programParameter_ = 0;
+    static constexpr int32 kMaxPrograms = 4096;
+
+    /// How many programs its first list has, if it has a way to switch.
+    [[nodiscard]] int programCount() const
+    {
+        vst::ProgramListInfo list{};
+        if (units_ == nullptr || !hasProgramParameter_ || units_->getProgramListCount() < 1
+            || units_->getProgramListInfo(0, list) != kResultOk)
+            return 0;
+        return std::clamp<int32>(list.programCount, 0, kMaxPrograms);
+    }
     bool resetPending_ = false; ///< audio thread
     double sampleRate_ = 48000.0;
     std::array<bool, 128> held_{}; ///< audio thread: keys it was told are down
@@ -1257,6 +1422,7 @@ private:
     std::vector<vst::AudioBusBuffers> inputBuffers_, outputBuffers_;
     ParamChanges changes_;
     EventList events_;
+    EventList madeEvents_; ///< the notes the plugin put out this block
 };
 
 using GetFactory = Steinberg::IPluginFactory*(PLUGIN_API*)();

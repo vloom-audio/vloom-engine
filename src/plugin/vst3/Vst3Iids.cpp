@@ -15,6 +15,7 @@
 #include "pluginterfaces/vst/ivstmessage.h"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
 #include "pluginterfaces/vst/ivstprocesscontext.h"
+#include "pluginterfaces/vst/ivstunits.h"
 
 namespace Steinberg {
 
@@ -40,6 +41,8 @@ DEF_CLASS_IID(IHostApplication)
 DEF_CLASS_IID(IEventList)
 DEF_CLASS_IID(IParameterChanges)
 DEF_CLASS_IID(IParamValueQueue)
+DEF_CLASS_IID(IMidiMapping)
+DEF_CLASS_IID(IUnitInfo)
 
 } // namespace Vst
 } // namespace Steinberg

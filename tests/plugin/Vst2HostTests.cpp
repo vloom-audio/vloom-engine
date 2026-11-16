@@ -473,3 +473,55 @@ TEST_CASE("A module file tells what it is without being loaded", "[plugin][vst2]
     CHECK_FALSE(readModule(__FILE__, {"main"}).module); // a text file
 }
 #endif
+
+TEST_CASE("A VST 2 plugin gets a sidechain and controls, and gives extra outputs, notes and programs",
+    "[plugin][vst2][routing]")
+{
+    // tests/plugin/vst2/MultiPlugin.cpp
+    auto plugin = load(VLOOM_TEST_VST2_MULTI);
+    vloom::AudioProcessor& multi = plugin->processor();
+    CHECK(multi.hasSidechain());
+    CHECK(multi.extraOutputCount() == 2);
+    CHECK(multi.makesNotes());
+    REQUIRE(multi.programs() == std::vector<std::string>{"Soft", "Hard", "Wide"});
+    CHECK(multi.currentProgram() == 0);
+    CHECK(multi.setProgram(2));
+    CHECK(multi.currentProgram() == 2);
+    CHECK_FALSE(multi.setProgram(3));
+
+    constexpr int kFrames = 64;
+    std::vector<float> left(kFrames, 0.5f), right(kFrames, 0.5f), side(kFrames, 0.25f);
+    std::array<std::vector<float>, 6> extra;
+    std::array<float*, 6> extraPointers{};
+    for (std::size_t i = 0; i < extra.size(); ++i) {
+        extra[i].assign(kFrames, 9.0f); // stale: the host must not leave it
+        extraPointers[i] = extra[i].data();
+    }
+    std::array<vloom::NoteEvent, 8> made{};
+    int madeCount = 0;
+    vloom::PluginInstance::Io io;
+    io.sidechainLeft = side.data();
+    io.sidechainRight = side.data();
+    io.extraOutputs = extraPointers;
+    io.notesOut = made;
+    io.notesOutCount = &madeCount;
+    REQUIRE(plugin->sendControl(vloom::ControlEvent::Type::PitchBend, 0, 1.0f));
+    REQUIRE(plugin->sendControl(vloom::ControlEvent::Type::Controller, 1, 1.0f));
+    const std::array<vloom::NoteEvent, 1> on{vloom::NoteEvent{5, vloom::NoteEvent::Type::On, 60, 1.0f}};
+    plugin->process(left.data(), right.data(), kFrames, {}, on, io);
+
+    CHECK(left[10] == Approx(0.5f * 0.75f)); // turned down by the sidechain
+    CHECK(extra[0][10] == Approx(1.0f)); // output 2, left: the pitch bend, all the way up
+    CHECK(extra[1][10] == Approx(1.0f)); // output 2, right: the mod wheel
+    CHECK(extra[2][10] == Approx(0.3f)); // output 3
+    CHECK(extra[4][10] == 0.0f); // an output it does not have: silence, not what was there
+    REQUIRE(madeCount == 1); // the note it sent back, an octave up, at its frame
+    CHECK(made[0].key == 72);
+    CHECK(made[0].frame == 5);
+    CHECK(made[0].type == vloom::NoteEvent::Type::On);
+
+    // Without a sidechain it hears silence there: the sound passes.
+    std::fill(left.begin(), left.end(), 0.5f);
+    plugin->process(left.data(), right.data(), kFrames, {});
+    CHECK(left[10] == Approx(0.5f));
+}
