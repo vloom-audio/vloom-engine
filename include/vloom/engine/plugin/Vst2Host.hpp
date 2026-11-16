@@ -36,7 +36,8 @@ public:
     /// The same, with the plugin in the bridge process `bridge` starts (a
     /// vloom-plugin-bridge executable): a crash of the plugin then ends the
     /// bridge, not the host, and the plugin goes silent. Windows only. A
-    /// file that is open already keeps the way it was opened.
+    /// file can be open both ways at once: this never gives a library
+    /// whose plugins run in the host.
     static std::shared_ptr<Vst2Library> openBridged(
         const std::filesystem::path& path, const std::filesystem::path& bridge, std::string* error = nullptr);
 

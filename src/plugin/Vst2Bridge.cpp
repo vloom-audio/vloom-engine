@@ -28,8 +28,11 @@ using plugin_files::fail;
 /// instrument takes its time; everything else is quick.
 constexpr DWORD kLoadTimeoutMs = 120'000;
 constexpr DWORD kControlTimeoutMs = 20'000;
-/// How long the audio thread waits for a block before it goes on without it.
-constexpr DWORD kAudioTimeoutMs = 2'000;
+/// How long the audio thread waits for a block before it goes on without
+/// it: twice the time the block lasts, within these bounds. Longer would
+/// make every other sound of the engine late for one slow plugin.
+constexpr DWORD kMinAudioWaitMs = 50;
+constexpr DWORD kMaxAudioWaitMs = 200;
 
 /// A kernel handle that closes itself.
 class Handle {
@@ -407,7 +410,9 @@ public:
         }
         ::SetEvent(audioRequest_.get());
         const HANDLE handles[2] = {audioAnswer_.get(), process_.get()};
-        const DWORD woke = ::WaitForMultipleObjects(2, handles, FALSE, kAudioTimeoutMs);
+        const double blockMs = 1000.0 * context.numFrames / sampleRate_;
+        const DWORD wait = std::clamp(static_cast<DWORD>(2.0 * blockMs), kMinAudioWaitMs, kMaxAudioWaitMs);
+        const DWORD woke = ::WaitForMultipleObjects(2, handles, FALSE, wait);
         if (woke == WAIT_TIMEOUT) {
             awaiting_ = true; // slow, not gone (a sampler loading): back when it answers
             return;

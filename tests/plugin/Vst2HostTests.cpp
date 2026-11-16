@@ -291,6 +291,21 @@ std::shared_ptr<vloom::PluginInstance> loadBridged(const std::filesystem::path& 
 
 } // namespace
 
+TEST_CASE("A file open in the host can be opened in a bridge too", "[plugin][vst2][bridge]")
+{
+    // Asking for a bridge must never give the library whose plugin runs in
+    // the host, however the file was opened before.
+    auto inProcess = vloom::Vst2Library::open(kTestLevel);
+    REQUIRE(inProcess != nullptr);
+    CHECK_FALSE(inProcess->isBridged());
+    auto bridged = vloom::Vst2Library::openBridged(kTestLevel, VLOOM_TEST_BRIDGE);
+    REQUIRE(bridged != nullptr);
+    CHECK(bridged->isBridged());
+    CHECK(bridged != inProcess);
+    CHECK(vloom::Vst2Library::openBridged(kTestLevel, VLOOM_TEST_BRIDGE) == bridged);
+    CHECK(vloom::Vst2Library::open(kTestLevel) == inProcess);
+}
+
 TEST_CASE("A bridge that cannot be started is an error, not a crash", "[plugin][vst2][bridge]")
 {
     std::string error;
@@ -419,7 +434,7 @@ TEST_CASE("A bridged plugin that is slow for one block comes back", "[plugin][vs
     CHECK_FALSE(keys->processor().hasFailed());
     keys->process(l.data(), r.data(), 64, {}); // still busy: passed through at once
     CHECK(l[10] == 0.25f);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    std::this_thread::sleep_for(std::chrono::milliseconds(3200));
     keys->process(l.data(), r.data(), 64, {}); // its late answer is dropped
     std::fill(l.begin(), l.end(), 0.0f);
     keys->process(l.data(), r.data(), 64, {});
