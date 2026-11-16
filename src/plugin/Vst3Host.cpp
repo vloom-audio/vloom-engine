@@ -803,13 +803,16 @@ public:
                     vst::IMidiMapping::iid.toTUID(), reinterpret_cast<void**>(&mapping))
                     == kResultOk
                 && mapping != nullptr) {
-                for (std::size_t control = 0; control < controlParameter_.size(); ++control) {
-                    vst::ParamID moved = 0;
-                    controlMapped_[control] = mapping->getMidiControllerAssignment(
-                                                  0, 0, static_cast<vst::CtrlNumber>(control), moved)
-                        == kResultOk;
-                    controlParameter_[control] = moved;
-                }
+                // For every channel: an MPE plugin maps the controls of each to another parameter.
+                for (std::size_t channel = 0; channel < controlParameter_.size(); ++channel)
+                    for (std::size_t control = 0; control < controlParameter_[channel].size(); ++control) {
+                        vst::ParamID moved = 0;
+                        controlMapped_[channel][control]
+                            = mapping->getMidiControllerAssignment(0, static_cast<Steinberg::int16>(channel),
+                                  static_cast<vst::CtrlNumber>(control), moved)
+                            == kResultOk;
+                        controlParameter_[channel][control] = moved;
+                    }
                 mapping->release();
             }
             if (controller_->queryInterface(vst::IUnitInfo::iid.toTUID(), reinterpret_cast<void**>(&units_))
@@ -874,7 +877,7 @@ public:
             return false;
         active_ = true;
         processing_ = false;
-        held_.fill(false);
+        held_.fill(0);
         resetPending_ = false;
         return true;
     }
@@ -1038,51 +1041,58 @@ public:
         }
         // Controls: as changes of the parameters the plugin mapped them to.
         for (const ControlEvent& control : context.controls) {
+            const auto onChannel = static_cast<std::size_t>(std::clamp<int>(control.channel, 0, 15));
             const std::size_t which = control.type == ControlEvent::Type::PitchBend ? 129u
                 : control.type == ControlEvent::Type::Pressure
                 ? 128u
                 : static_cast<std::size_t>(std::clamp<int>(control.number, 0, 127));
-            if (!controlMapped_[which] || !std::isfinite(control.value))
+            if (!controlMapped_[onChannel][which] || !std::isfinite(control.value))
                 continue;
             const double value = control.type == ControlEvent::Type::PitchBend
                 ? 0.5 * (static_cast<double>(control.value) + 1.0)
                 : static_cast<double>(control.value);
             int32 index = 0;
-            if (vst::IParamValueQueue* queue = changes_.addParameterData(controlParameter_[which], index);
+            if (vst::IParamValueQueue* queue
+                = changes_.addParameterData(controlParameter_[onChannel][which], index);
                 queue != nullptr)
                 queue->addPoint(std::max(control.frame, 0), std::clamp(value, 0.0, 1.0), index);
         }
         // Notes: after a reset, every held key ends first.
         events_.clear();
-        const auto note = [&](int frame, bool on, int key, float velocity) {
+        const auto note = [&](int frame, bool on, int key, float velocity, int channel) {
             vst::Event e{};
             e.busIndex = 0;
             e.sampleOffset = std::max(frame, 0);
             if (on) {
                 e.type = vst::Event::kNoteOnEvent;
-                e.noteOn.channel = 0;
+                e.noteOn.channel = static_cast<Steinberg::int16>(channel);
                 e.noteOn.pitch = static_cast<Steinberg::int16>(key);
                 e.noteOn.velocity = velocity;
                 e.noteOn.noteId = -1;
             } else {
                 e.type = vst::Event::kNoteOffEvent;
-                e.noteOff.channel = 0;
+                e.noteOff.channel = static_cast<Steinberg::int16>(channel);
                 e.noteOff.pitch = static_cast<Steinberg::int16>(key);
                 e.noteOff.velocity = velocity;
                 e.noteOff.noteId = -1;
             }
-            if (events_.addEvent(e) == kResultOk)
-                held_[static_cast<std::size_t>(key)] = on;
+            if (events_.addEvent(e) == kResultOk) {
+                std::uint16_t& channels = held_[static_cast<std::size_t>(key)];
+                channels = static_cast<std::uint16_t>(
+                    on ? channels | (1u << channel) : channels & ~(1u << channel));
+            }
         };
         if (resetPending_) {
             resetPending_ = false;
             for (int key = 0; key < 128; ++key)
-                if (held_[static_cast<std::size_t>(key)])
-                    note(0, false, key, 0.0f);
+                for (int channel = 0; channel < 16; ++channel)
+                    if (((held_[static_cast<std::size_t>(key)] >> channel) & 1u) != 0)
+                        note(0, false, key, 0.0f, channel);
         }
         for (const NoteEvent& n : context.notes)
             if (n.key >= 0 && n.key < 128)
-                note(n.frame, n.type == NoteEvent::Type::On, n.key, std::clamp(n.velocity, 0.0f, 1.0f));
+                note(n.frame, n.type == NoteEvent::Type::On, n.key, std::clamp(n.velocity, 0.0f, 1.0f),
+                    std::clamp<int>(n.channel, 0, 15));
 
         // Audio: ours into the main input; every other buffer silent.
         for (std::size_t bus = 0; bus < inputs_.size(); ++bus)
@@ -1175,7 +1185,9 @@ public:
                     continue;
                 context.notesOut[made++] = NoteEvent{std::clamp(e.sampleOffset, 0, context.numFrames - 1),
                     on ? NoteEvent::Type::On : NoteEvent::Type::Off, static_cast<std::int16_t>(key),
-                    std::isfinite(velocity) ? std::clamp(velocity, 0.0f, 1.0f) : 0.0f};
+                    std::isfinite(velocity) ? std::clamp(velocity, 0.0f, 1.0f) : 0.0f,
+                    static_cast<std::int16_t>(
+                        std::clamp<int>(on ? e.noteOn.channel : e.noteOff.channel, 0, 15))};
             }
             *context.notesOutCount = static_cast<int>(made);
         }
@@ -1408,8 +1420,8 @@ private:
     int extraOutputs_ = 0; ///< its output buses after the main one that a host can route
     /// Per MIDI control (0 .. 127 controllers, 128 pressure, 129 pitch
     /// bend): the parameter the plugin moves for it, if any.
-    std::array<bool, 130> controlMapped_{};
-    std::array<vst::ParamID, 130> controlParameter_{};
+    std::array<std::array<bool, 130>, 16> controlMapped_{}; ///< per MIDI channel
+    std::array<std::array<vst::ParamID, 130>, 16> controlParameter_{};
     vst::IUnitInfo* units_ = nullptr; ///< where its program names are
     bool hasProgramParameter_ = false;
     vst::ParamID programParameter_ = 0;
@@ -1426,7 +1438,7 @@ private:
     }
     bool resetPending_ = false; ///< audio thread
     double sampleRate_ = 48000.0;
-    std::array<bool, 128> held_{}; ///< audio thread: keys it was told are down
+    std::array<std::uint16_t, 128> held_{}; ///< audio thread: per key, the channels it was told it is down on
 
     std::vector<BusBuffers> inputs_, outputs_;
     std::vector<vst::AudioBusBuffers> inputBuffers_, outputBuffers_;

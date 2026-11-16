@@ -216,21 +216,22 @@ void PluginInstance::process(float* left, float* right, int numFrames, const Tra
     capture(left, right, numFrames);
 }
 
-bool PluginInstance::playNote(int key, float velocity)
+bool PluginInstance::playNote(int key, float velocity, int channel)
 {
     if (!std::isfinite(velocity))
         return false;
-    return liveNotes_.push(NoteEvent{0, NoteEvent::Type::On,
-        static_cast<std::int16_t>(std::clamp(key, 0, 127)), std::clamp(velocity, 0.0f, 1.0f)});
+    return liveNotes_.push(
+        NoteEvent{0, NoteEvent::Type::On, static_cast<std::int16_t>(std::clamp(key, 0, 127)),
+            std::clamp(velocity, 0.0f, 1.0f), static_cast<std::int16_t>(std::clamp(channel, 0, 15))});
 }
 
-bool PluginInstance::sendControl(ControlEvent::Type type, int number, float value)
+bool PluginInstance::sendControl(ControlEvent::Type type, int number, float value, int channel)
 {
     if (!std::isfinite(value))
         return false;
     const float low = type == ControlEvent::Type::PitchBend ? -1.0f : 0.0f;
-    return liveControls_.push(ControlEvent{
-        0, type, static_cast<std::int16_t>(std::clamp(number, 0, 127)), std::clamp(value, low, 1.0f)});
+    return liveControls_.push(ControlEvent{0, type, static_cast<std::int16_t>(std::clamp(number, 0, 127)),
+        std::clamp(value, low, 1.0f), static_cast<std::int16_t>(std::clamp(channel, 0, 15))});
 }
 
 std::size_t PluginInstance::takeLiveNotes(std::span<NoteEvent> out) noexcept
@@ -243,10 +244,11 @@ std::size_t PluginInstance::takeLiveNotes(std::span<NoteEvent> out) noexcept
     return taken;
 }
 
-bool PluginInstance::stopNote(int key)
+bool PluginInstance::stopNote(int key, int channel)
 {
     return liveNotes_.push(
-        NoteEvent{0, NoteEvent::Type::Off, static_cast<std::int16_t>(std::clamp(key, 0, 127)), 0.0f});
+        NoteEvent{0, NoteEvent::Type::Off, static_cast<std::int16_t>(std::clamp(key, 0, 127)), 0.0f,
+            static_cast<std::int16_t>(std::clamp(channel, 0, 15))});
 }
 
 void PluginInstance::setScopeEnabled(bool enabled)

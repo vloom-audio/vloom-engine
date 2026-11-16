@@ -65,7 +65,7 @@ public:
         synth.stopAll();
         plugin.releaseHeld(frame); // the plugin fades its own notes
         endMade = true; // and what a note effect made of them ends too
-        centreBend = bent;
+        centreBend = bent != 0;
     }
 
     // ---- audio thread
@@ -78,7 +78,7 @@ public:
     // the notes came (the channel's own, through note effects, from another
     // channel): the host ends them itself when that way changes or an
     // effect is stopped, since their note-offs will then not come.
-    std::array<bool, 128> madeHeld{};
+    std::array<std::uint16_t, 128> madeHeld{}; ///< per key: the channels it is down on
     /// The note effects the last block's notes went through (compared, never used).
     std::array<const void*, 8> lastEffects{};
     int lastEffectCount = 0;
@@ -92,7 +92,7 @@ public:
     /// The song's controls for the plugin in the block being rendered, in frame order.
     std::array<ControlEvent, 256> controls{};
     std::size_t controlCount = 0;
-    bool bent = false; ///< a pitch bend of the song is in force
+    std::uint16_t bent = 0; ///< the channels a pitch bend of the song is in force on
     bool centreBend = false; ///< stopAll() ran while it was: put the pitch back
     StereoGain applied{}; ///< gain at the end of the last block: the next ramp starts there
 };
@@ -118,6 +118,7 @@ struct ControlPoint {
     ControlEvent::Type type = ControlEvent::Type::Controller;
     std::int16_t number = 0; ///< Controller: which one, 0 .. 127
     float value = 0.0f; ///< PitchBend: -1 .. +1; the others: 0 .. 1
+    std::int16_t channel = 0; ///< the MIDI channel, 0 .. 15
 };
 
 /// What a channel plays its steps and notes with.
