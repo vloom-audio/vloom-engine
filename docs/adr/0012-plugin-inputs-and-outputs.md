@@ -103,7 +103,8 @@ that orders them and lines up their delays (ADR 0007).
 - A VST 2 plugin's inputs 3 and 4 are taken for the sidechain without the
   plugin saying so: the format has no way to say it. A CLAP plugin's
   second input port counts as one unless it is marked as a main port.
-- MPE is ADR 0013. Surround is not done: a piece of work of its own.
+- MPE is ADR 0013. Surround plugins are ADR 0014; mixing in surround is
+  not done.
 - VST 3 controls reach only plugins that say which parameter a control
   moves, asked once for the first event bus and channel.
 - CLAP plugins that take notes as CLAP events only get no pitch bend or
