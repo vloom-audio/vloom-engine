@@ -709,3 +709,56 @@ TEST_CASE("Taking another channel's notes away ends the ones held", "[plugin][se
     engine.setSequencerState(rack(-1)); // no longer: its note-off would never come
     CHECK(render(engine, 0.1)[2000 * 2] == 0.0f);
 }
+
+TEST_CASE("Note-effect chains, shared notes, the song's controls and a delayed sidechain do not allocate",
+    "[plugin][routing]")
+{
+    using Type = vloom::ControlEvent::Type;
+    vloom::Engine engine;
+    prepare(engine);
+    auto state = std::make_unique<vloom::SequencerState>();
+    // A channel with two note effects in a row and controls written into its pattern ...
+    state->channels.push_back(channel(make<Keys>(2), 1, true));
+    state->channels[0].steps = {1, 0, 1, 1};
+    state->channels[0].notes = {{30, 400, 67, 0.5f}};
+    state->channels[0].pluginOutputs = {2, 0};
+    state->channels[0].noteEffect = make<Octaver>();
+    state->channels[0].noteEffects = {make<Octaver>()};
+    state->channels[0].controls = {{0, Type::PitchBend, 0, 0.5f}, {100, Type::Controller, 1, 0.3f},
+        {300, Type::PitchBend, 0, -0.5f}, {700, Type::Pressure, 0, 0.8f}};
+    // ... one that plays its notes too, with controls of its own ...
+    state->channels.push_back(channel(make<Wheels>(), 2));
+    state->channels[1].notesFrom = 0;
+    state->channels[1].controls = {{50, Type::PitchBend, 0, 1.0f}};
+    // ... and one that names the second as its source.
+    state->channels.push_back(channel(make<Keys>(), 0, true));
+    state->channels[2].notesFrom = 1;
+    engine.setSequencerState(std::move(state));
+    // Insert 2 sends to the sidechain of insert 1, whose ducker sits behind an effect with latency.
+    auto mixer = std::make_unique<vloom::MixerState>();
+    mixer->inserts.resize(2);
+    mixer->inserts[0].effects = {make<Late>(), make<Ducker>()};
+    vloom::Send send;
+    send.target = 1;
+    send.sidechain = true;
+    mixer->inserts[1].sends = {send};
+    engine.setMixerState(std::move(mixer));
+    engine.play();
+    std::vector<float> l(256), r(256);
+    std::array<float*, 2> out{l.data(), r.data()};
+    long long onAudioThread = 0;
+    float heard = 0.0f;
+    for (int block = 0; block < 600; ++block) {
+        if (block == 300)
+            engine.stop(); // ends the notes the effects made, centres the bend
+        if (block == 320)
+            engine.play();
+        const vloom::test::AllocationCounter counter;
+        engine.process(out.data(), 2, 256);
+        onAudioThread += counter.count();
+        for (float sample : l)
+            heard = std::max(heard, std::abs(sample));
+    }
+    CHECK(onAudioThread == 0);
+    CHECK(heard > 0.0f); // and it did play
+}
