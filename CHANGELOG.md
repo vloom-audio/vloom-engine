@@ -7,6 +7,24 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Plugins get more than their main sound (ADR 0012), for CLAP, VST 3 and
+  VST 2 alike:
+  - **Sidechains.** `Send::sidechain` sends an insert's sound to another
+    insert's sidechain, where its effects with a second input hear it (a
+    compressor ducking to a kick). `AudioProcessor::hasSidechain()`.
+  - **Extra outputs.** `ChannelState::pluginOutputs` names an insert for
+    each output an instrument has after its main one (a drum machine's
+    pads). `AudioProcessor::extraOutputCount()`.
+  - **Note effects.** `ChannelState::noteEffect` is a plugin that makes
+    notes from the channel's (an arpeggiator); the instrument plays what it
+    puts out. `AudioProcessor::makesNotes()`.
+  - **Pitch bend, controllers and pressure.**
+    `PluginInstance::sendControl()`, e.g. for a MIDI keyboard's wheels.
+  - **Programs.** `AudioProcessor::programs()`, `currentProgram()` and
+    `setProgram()` (VST 3 and VST 2).
+
+  `ProcessContext` carries all of it; processors that use none need no
+  change. `PluginInstance::process()` has an overload with an `Io`.
 - VST 2 plugins are hosted (ADR 0010): `plugin/Vst2Host` has `Vst2Library`
   (`open`, `plugins`, `create`), `vst2SearchPaths()` and `findVst2Files()`.
   Effects and instruments, 32-bit audio, notes as MIDI, parameters, state,

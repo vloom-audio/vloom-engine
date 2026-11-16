@@ -15,3 +15,4 @@
   - [0009 Plugin editors](adr/0009-plugin-editors.md)
   - [0010 Hosting VST 2 plugins without the VST 2 SDK](adr/0010-vst2-hosting.md)
   - [0011 A bridge process for plugins the host cannot load](adr/0011-plugin-bridge.md)
+  - [0012 More than a plugin's main sound](adr/0012-plugin-inputs-and-outputs.md)
