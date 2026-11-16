@@ -49,6 +49,10 @@ struct NoteEvent {
     Type type = Type::On;
     std::int16_t key = 60; ///< MIDI key, 0 .. 127
     float velocity = 1.0f; ///< 0 .. 1
+    /// The MIDI channel, 0 .. 15. With MPE each note sounding has a channel
+    /// of its own, so that the controls sent on that channel bend and shape
+    /// that note alone; without, everything is on channel 0.
+    std::int16_t channel = 0;
 };
 
 /// What an instrument is played with besides notes: MIDI's continuous
@@ -59,6 +63,7 @@ struct ControlEvent {
     Type type = Type::Controller;
     std::int16_t number = 0; ///< Controller: which one, 0 .. 127 (1 = the mod wheel)
     float value = 0.0f; ///< PitchBend: -1 .. +1 (0 = centre); the others: 0 .. 1
+    std::int16_t channel = 0; ///< the MIDI channel, 0 .. 15 (NoteEvent::channel)
 };
 
 /// What the host tells a processor about the song while it processes.

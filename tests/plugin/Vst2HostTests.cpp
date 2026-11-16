@@ -580,3 +580,28 @@ TEST_CASE("A bridged VST 2 plugin gets a sidechain and controls, and gives extra
     CHECK(made[0].frame == 5);
 }
 #endif
+
+TEST_CASE("A VST 2 plugin gets and gives notes on their MIDI channels", "[plugin][vst2][mpe]")
+{
+    // The test plugin sends every note-on back an octave up, on the channel it came on.
+    const auto echoed = [](const std::shared_ptr<vloom::PluginInstance>& plugin) {
+        std::vector<float> left(64), right(64);
+        std::array<vloom::NoteEvent, 8> made{};
+        int madeCount = 0;
+        vloom::PluginInstance::Io io;
+        io.notesOut = made;
+        io.notesOutCount = &madeCount;
+        const std::array<vloom::NoteEvent, 2> on{vloom::NoteEvent{0, vloom::NoteEvent::Type::On, 60, 1.0f, 3},
+            vloom::NoteEvent{0, vloom::NoteEvent::Type::On, 62, 1.0f, 11}};
+        plugin->process(left.data(), right.data(), 64, {}, on, io);
+        REQUIRE(madeCount == 2);
+        CHECK(made[0].key == 72);
+        CHECK(made[0].channel == 3);
+        CHECK(made[1].key == 74);
+        CHECK(made[1].channel == 11);
+    };
+    echoed(load(VLOOM_TEST_VST2_MULTI));
+#if defined(VLOOM_TEST_BRIDGE)
+    echoed(loadBridged(VLOOM_TEST_VST2_MULTI));
+#endif
+}

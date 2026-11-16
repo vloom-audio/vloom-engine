@@ -331,9 +331,13 @@ void StepSequencer::sendControl(const ChannelState& channel, const ControlPoint&
         return;
     const float low = point.type == ControlEvent::Type::PitchBend ? -1.0f : 0.0f;
     voices->controls[voices->controlCount++] = ControlEvent{eventFrame_, point.type,
-        static_cast<std::int16_t>(std::clamp<int>(point.number, 0, 127)), std::clamp(point.value, low, 1.0f)};
-    if (point.type == ControlEvent::Type::PitchBend)
-        voices->bent = point.value != 0.0f;
+        static_cast<std::int16_t>(std::clamp<int>(point.number, 0, 127)), std::clamp(point.value, low, 1.0f),
+        static_cast<std::int16_t>(std::clamp<int>(point.channel, 0, 15))};
+    if (point.type == ControlEvent::Type::PitchBend) {
+        const unsigned bit = 1u << std::clamp<int>(point.channel, 0, 15);
+        voices->bent
+            = static_cast<std::uint16_t>(point.value != 0.0f ? voices->bent | bit : voices->bent & ~bit);
+    }
 }
 
 void StepSequencer::playNote(const ChannelState& channel, const Note& note, std::int64_t end) const noexcept
@@ -625,10 +629,24 @@ void StepSequencer::mix(
             for (const auto& effect : channel.noteEffects)
                 stage(effect.get());
             std::size_t given = 0; // notes for the instrument put together here, in madeNotes_
-            const auto end = [&](int frame, int key) {
+            const auto end = [&](int frame, int key, int midiChannel) {
                 if (given < madeNotes_.size())
-                    madeNotes_[given++]
-                        = NoteEvent{frame, NoteEvent::Type::Off, static_cast<std::int16_t>(key), 0.0f};
+                    madeNotes_[given++] = NoteEvent{frame, NoteEvent::Type::Off,
+                        static_cast<std::int16_t>(key), 0.0f, static_cast<std::int16_t>(midiChannel)};
+            };
+            // Ends `key` on every channel it is down on.
+            const auto endKey = [&](int frame, int key) {
+                for (int midiChannel = 0; midiChannel < 16; ++midiChannel)
+                    if (((voices->madeHeld[static_cast<std::size_t>(key)] >> midiChannel) & 1u) != 0)
+                        end(frame, key, midiChannel);
+            };
+            const auto hold = [&](const NoteEvent& note) {
+                if (note.key < 0 || note.key >= 128)
+                    return;
+                const unsigned bit = 1u << std::clamp<int>(note.channel, 0, 15);
+                std::uint16_t& down = voices->madeHeld[static_cast<std::size_t>(note.key)];
+                down
+                    = static_cast<std::uint16_t>(note.type == NoteEvent::Type::On ? down | bit : down & ~bit);
             };
             // The way notes reach the instrument changed: what it holds the
             // old way is ended, since its note-offs now go elsewhere.
@@ -638,11 +656,9 @@ void StepSequencer::mix(
                     = voices->lastEffects[static_cast<std::size_t>(s)] != chain[static_cast<std::size_t>(s)];
             if (changed) {
                 for (int key = 0; key < 128; ++key) {
-                    const auto k = static_cast<std::size_t>(key);
-                    if (voices->madeHeld[k])
-                        end(0, key);
+                    endKey(0, key);
                 }
-                voices->madeHeld.fill(false);
+                voices->madeHeld.fill(0);
                 voices->lastEffectCount = stages;
                 voices->lastSource = source;
                 for (std::size_t s = 0; s < chain.size(); ++s)
@@ -674,8 +690,7 @@ void StepSequencer::mix(
                         break;
                     madeNotes_[given++] = note;
                     if (note.key >= 0 && note.key < 128)
-                        voices->madeHeld[static_cast<std::size_t>(note.key)]
-                            = note.type == NoteEvent::Type::On;
+                        hold(note);
                 }
                 // The song stopped or jumped: effects that go on by
                 // themselves (an arpeggiator) are told, and what they left sounding ends.
@@ -683,9 +698,8 @@ void StepSequencer::mix(
                     for (int s = 0; s < stages; ++s)
                         chain[static_cast<std::size_t>(s)]->reset();
                     for (int key = 0; key < 128; ++key)
-                        if (voices->madeHeld[static_cast<std::size_t>(key)])
-                            end(numFrames - 1, key);
-                    voices->madeHeld.fill(false);
+                        endKey(numFrames - 1, key);
+                    voices->madeHeld.fill(0);
                 }
                 notes = std::span<const NoteEvent>(madeNotes_.data(), given);
             } else if (given > 0) {
@@ -716,18 +730,25 @@ void StepSequencer::mix(
             voices->sentBlock = block_;
             for (const NoteEvent& note : notes)
                 if (note.key >= 0 && note.key < 128)
-                    voices->madeHeld[static_cast<std::size_t>(note.key)] = note.type == NoteEvent::Type::On;
+                    hold(note);
             const std::size_t pairs
                 = std::min(channel.pluginOutputs.size(), PluginInstance::kMaxExtraOutputs);
             PluginInstance::Io io;
             io.extraOutputs = std::span<float* const>(extraBuffers_.data(), 2 * pairs);
-            // The song's controls. Stopped with the pitch bent: back to the centre.
-            if (voices->centreBend && voices->controlCount < voices->controls.size()) {
-                voices->controls[voices->controlCount++]
-                    = ControlEvent{numFrames - 1, ControlEvent::Type::PitchBend, 0, 0.0f};
-                voices->bent = false;
+            // The song's controls. Stopped with the pitch bent: back to the centre,
+            // on every channel it was bent on. One that finds no room in
+            // this block's controls stays marked, and goes with the next.
+            if (voices->centreBend) {
+                for (int midiChannel = 0; midiChannel < 16; ++midiChannel) {
+                    const unsigned bit = 1u << midiChannel;
+                    if ((voices->bent & bit) == 0 || voices->controlCount == voices->controls.size())
+                        continue;
+                    voices->controls[voices->controlCount++] = ControlEvent{numFrames - 1,
+                        ControlEvent::Type::PitchBend, 0, 0.0f, static_cast<std::int16_t>(midiChannel)};
+                    voices->bent = static_cast<std::uint16_t>(voices->bent & ~bit);
+                }
+                voices->centreBend = voices->bent != 0;
             }
-            voices->centreBend = false;
             io.controls = std::span<const ControlEvent>(voices->controls.data(), voices->controlCount);
             channel.plugin->process(
                 voices->left.data(), voices->right.data(), numFrames, transport, notes, io);

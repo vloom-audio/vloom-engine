@@ -415,6 +415,7 @@ public:
             clap_event_midi_t& midi = events_[eventCount_++].midi;
             midi = {};
             midi.header = header(sizeof(midi), control.frame, CLAP_EVENT_MIDI);
+            const int controlChannel = std::clamp<int>(control.channel, 0, 15);
             midi.port_index = 0;
             const auto seven = [](float value) {
                 return static_cast<std::uint8_t>(std::clamp<long>(std::lround(value * 127.0f), 0, 127));
@@ -422,15 +423,15 @@ public:
             if (control.type == ControlEvent::Type::PitchBend) {
                 const long bend
                     = std::clamp<long>(std::lround((control.value + 1.0f) * 0.5f * 16383.0f), 0, 16383);
-                midi.data[0] = 0xE0;
+                midi.data[0] = static_cast<std::uint8_t>(0xE0 | controlChannel);
                 midi.data[1] = static_cast<std::uint8_t>(bend & 0x7F);
                 midi.data[2] = static_cast<std::uint8_t>(bend >> 7);
             } else if (control.type == ControlEvent::Type::Controller) {
-                midi.data[0] = 0xB0;
+                midi.data[0] = static_cast<std::uint8_t>(0xB0 | controlChannel);
                 midi.data[1] = static_cast<std::uint8_t>(std::clamp<int>(control.number, 0, 127));
                 midi.data[2] = seven(control.value);
             } else {
-                midi.data[0] = 0xD0;
+                midi.data[0] = static_cast<std::uint8_t>(0xD0 | controlChannel);
                 midi.data[1] = seven(control.value);
             }
         }
@@ -443,7 +444,8 @@ public:
                 midi = {};
                 midi.header = header(sizeof(midi), n.frame, CLAP_EVENT_MIDI);
                 midi.port_index = 0;
-                midi.data[0] = on ? 0x90 : 0x80;
+                midi.data[0]
+                    = static_cast<std::uint8_t>((on ? 0x90 : 0x80) | std::clamp<int>(n.channel, 0, 15));
                 midi.data[1] = static_cast<std::uint8_t>(std::clamp<int>(n.key, 0, 127));
                 // A note-on at velocity 0 would mean note-off.
                 midi.data[2] = on
@@ -457,7 +459,7 @@ public:
                 sizeof(e), n.frame, n.type == NoteEvent::Type::On ? CLAP_EVENT_NOTE_ON : CLAP_EVENT_NOTE_OFF);
             e.note_id = -1;
             e.port_index = 0;
-            e.channel = 0;
+            e.channel = static_cast<std::int16_t>(std::clamp<int>(n.channel, 0, 15));
             e.key = n.key;
             e.velocity = static_cast<double>(n.velocity);
         }
@@ -837,7 +839,8 @@ private:
                 return;
             made_[madeCount_++]
                 = NoteEvent{frame, e->type == CLAP_EVENT_NOTE_ON ? NoteEvent::Type::On : NoteEvent::Type::Off,
-                    note->key, static_cast<float>(std::clamp(note->velocity, 0.0, 1.0))};
+                    note->key, static_cast<float>(std::clamp(note->velocity, 0.0, 1.0)),
+                    static_cast<std::int16_t>(std::clamp<int>(note->channel, 0, 15))};
         } else if (e->type == CLAP_EVENT_MIDI && e->size >= sizeof(clap_event_midi_t)) {
             const auto* midi = reinterpret_cast<const clap_event_midi_t*>(e);
             const int status = midi->data[0] & 0xF0;
@@ -846,7 +849,8 @@ private:
             const bool on = status == 0x90 && (midi->data[2] & 0x7F) > 0;
             made_[madeCount_++] = NoteEvent{frame, on ? NoteEvent::Type::On : NoteEvent::Type::Off,
                 static_cast<std::int16_t>(midi->data[1] & 0x7F),
-                static_cast<float>(midi->data[2] & 0x7F) / 127.0f};
+                static_cast<float>(midi->data[2] & 0x7F) / 127.0f,
+                static_cast<std::int16_t>(midi->data[0] & 0x0F)};
         }
     }
     std::thread::id mainThread_; ///< the thread that created the plugin
