@@ -56,6 +56,13 @@ struct TransportInfo {
     bool playing = false;
     double tempo = 120.0; ///< beats per minute
     double positionTicks = 0.0; ///< at the block's first frame (kPpq per beat)
+    /// The loop region in ticks; no loop when loopEndTicks <= loopStartTicks.
+    double loopStartTicks = 0.0;
+    double loopEndTicks = 0.0;
+    /// The time signature: beatsPerBar notes of 1 / beatUnit. The engine
+    /// counts in 4/4.
+    int beatsPerBar = 4;
+    int beatUnit = 4;
 };
 
 /// One block for AudioProcessor::process(). The audio is processed in place:
@@ -122,6 +129,12 @@ public:
         (void)id;
         return std::nullopt;
     }
+
+    /// True once the processor has stopped working for good, e.g. a plugin
+    /// that ran in a process of its own which has ended. It then passes
+    /// audio through and saveState() gives nothing: a host keeps the state
+    /// it last had and tells the user. Control thread.
+    [[nodiscard]] virtual bool hasFailed() const { return false; }
 
     /// Gets ready to process at `sampleRate`, in blocks of at most
     /// `maxBlockFrames`. False if it cannot (the host then leaves it out).

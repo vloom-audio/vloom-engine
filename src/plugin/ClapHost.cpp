@@ -19,6 +19,7 @@
 #include <mutex>
 #include <optional>
 #include <system_error>
+#include <thread>
 
 namespace vloom {
 
@@ -77,6 +78,7 @@ union ClapEvent {
     clap_event_header_t header;
     clap_event_note_t note;
     clap_event_param_value_t param;
+    clap_event_midi_t midi;
 };
 
 /// A CLAP plugin as an AudioProcessor. The control thread is CLAP's main
@@ -84,12 +86,15 @@ union ClapEvent {
 class ClapProcessor final : public AudioProcessor {
 public:
     static constexpr std::size_t kMaxEvents = 512;
-    static constexpr std::uint32_t kMaxPorts = 16;
+    /// Per direction. Samplers and drum machines have a port per output
+    /// pair; this only bounds the memory.
+    static constexpr std::uint32_t kMaxPorts = 128;
     static constexpr std::uint32_t kMaxPortChannels = 32;
 
     ClapProcessor(std::shared_ptr<ClapLibrary> library, PluginInfo info)
         : library_(std::move(library))
         , info_(std::move(info))
+        , mainThread_(std::this_thread::get_id())
     {
         host_.clap_version = CLAP_VERSION;
         host_.host_data = this;
@@ -165,6 +170,16 @@ public:
         ports_ = static_cast<const clap_plugin_audio_ports_t*>(
             plugin_->get_extension(plugin_, CLAP_EXT_AUDIO_PORTS));
         gui_ = static_cast<const clap_plugin_gui_t*>(plugin_->get_extension(plugin_, CLAP_EXT_GUI));
+        // Notes go out as CLAP note events, or as MIDI to a plugin whose
+        // note port takes nothing else.
+        const auto* notePorts = static_cast<const clap_plugin_note_ports_t*>(
+            plugin_->get_extension(plugin_, CLAP_EXT_NOTE_PORTS));
+        if (notePorts != nullptr && notePorts->count(plugin_, true) > 0) {
+            clap_note_port_info_t port{};
+            if (notePorts->get(plugin_, 0, true, &port))
+                midiNotes_ = (port.supported_dialects & CLAP_NOTE_DIALECT_CLAP) == 0
+                    && (port.supported_dialects & CLAP_NOTE_DIALECT_MIDI) != 0;
+        }
         return true;
     }
 
@@ -214,8 +229,10 @@ public:
         // CLAP wants stop_processing() on the audio thread; the host calls
         // this only once the audio thread no longer processes the plugin
         // (ADR 0006), so it is ordered after the last process().
-        if (processing_)
+        if (processing_) {
+            const AudioCall call(*this);
             plugin_->stop_processing(plugin_);
+        }
         processing_ = false;
         plugin_->deactivate(plugin_);
         active_ = false;
@@ -349,6 +366,7 @@ public:
     {
         if (!active_ || context.numFrames <= 0 || context.numChannels < 1)
             return;
+        const AudioCall audioCall(*this);
         if (!processing_) {
             if (!plugin_->start_processing(plugin_))
                 return; // not ready: the audio passes through
@@ -376,6 +394,20 @@ public:
         for (const NoteEvent& n : context.notes) {
             if (eventCount_ == kMaxEvents)
                 break;
+            if (midiNotes_) {
+                const bool on = n.type == NoteEvent::Type::On;
+                clap_event_midi_t& midi = events_[eventCount_++].midi;
+                midi = {};
+                midi.header = header(sizeof(midi), n.frame, CLAP_EVENT_MIDI);
+                midi.port_index = 0;
+                midi.data[0] = on ? 0x90 : 0x80;
+                midi.data[1] = static_cast<std::uint8_t>(std::clamp<int>(n.key, 0, 127));
+                // A note-on at velocity 0 would mean note-off.
+                midi.data[2] = on
+                    ? static_cast<std::uint8_t>(std::clamp<long>(std::lround(n.velocity * 127.0f), 1, 127))
+                    : std::uint8_t{0};
+                continue;
+            }
             clap_event_note_t& e = events_[eventCount_++].note;
             e = {};
             e.header = header(
@@ -409,9 +441,28 @@ public:
         song.header = header(sizeof(song), 0, CLAP_EVENT_TRANSPORT);
         song.flags = static_cast<std::uint32_t>(CLAP_TRANSPORT_HAS_TEMPO | CLAP_TRANSPORT_HAS_BEATS_TIMELINE
             | (context.transport.playing ? CLAP_TRANSPORT_IS_PLAYING : 0));
-        song.song_pos_beats = static_cast<clap_beattime>(
-            std::llround(context.transport.positionTicks / kPpq * static_cast<double>(CLAP_BEATTIME_FACTOR)));
+        const auto beatTime = [](double beats) {
+            return static_cast<clap_beattime>(
+                std::llround(beats * static_cast<double>(CLAP_BEATTIME_FACTOR)));
+        };
+        const double beats = context.transport.positionTicks / kPpq;
+        song.song_pos_beats = beatTime(beats);
         song.tempo = context.transport.tempo;
+        if (context.transport.beatsPerBar > 0 && context.transport.beatsPerBar <= 0xFFFF
+            && context.transport.beatUnit > 0 && context.transport.beatUnit <= 0xFFFF) {
+            const double barBeats = context.transport.beatsPerBar * 4.0 / context.transport.beatUnit;
+            const double bar = std::floor(beats / barBeats);
+            song.flags |= CLAP_TRANSPORT_HAS_TIME_SIGNATURE;
+            song.tsig_num = static_cast<std::uint16_t>(context.transport.beatsPerBar);
+            song.tsig_denom = static_cast<std::uint16_t>(context.transport.beatUnit);
+            song.bar_start = beatTime(bar * barBeats);
+            song.bar_number = static_cast<std::int32_t>(std::clamp(bar, -2.0e9, 2.0e9));
+        }
+        if (context.transport.loopEndTicks > context.transport.loopStartTicks) {
+            song.flags |= CLAP_TRANSPORT_IS_LOOP_ACTIVE;
+            song.loop_start_beats = beatTime(context.transport.loopStartTicks / kPpq);
+            song.loop_end_beats = beatTime(context.transport.loopEndTicks / kPpq);
+        }
 
         clap_process_t call{};
         call.steady_time = steadyTime_;
@@ -443,11 +494,41 @@ public:
 
     void reset() noexcept override
     {
-        if (active_)
-            plugin_->reset(plugin_);
+        if (!active_)
+            return;
+        const AudioCall call(*this);
+        plugin_->reset(plugin_);
     }
 
 private:
+    /// While one lives, the calling thread is the plugin's audio thread
+    /// (clap_host_thread_check): the device's thread, or whichever thread
+    /// renders offline.
+    class AudioCall {
+    public:
+        explicit AudioCall(ClapProcessor& owner) noexcept
+            : owner_(owner)
+            , outer_(owner.inAudioCall_.exchange(true, std::memory_order_relaxed))
+        {
+            owner_.audioThread_.store(std::this_thread::get_id(), std::memory_order_relaxed);
+        }
+        ~AudioCall() { owner_.inAudioCall_.store(outer_, std::memory_order_relaxed); }
+        AudioCall(const AudioCall&) = delete;
+        AudioCall& operator=(const AudioCall&) = delete;
+
+    private:
+        ClapProcessor& owner_;
+        bool outer_;
+    };
+
+    [[nodiscard]] bool onAudioThread() const noexcept
+    {
+        const std::thread::id here = std::this_thread::get_id();
+        return inAudioCall_.load(std::memory_order_relaxed)
+            ? here == audioThread_.load(std::memory_order_relaxed)
+            : here != mainThread_;
+    }
+
     static ClapProcessor* self(const clap_host_t* host)
     {
         return static_cast<ClapProcessor*>(host->host_data);
@@ -524,6 +605,42 @@ private:
                 self(host)->flushRequested_.store(true, std::memory_order_relaxed);
             },
         };
+        static const clap_host_thread_check_t threads = {
+            [](const clap_host_t* host) {
+                const ClapProcessor* p = self(host);
+                return std::this_thread::get_id() == p->mainThread_ && !p->onAudioThread();
+            },
+            [](const clap_host_t* host) { return self(host)->onAudioThread(); },
+        };
+        // Not written anywhere: it may come from the audio thread.
+        static const clap_host_log_t log = {[](const clap_host_t*, clap_log_severity, const char*) { }};
+        // The latency is read again by PluginInstance::updateLatency().
+        static const clap_host_latency_t latency = {[](const clap_host_t*) { }};
+        // The state is saved whole with the project, whether marked or not.
+        static const clap_host_state_t state = {[](const clap_host_t*) { }};
+        // Ports are read at activation; no change is taken while active.
+        static const clap_host_audio_ports_t audioPorts = {
+            [](const clap_host_t*, std::uint32_t) { return false; },
+            [](const clap_host_t*, std::uint32_t) { },
+        };
+        static const clap_host_note_ports_t notePorts = {
+            [](const clap_host_t*) -> std::uint32_t {
+                return CLAP_NOTE_DIALECT_CLAP | CLAP_NOTE_DIALECT_MIDI;
+            },
+            [](const clap_host_t*, std::uint32_t) { },
+        };
+        if (std::strcmp(id, CLAP_EXT_THREAD_CHECK) == 0)
+            return &threads;
+        if (std::strcmp(id, CLAP_EXT_LOG) == 0)
+            return &log;
+        if (std::strcmp(id, CLAP_EXT_LATENCY) == 0)
+            return &latency;
+        if (std::strcmp(id, CLAP_EXT_STATE) == 0)
+            return &state;
+        if (std::strcmp(id, CLAP_EXT_AUDIO_PORTS) == 0)
+            return &audioPorts;
+        if (std::strcmp(id, CLAP_EXT_NOTE_PORTS) == 0)
+            return &notePorts;
         if (std::strcmp(id, CLAP_EXT_GUI) == 0)
             return &gui;
         if (std::strcmp(id, CLAP_EXT_TIMER_SUPPORT) == 0)
@@ -622,6 +739,10 @@ private:
 
     bool active_ = false;
     bool processing_ = false; ///< audio thread, once active
+    bool midiNotes_ = false; ///< the plugin takes notes as MIDI only
+    std::thread::id mainThread_; ///< the thread that created the plugin
+    std::atomic<std::thread::id> audioThread_{};
+    std::atomic<bool> inAudioCall_{false};
     std::atomic<bool> restartRequested_{false};
     std::atomic<bool> callbackRequested_{false};
 

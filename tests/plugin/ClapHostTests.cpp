@@ -79,7 +79,7 @@ TEST_CASE("A .clap is loaded and lists its plugins", "[plugin][clap]")
     std::string error;
     auto library = vloom::ClapLibrary::open(kTestClap, &error);
     REQUIRE(library != nullptr);
-    REQUIRE(library->plugins().size() == 2);
+    REQUIRE(library->plugins().size() == 3);
     CHECK(library->plugins()[0].id == "vloom.test.level");
     CHECK(library->plugins()[0].kind == vloom::PluginInfo::Kind::Effect);
     CHECK(library->plugins()[1].id == "vloom.test.keys");
@@ -91,6 +91,20 @@ TEST_CASE("A .clap is loaded and lists its plugins", "[plugin][clap]")
     error.clear();
     CHECK(vloom::ClapLibrary::open(kTestClap.parent_path() / "missing.clap", &error) == nullptr);
     CHECK_FALSE(error.empty());
+}
+
+TEST_CASE("A CLAP instrument with many output ports gets its notes as MIDI", "[plugin][clap]")
+{
+    // The pads have 40 output ports and a note port for MIDI only; they
+    // also check the host's answers about which thread they are called on.
+    vloom::Engine engine;
+    prepare(engine);
+    engine.setSequencerState(pluginChannel(load("vloom.test.pads"), {1}));
+    engine.play();
+    const auto audio = render(engine, 0.25);
+    CHECK(audio[1000 * 2] == Approx(0.1f)); // the step's note, held
+    CHECK(audio[6000 * 2] == 0.0f); // and ended
+    CHECK(audio[1000 * 2 + 1] == Approx(0.04f)); // told the song is in 4/4
 }
 
 TEST_CASE("The plugin scan finds .clap files", "[plugin][clap]")

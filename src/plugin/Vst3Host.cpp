@@ -708,7 +708,9 @@ struct BusBuffers {
 /// VST 3's UI thread; process() and reset() run on the audio thread.
 class Vst3Processor final : public AudioProcessor, private EditorOwner {
 public:
-    static constexpr int32 kMaxBuses = 16;
+    /// Per direction. Samplers and drum machines have one bus per output
+    /// pair (Battery: 32, Kontakt: up to 64); this only bounds the memory.
+    static constexpr int32 kMaxBuses = 128;
     static constexpr int32 kMaxBusChannels = 32;
 
     Vst3Processor(std::shared_ptr<Vst3Library> library, PluginInfo info)
@@ -864,12 +866,19 @@ public:
 
     [[nodiscard]] std::vector<std::uint8_t> saveState() const override
     {
-        // "VLV3", the component's state, the controller's; sizes as 4 bytes, little endian.
+        // "VLV3", the component's state, the controller's; sizes as 4 bytes,
+        // little endian. Either part may be missing: many plugins keep
+        // everything in one of the two and refuse to write the other, and a
+        // refusal there must not lose what the other one wrote.
         MemoryStream component;
-        if (component_->getState(&component) != kResultOk)
-            return {};
+        const bool haveComponent = component_->getState(&component) == kResultOk;
         MemoryStream controller;
-        if (controller_ != nullptr && separateController_ && controller_->getState(&controller) != kResultOk)
+        const bool haveController = controller_ != nullptr && separateController_
+            && controller_->getState(&controller) == kResultOk;
+        static const std::vector<std::uint8_t> kNothing;
+        const std::vector<std::uint8_t>& componentData = haveComponent ? component.data() : kNothing;
+        const std::vector<std::uint8_t>& controllerData = haveController ? controller.data() : kNothing;
+        if (!haveComponent && !haveController)
             return {};
         std::vector<std::uint8_t> out{'V', 'L', 'V', '3'};
         const auto put = [&out](const std::vector<std::uint8_t>& part) {
@@ -878,8 +887,8 @@ public:
                 out.push_back(static_cast<std::uint8_t>(size >> shift));
             out.insert(out.end(), part.begin(), part.end());
         };
-        put(component.data());
-        put(controller.data());
+        put(componentData);
+        put(controllerData);
         return out;
     }
 
@@ -905,18 +914,23 @@ public:
         std::span<const std::uint8_t> controllerState;
         if (!take(componentState) || !take(controllerState))
             return false;
-        MemoryStream component(componentState);
-        if (component_->setState(&component) != kResultOk)
-            return false;
-        if (controller_ != nullptr) {
-            MemoryStream again(componentState);
-            controller_->setComponentState(&again);
-            if (separateController_ && !controllerState.empty()) {
-                MemoryStream controller(controllerState);
-                controller_->setState(&controller);
+        // Each part goes to where it came from; one that was not saved is
+        // not given. True if the plugin took at least one (or there was
+        // nothing to take).
+        bool taken = componentState.empty() && controllerState.empty();
+        if (!componentState.empty()) {
+            MemoryStream component(componentState);
+            taken = component_->setState(&component) == kResultOk;
+            if (controller_ != nullptr) {
+                MemoryStream again(componentState);
+                controller_->setComponentState(&again);
             }
         }
-        return true;
+        if (controller_ != nullptr && separateController_ && !controllerState.empty()) {
+            MemoryStream controller(controllerState);
+            taken = controller_->setState(&controller) == kResultOk || taken;
+        }
+        return taken;
     }
 
     void process(const ProcessContext& context) noexcept override
@@ -1001,11 +1015,24 @@ public:
         song.tempo = context.transport.tempo;
         song.projectTimeMusic = context.transport.positionTicks / kPpq;
         // In samples at the current tempo: exact while the tempo stays the
-        // same (TransportInfo carries no tempo map). No time signature is
-        // given: the transport does not carry it either.
+        // same (TransportInfo carries no tempo map).
         song.projectTimeSamples = context.transport.tempo > 0.0
             ? static_cast<vst::TSamples>(song.projectTimeMusic * 60.0 / context.transport.tempo * sampleRate_)
             : 0;
+        if (context.transport.beatsPerBar > 0 && context.transport.beatUnit > 0) {
+            const double barBeats = context.transport.beatsPerBar * 4.0 / context.transport.beatUnit;
+            song.timeSigNumerator = context.transport.beatsPerBar;
+            song.timeSigDenominator = context.transport.beatUnit;
+            song.barPositionMusic = std::floor(song.projectTimeMusic / barBeats) * barBeats;
+            song.state |= static_cast<uint32>(vst::ProcessContext::kTimeSigValid)
+                | static_cast<uint32>(vst::ProcessContext::kBarPositionValid);
+        }
+        if (context.transport.loopEndTicks > context.transport.loopStartTicks) {
+            song.cycleStartMusic = context.transport.loopStartTicks / kPpq;
+            song.cycleEndMusic = context.transport.loopEndTicks / kPpq;
+            song.state |= static_cast<uint32>(vst::ProcessContext::kCycleValid)
+                | static_cast<uint32>(vst::ProcessContext::kCycleActive);
+        }
 
         for (std::size_t bus = 0; bus < inputs_.size(); ++bus) {
             inputBuffers_[bus].numChannels = static_cast<int32>(inputs_[bus].pointers.size());
@@ -1284,6 +1311,9 @@ std::map<std::filesystem::path, std::weak_ptr<Vst3Library>>& cache()
 } // namespace
 
 struct Vst3Library::Impl {
+    /// What the factory is given as the host (IPluginFactory3). First, so it
+    /// is still there while the module unloads: a plugin may keep it.
+    HostApplication host;
     std::filesystem::path path;
     plugin_files::SharedLibrary module;
     Steinberg::IPluginFactory* factory = nullptr;
@@ -1381,6 +1411,17 @@ std::shared_ptr<Vst3Library> Vst3Library::open(const std::filesystem::path& path
     if (impl->factory == nullptr) {
         fail(error, plugin_files::utf8(key) + " has no plugin factory");
         return nullptr;
+    }
+    // Before the classes are read: a shell (WaveShell) lists its edit
+    // controllers only once it knows the host, and its plugins cannot be
+    // created without them.
+    Steinberg::IPluginFactory3* factory3 = nullptr;
+    if (impl->factory->queryInterface(
+            Steinberg::IPluginFactory3::iid.toTUID(), reinterpret_cast<void**>(&factory3))
+            == kResultOk
+        && factory3 != nullptr) {
+        factory3->setHostContext(&impl->host);
+        factory3->release();
     }
     Steinberg::PFactoryInfo factoryInfo{};
     impl->factory->getFactoryInfo(&factoryInfo);
