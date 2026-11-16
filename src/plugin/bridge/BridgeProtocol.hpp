@@ -20,12 +20,14 @@
 namespace vloom::bridge {
 
 inline constexpr std::uint32_t kMagic = 0x564C4252; ///< 'VLBR'
-inline constexpr std::uint32_t kVersion = 2;
+inline constexpr std::uint32_t kVersion = 3;
 
 inline constexpr std::int32_t kMaxFrames = 8192; ///< the longest block
 inline constexpr std::int32_t kMaxEvents = 512;
 inline constexpr std::int32_t kMaxParameterChanges = 256;
 inline constexpr std::int32_t kMaxNotices = 64; ///< a power of two
+inline constexpr std::int32_t kMaxExtraPairs = 8; ///< stereo outputs after the main one that cross
+inline constexpr std::int32_t kMaxMadeNotes = 256; ///< notes the plugin sends back in one block
 inline constexpr std::int32_t kTextSize = 512;
 inline constexpr std::int64_t kMaxBlobBytes = std::int64_t{1} << 30; ///< 1 GiB
 
@@ -45,6 +47,9 @@ enum class Request : std::int32_t {
     EditorOpen, ///< value: the parent window
     EditorClose,
     EditorSize, ///< -> index: width, value: height; result 0: none
+    ProgramName, ///< index -> text
+    GetProgram, ///< -> index
+    SetProgram, ///< index
     Quit,
 };
 
@@ -73,6 +78,8 @@ struct PluginFacts {
     std::int32_t uniqueId;
     std::int32_t version;
     std::int32_t latency; ///< rewritten after every block
+    std::int32_t programs; ///< how many it lists
+    std::int32_t makesNotes; ///< 1: it says it sends MIDI to the host
     std::int32_t padding;
     char name[kTextSize];
     char vendor[kTextSize];
@@ -108,12 +115,18 @@ struct Audio {
     std::int32_t frames;
     std::int32_t events;
     std::int32_t parameterChanges;
-    std::int32_t padding;
+    std::int32_t sidechain; ///< 1: `side` carries one
+    std::int32_t extraPairs; ///< in: how many of `extra` the host wants filled
+    std::int32_t madeNotes; ///< out: how many of `made` the plugin sent
+    std::int32_t padding[2];
     SongTime time;
     MidiMessage midi[kMaxEvents];
     ParameterChange changes[kMaxParameterChanges];
     float in[2][kMaxFrames];
     float out[2][kMaxFrames];
+    float side[2][kMaxFrames]; ///< the sidechain, for the plugin's inputs 3 and 4
+    float extra[2 * kMaxExtraPairs][kMaxFrames]; ///< its outputs 3 and 4, 5 and 6, ...
+    MidiMessage made[kMaxMadeNotes]; ///< the notes it sent the host during the block
 };
 
 /// What the plugin tells the host on its own: an edit in its editor, or a
@@ -144,10 +157,10 @@ struct Shared {
 
 // Both builds of the bridge must agree with the host to the byte.
 static_assert(sizeof(Control) == 552);
-static_assert(sizeof(PluginFacts) == 1056);
+static_assert(sizeof(PluginFacts) == 1064);
 static_assert(sizeof(SongTime) == 72);
 static_assert(sizeof(Notices) == 1032);
-static_assert(sizeof(Audio) == 137304);
-static_assert(sizeof(Shared) == 139952);
+static_assert(sizeof(Audio) == 729192);
+static_assert(sizeof(Shared) == 731848);
 
 } // namespace vloom::bridge

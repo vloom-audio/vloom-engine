@@ -419,8 +419,16 @@ TEST_CASE("A plugin that takes its bridge down leaves the host running", "[plugi
     CHECK(l[10] == 0.25f);
     // Nothing is saved for it: an empty state must not replace the last good one.
     CHECK(keys->processor().saveState().empty());
-    CHECK(keys->processor().hasFailed());
     CHECK_FALSE(keys->processor().hasEditor());
+    CHECK_FALSE(keys->processor().hasFailed()); // not for good: it is started again
+
+    // The host's idle time starts a new bridge, and the plugin plays again.
+    keys->processor().idle();
+    const std::array<vloom::NoteEvent, 1> on{vloom::NoteEvent{0, vloom::NoteEvent::Type::On, 60, 1.0f}};
+    std::fill(l.begin(), l.end(), 0.0f);
+    keys->process(l.data(), r.data(), 64, {}, on);
+    CHECK(l[10] == Approx(0.1f));
+    CHECK_FALSE(keys->processor().saveState().empty());
 }
 
 TEST_CASE("A bridged plugin that is slow for one block comes back", "[plugin][vst2][bridge]")
@@ -525,3 +533,50 @@ TEST_CASE("A VST 2 plugin gets a sidechain and controls, and gives extra outputs
     plugin->process(left.data(), right.data(), kFrames, {});
     CHECK(left[10] == Approx(0.5f));
 }
+
+#if defined(VLOOM_TEST_BRIDGE)
+TEST_CASE("A bridged VST 2 plugin gets a sidechain and controls, and gives extra outputs, notes and programs",
+    "[plugin][vst2][bridge][routing]")
+{
+    // The same plugin and the same expectations as in the host's own process.
+    auto plugin = loadBridged(VLOOM_TEST_VST2_MULTI);
+    vloom::AudioProcessor& multi = plugin->processor();
+    CHECK(multi.hasSidechain());
+    CHECK(multi.extraOutputCount() == 2);
+    CHECK(multi.makesNotes());
+    REQUIRE(multi.programs() == std::vector<std::string>{"Soft", "Hard", "Wide"});
+    CHECK(multi.setProgram(1));
+    CHECK(multi.currentProgram() == 1);
+    CHECK_FALSE(multi.setProgram(3));
+
+    constexpr int kFrames = 64;
+    std::vector<float> left(kFrames, 0.5f), right(kFrames, 0.5f), side(kFrames, 0.25f);
+    std::array<std::vector<float>, 6> extra;
+    std::array<float*, 6> extraPointers{};
+    for (std::size_t i = 0; i < extra.size(); ++i) {
+        extra[i].assign(kFrames, 9.0f);
+        extraPointers[i] = extra[i].data();
+    }
+    std::array<vloom::NoteEvent, 8> made{};
+    int madeCount = 0;
+    vloom::PluginInstance::Io io;
+    io.sidechainLeft = side.data();
+    io.sidechainRight = side.data();
+    io.extraOutputs = extraPointers;
+    io.notesOut = made;
+    io.notesOutCount = &madeCount;
+    REQUIRE(plugin->sendControl(vloom::ControlEvent::Type::PitchBend, 0, 1.0f));
+    REQUIRE(plugin->sendControl(vloom::ControlEvent::Type::Controller, 1, 1.0f));
+    const std::array<vloom::NoteEvent, 1> on{vloom::NoteEvent{5, vloom::NoteEvent::Type::On, 60, 1.0f}};
+    plugin->process(left.data(), right.data(), kFrames, {}, on, io);
+
+    CHECK(left[10] == Approx(0.5f * 0.75f));
+    CHECK(extra[0][10] == Approx(1.0f));
+    CHECK(extra[1][10] == Approx(1.0f));
+    CHECK(extra[2][10] == Approx(0.3f));
+    CHECK(extra[4][10] == 0.0f);
+    REQUIRE(madeCount == 1);
+    CHECK(made[0].key == 72);
+    CHECK(made[0].frame == 5);
+}
+#endif

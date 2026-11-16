@@ -65,6 +65,12 @@ int chainLatency(const std::vector<std::shared_ptr<PluginInstance>>& effects)
 
 } // namespace
 
+std::vector<MixerRoute> droppedRoutes(const MixerState& state)
+{
+    // As the mixer would see it: built the same way, and thrown away.
+    return buildMixerGraph(std::make_unique<MixerState>(state), nullptr)->dropped;
+}
+
 const InsertState& MixerGraph::insert(int insert) const noexcept
 {
     if (state == nullptr || insert < 1 || static_cast<std::size_t>(insert) > state->inserts.size())
@@ -84,8 +90,11 @@ std::unique_ptr<MixerGraph> buildMixerGraph(
     std::array<std::vector<MixerRoute>, MixerGraph::kNodes> bySource;
     const auto add = [&](const MixerRoute& route) {
         if (!validTarget(route.target) || route.target == route.source
-            || (route.target != 0 && reaches(edges, route.target, route.source)))
+            || (route.target != 0 && reaches(edges, route.target, route.source))) {
+            if (route.target >= 0) // below 0 means nowhere, on purpose
+                graph->dropped.push_back(route);
             return;
+        }
         edges[static_cast<std::size_t>(route.source)].push_back(route.target);
         bySource[static_cast<std::size_t>(route.source)].push_back(route);
     };
@@ -154,6 +163,40 @@ void MixerGraph::compensate(const MixerGraph* previous)
         }
     }
     inputDelay = arrive;
+
+    // The sidechain of a node is lined up with its input. An effect behind
+    // others gets the sound later, by their latency: its sidechain waits as long.
+    std::array<bool, kNodes> listens{};
+    for (const MixerRoute& route : routes)
+        if (route.sidechain)
+            listens[static_cast<std::size_t>(route.target)] = true;
+    static const std::vector<std::shared_ptr<PluginInstance>> kNone;
+    for (std::size_t node = 0; node < kNodes; ++node) {
+        std::vector<int> delays;
+        std::vector<std::shared_ptr<DelayLine>> lines;
+        const auto& chain = !listens[node] ? kNone
+            : node == 0                    ? (state != nullptr ? state->masterEffects : kNone)
+                                           : insert(static_cast<int>(node)).effects;
+        std::int64_t before = 0;
+        for (std::size_t k = 0; k < chain.size(); ++k) {
+            const int delay = static_cast<int>(std::min<std::int64_t>(before, kMaxLatencyFrames));
+            std::shared_ptr<DelayLine> line;
+            if (delay > 0) {
+                // The line this effect had, if it is long enough: its sound goes on.
+                const auto& old = previous != nullptr ? previous->sideLine[node] : sideLine[node];
+                if (k < old.size() && old[k] != nullptr && old[k]->maxDelay() >= delay)
+                    line = old[k];
+                else
+                    line = std::make_shared<DelayLine>(delay, 2);
+            }
+            delays.push_back(line != nullptr ? delay : 0);
+            lines.push_back(std::move(line));
+            if (chain[k] != nullptr)
+                before += chain[k]->latencyFrames();
+        }
+        sideDelay[node] = std::move(delays);
+        sideLine[node] = std::move(lines);
+    }
     // The master's own effects come after everything is lined up there.
     latency = std::min(
         arrive[0] + (state != nullptr ? chainLatency(state->masterEffects) : 0), kMaxLatencyFrames);

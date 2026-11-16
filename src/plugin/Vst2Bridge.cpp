@@ -8,6 +8,7 @@
 
 #include "plugin/Vst2Abi.hpp"
 #include "plugin/bridge/BridgeProtocol.hpp"
+#include "vloom/engine/plugin/PluginInstance.hpp"
 #include "vloom/engine/time/MusicalTime.hpp"
 
 #include <algorithm>
@@ -89,6 +90,8 @@ public:
     bool start(
         const std::filesystem::path& bridgeFile, const std::filesystem::path& plugin, std::string* error)
     {
+        bridgeFile_ = bridgeFile;
+        pluginFile_ = plugin;
         // Nothing here has a name another process could open: the bridge
         // inherits these six handles and no others.
         SECURITY_ATTRIBUTES inherit{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
@@ -179,6 +182,8 @@ public:
         inputs_ = std::clamp(facts.inputs, 0, 256);
         outputs_ = std::clamp(facts.outputs, 0, 256);
         flags_ = facts.flags;
+        programs_ = std::clamp(facts.programs, 0, 4096);
+        makesNotes_ = facts.makesNotes != 0;
         info_.name = text(facts.name);
         if (info_.name.empty())
             info_.name = plugin_files::utf8(plugin.stem());
@@ -226,7 +231,39 @@ public:
         return std::isfinite(value) ? std::optional<double>(std::clamp(value, 0.0, 1.0)) : std::nullopt;
     }
 
-    [[nodiscard]] bool hasFailed() const override { return !alive(); }
+    [[nodiscard]] int extraOutputCount() const override
+    {
+        return std::min(std::max(outputs_ - 2, 0) / 2, static_cast<int>(bridge::kMaxExtraPairs));
+    }
+    [[nodiscard]] bool hasSidechain() const override { return inputs_ >= 4; }
+    [[nodiscard]] bool makesNotes() const override { return makesNotes_; }
+
+    [[nodiscard]] std::vector<std::string> programs() const override
+    {
+        std::vector<std::string> names;
+        // A plugin with one program has nothing to choose from.
+        for (int i = 0; programs_ > 1 && i < programs_; ++i) {
+            names.push_back(
+                ask(bridge::Request::ProgramName, i) ? text(shared_->control.text) : std::string());
+            if (names.back().empty())
+                names.back() = "Program " + std::to_string(i + 1);
+        }
+        return names;
+    }
+    [[nodiscard]] int currentProgram() const override
+    {
+        if (programs_ < 2 || !ask(bridge::Request::GetProgram))
+            return -1;
+        const std::int32_t program = shared_->control.index;
+        return program >= 0 && program < programs_ ? program : -1;
+    }
+    bool setProgram(int index) override
+    {
+        return index >= 0 && index < programs_ && ask(bridge::Request::SetProgram, index);
+    }
+
+    /// For good only once it has been started again as often as it may be.
+    [[nodiscard]] bool hasFailed() const override { return !alive() && restartsLeft_ <= 0; }
 
     bool activate(double sampleRate, int maxBlockFrames) override
     {
@@ -264,6 +301,14 @@ public:
     }
 
     [[nodiscard]] std::vector<std::uint8_t> saveState() const override
+    {
+        std::vector<std::uint8_t> state = readState();
+        if (!state.empty())
+            lastState_ = state; // what a bridge started again is given back
+        return state;
+    }
+
+    [[nodiscard]] std::vector<std::uint8_t> readState() const
     {
         // The same form as a plugin loaded in this process (Vst2Host.cpp).
         // Nothing at all from a bridge that is gone: an empty state must
@@ -328,6 +373,7 @@ public:
 
     void process(const ProcessContext& context) noexcept override
     {
+        const InProcess busy(inProcess_); // a restart waits for this to be over
         if (!active_ || dead_.load(std::memory_order_relaxed) || context.numFrames <= 0
             || context.numFrames > blockFrames_ || context.numChannels < 1)
             return;
@@ -349,6 +395,14 @@ public:
         float* right = context.numChannels > 1 ? context.channels[1] : context.channels[0];
         bridge::Audio& audio = shared_->audio;
         audio.frames = context.numFrames;
+        const std::size_t pairs = std::min({context.extraOutputs.size() / 2,
+            static_cast<std::size_t>(bridge::kMaxExtraPairs), static_cast<std::size_t>(extraOutputCount())});
+        audio.extraPairs = static_cast<std::int32_t>(pairs);
+        audio.sidechain = context.sidechain != nullptr && inputs_ >= 4 ? 1 : 0;
+        if (audio.sidechain != 0) {
+            std::copy_n(context.sidechain[0], frames, audio.side[0]);
+            std::copy_n(context.sidechain[1], frames, audio.side[1]);
+        }
 
         std::int32_t changes = 0;
         for (const ParameterEvent& p : context.parameters)
@@ -376,7 +430,9 @@ public:
         };
         // Controls as MIDI, before the notes (they come at the block's start).
         for (const ControlEvent& control : context.controls) {
-            if (count == bridge::kMaxEvents || !std::isfinite(control.value))
+            // Room is kept for the note-offs after a reset and for the block's notes.
+            if (count + 128 + static_cast<std::int32_t>(PluginInstance::kMaxNotes) >= bridge::kMaxEvents
+                || !std::isfinite(control.value))
                 break;
             bridge::MidiMessage& m = audio.midi[count++];
             m.frame = std::clamp(control.frame, 0, context.numFrames - 1);
@@ -447,6 +503,27 @@ public:
             dead_.store(true, std::memory_order_relaxed); // the bridge ended: the audio stays as it came
             return;
         }
+        // The notes the plugin sent back (an arpeggiator), for the host to pass on.
+        if (context.notesOutCount != nullptr) {
+            const int sent = std::clamp(audio.madeNotes, 0, bridge::kMaxMadeNotes);
+            std::size_t made = 0;
+            for (int i = 0; i < sent && made < context.notesOut.size(); ++i) {
+                const bridge::MidiMessage m = audio.made[i];
+                const int status = m.data[0] & 0xF0;
+                if (status != 0x90 && status != 0x80)
+                    continue;
+                const int velocity = m.data[2] & 0x7F;
+                context.notesOut[made++] = NoteEvent{std::clamp(m.frame, 0, context.numFrames - 1),
+                    status == 0x90 && velocity > 0 ? NoteEvent::Type::On : NoteEvent::Type::Off,
+                    static_cast<std::int16_t>(m.data[1] & 0x7F), static_cast<float>(velocity) / 127.0f};
+            }
+            *context.notesOutCount = static_cast<int>(made);
+        }
+        // Its outputs after the first two, as far as they crossed the bridge.
+        for (std::size_t pair = 0; pair < pairs; ++pair) {
+            std::copy_n(audio.extra[2 * pair], frames, context.extraOutputs[2 * pair]);
+            std::copy_n(audio.extra[2 * pair + 1], frames, context.extraOutputs[2 * pair + 1]);
+        }
         if (outputs_ == 0)
             return;
         // A plugin with no audio input (an instrument) adds to what is
@@ -467,13 +544,21 @@ public:
 
     void idle() override
     {
-        // An editor whose bridge is gone is gone too: the host is told.
-        if (editorOpen_ && !alive()) {
-            EditorListener* listener = listener_;
-            editorOpen_ = false;
-            listener_ = nullptr;
-            if (listener != nullptr)
-                listener->editorClosed();
+        if (!alive()) {
+            // An editor whose bridge is gone is gone too: the host is told.
+            if (editorOpen_) {
+                EditorListener* listener = listener_;
+                editorOpen_ = false;
+                listener_ = nullptr;
+                if (listener != nullptr)
+                    listener->editorClosed();
+            }
+            // And the plugin is started again, not more often than every two seconds.
+            const ULONGLONG now = ::GetTickCount64();
+            if (restartsLeft_ > 0 && (lastRestart_ == 0 || now - lastRestart_ >= 2'000)) {
+                lastRestart_ = now;
+                restart();
+            }
             return;
         }
         // What the plugin told the bridge since the last time. The bridge
@@ -642,12 +727,88 @@ private:
     int inputs_ = 0;
     int outputs_ = 0;
     std::int32_t flags_ = 0;
+
+    // Starting a bridge that ended again (idle()).
+    std::filesystem::path bridgeFile_, pluginFile_;
+    mutable std::vector<std::uint8_t> lastState_; ///< the last state saved, for the plugin started again
+    int restartsLeft_ = 3; ///< a plugin that keeps ending its bridge is given up
+    ULONGLONG lastRestart_ = 0;
+    std::atomic<bool> inProcess_{false}; ///< the audio thread is inside process()
+
+    /// Marks the audio thread as inside process() while it lives.
+    class InProcess {
+    public:
+        explicit InProcess(std::atomic<bool>& flag) noexcept
+            : flag_(flag)
+        {
+            flag_.store(true, std::memory_order_seq_cst);
+        }
+        ~InProcess() { flag_.store(false, std::memory_order_seq_cst); }
+        InProcess(const InProcess&) = delete;
+        InProcess& operator=(const InProcess&) = delete;
+
+    private:
+        std::atomic<bool>& flag_;
+    };
+
+    /// Lets go of a bridge that ended (or ends it), and of what was shared with it.
+    void release() noexcept
+    {
+        if (process_ && ::WaitForSingleObject(process_.get(), 0) != WAIT_OBJECT_0)
+            ::TerminateProcess(process_.get(), 1);
+        if (shared_ != nullptr)
+            ::UnmapViewOfFile(shared_);
+        shared_ = nullptr;
+        mapping_.reset();
+        controlRequest_.reset();
+        controlAnswer_.reset();
+        audioRequest_.reset();
+        audioAnswer_.reset();
+        process_.reset();
+        job_.reset();
+    }
+
+    /// Starts a new bridge for the plugin, gives it the last state that was
+    /// saved and activates it as the old one was. False if it did not come
+    /// up. Control thread.
+    bool restart()
+    {
+        if (restartsLeft_ <= 0)
+            return false;
+        const bool wasActive = active_.exchange(false);
+        // The audio thread leaves process() at once now; what it uses is not taken from under it.
+        for (int i = 0; i < 200 && inProcess_.load(std::memory_order_seq_cst); ++i)
+            ::Sleep(1);
+        if (inProcess_.load(std::memory_order_seq_cst)) {
+            active_.store(wasActive);
+            return false; // next time
+        }
+        --restartsLeft_;
+        editorOpen_ = false;
+        listener_ = nullptr;
+        awaiting_ = false;
+        release();
+        dead_.store(false, std::memory_order_relaxed);
+        const std::filesystem::path bridgeFile = bridgeFile_;
+        const std::filesystem::path plugin = pluginFile_;
+        if (!start(bridgeFile, plugin, nullptr)) {
+            dead_.store(true, std::memory_order_relaxed);
+            return false;
+        }
+        if (!lastState_.empty())
+            loadState(lastState_);
+        if (wasActive)
+            activate(sampleRate_, blockFrames_);
+        return alive();
+    }
+    int programs_ = 0;
+    bool makesNotes_ = false;
     std::vector<float> defaults_;
 
     bool editorOpen_ = false;
     EditorListener* listener_ = nullptr;
 
-    bool active_ = false;
+    std::atomic<bool> active_{false}; ///< atomic: a restart switches it off under the audio thread
     bool awaiting_ = false; ///< audio thread: a block is still with the bridge
     double sampleRate_ = 48000.0;
     int blockFrames_ = 0;

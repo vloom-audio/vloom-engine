@@ -28,21 +28,46 @@ that orders them and lines up their delays (ADR 0007).
    change. `AudioProcessor` says what it has: `hasSidechain()`,
    `extraOutputCount()`, `makesNotes()`, `programs()`.
 2. **A sidechain is a send.** `Send::sidechain` sends the copy to the target
-   insert's sidechain instead of into its sound. It is a route like any
+   insert's sidechain instead of into its sound. A VST 3 plugin's second
+   input counts as one only if the plugin calls that bus auxiliary; it is
+   then switched on whether anything is sent to it or not. It is a route like any
    other: ordered, checked for loops, lined up with the rest. All sidechain
    sends to an insert are added up, and every effect of the insert that has
-   a second input hears the same.
+   a second input hears the same, each as late as the effects before it
+   make the sound it works on (their latency).
 3. **Extra outputs go to inserts.** `ChannelState::pluginOutputs[k]` names
    the insert for the instrument's output k + 2. They get the channel's
-   volume and pan. An output that is not named is not played.
+   volume and pan, ramped over the block like its main sound. An output
+   that is not named is not played.
 4. **A note effect sits in front of the instrument.**
    `ChannelState::noteEffect` gets the channel's notes; the instrument plays
-   what it puts out, in the same block.
+   what it puts out, in the same block, put in frame order by the host.
+   `ChannelState::noteEffects` are more of them in a row, each fed by the
+   one before. Notes played by hand on the instrument go through them too.
+   - An effect that is bypassed, not active, or makes no notes is skipped:
+     the channel's notes go to the instrument as if it were not there.
+   - The host keeps track of the keys the effect has the instrument hold.
+     It ends them itself when the effect is taken away, exchanged, switched
+     off or on, and when the song stops or jumps (the effect is reset
+     then): the effect's own note-offs can no longer be counted on.
+   **A channel can play another channel's notes.**
+   `ChannelState::notesFrom` names a channel whose notes (what its
+   instrument is given, after its note effects) this channel's instrument
+   plays too: one arpeggiator driving two instruments, a melody doubled on
+   another sound. The source is processed first, whatever the order of the
+   channels; a chain that comes back to itself is cut. Keys held from a
+   source that is taken away are ended by the host.
 5. **Controls are sent to an instance** (`PluginInstance::sendControl()`),
    as notes played by hand are. Each format gets them its own way: MIDI for
    VST 2 and for CLAP plugins that take MIDI; for VST 3 the parameter the
    plugin says the control moves (`IMidiMapping`), asked once when the
    plugin is created, since the audio thread must not ask.
+   **Controls can be written into the song**: `ChannelState::controls` and
+   `SongPattern::controls` are points with a tick, like notes. They go
+   through the scheduler that starts notes, so each lands on its frame, in
+   pattern mode and in a song's clips, and comes round when a pattern
+   repeats. A pitch left bent when the song stops is put back to the
+   centre.
 6. **Programs are a list of names and an index.** VST 2 has them as such;
    for VST 3 they are the first program list and the parameter marked as
    the program change.
@@ -72,10 +97,18 @@ that orders them and lines up their delays (ADR 0007).
 - A plugin's sidechain bus and its extra outputs are switched on when it is
   activated, whether routed or not: a plugin with many outputs computes
   them all.
-- Extra outputs follow the channel's volume without a ramp: a jump in the
-  volume can click there.
+- A send that would close a loop is left out, a sidechain send as much as
+  any other. `droppedRoutes()` tells an app which. A sidechain send counts
+  for the mixer's delay compensation even when no effect listens to it.
+- A VST 2 plugin's inputs 3 and 4 are taken for the sidechain without the
+  plugin saying so: the format has no way to say it. A CLAP plugin's
+  second input port counts as one unless it is marked as a main port.
+- Not done, each a piece of work of its own: MPE (a channel per note);
+  surround.
+- VST 3 controls reach only plugins that say which parameter a control
+  moves, asked once for the first event bus and channel.
 - CLAP plugins that take notes as CLAP events only get no pitch bend or
   controllers. CLAP has no list of programs to read.
-- A bridged VST 2 plugin (ADR 0011) gets controls, but no sidechain and no
-  extra outputs: only its first two inputs and outputs cross the bridge.
+- A bridged VST 2 plugin (ADR 0011) gets all of it as well; of its extra
+  outputs the first eight pairs cross the bridge.
 - VST 2 editors on Linux are still not hosted.

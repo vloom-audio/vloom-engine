@@ -41,6 +41,36 @@ void notesAt(const std::vector<Note>& row, std::int64_t at, std::int64_t span, P
             play(*it);
 }
 
+/// A control point the sequencer sends: inside the pattern, with a number
+/// for a value.
+bool sendable(const ControlPoint& point, std::int64_t span) noexcept
+{
+    return point.start >= 0 && point.start < span && std::isfinite(point.value);
+}
+
+/// The first sendable point of `row` (sorted by start) at or after `from`, or null.
+const ControlPoint* firstSendable(
+    const std::vector<ControlPoint>& row, std::int64_t from, std::int64_t span) noexcept
+{
+    auto it = std::lower_bound(row.begin(), row.end(), from,
+        [](const ControlPoint& point, std::int64_t at) { return point.start < at; });
+    for (; it != row.end() && it->start < span; ++it)
+        if (sendable(*it, span))
+            return &*it;
+    return nullptr;
+}
+
+/// Calls `send(point)` for the sendable points of `row` exactly at `at`.
+template <typename Send>
+void pointsAt(const std::vector<ControlPoint>& row, std::int64_t at, std::int64_t span, Send&& send)
+{
+    auto it = std::lower_bound(row.begin(), row.end(), at,
+        [](const ControlPoint& point, std::int64_t t) { return point.start < t; });
+    for (; it != row.end() && it->start == at; ++it)
+        if (sendable(*it, span))
+            send(*it);
+}
+
 /// Ticks after which a pattern repeats inside a clip: its own length when
 /// it has one (SongPattern::stepCount). Without, it never repeats: the
 /// period is the furthest the clip reaches into it, its offset plus its span.
@@ -131,6 +161,15 @@ void StepSequencer::publish(std::unique_ptr<SequencerState> state)
         for (SongPattern& pattern : state->patterns)
             for (std::vector<Note>& row : pattern.notes)
                 sortNotes(row);
+        const auto sortPoints = [](std::vector<ControlPoint>& points) {
+            std::stable_sort(points.begin(), points.end(),
+                [](const ControlPoint& a, const ControlPoint& b) { return a.start < b.start; });
+        };
+        for (ChannelState& channel : state->channels)
+            sortPoints(channel.controls);
+        for (SongPattern& pattern : state->patterns)
+            for (std::vector<ControlPoint>& row : pattern.controls)
+                sortPoints(row);
         // The sum of its clips' hashes: the same clips in another order
         // (a clip removed before them) give the same key.
         state->audioClipKeys.assign(state->channels.size(), 0);
@@ -189,6 +228,16 @@ std::int64_t StepSequencer::nextNoteStart(std::int64_t from) const noexcept
                 if (at < start + span) // not past the clip's end
                     next = std::min(next, at);
             }
+            for (std::size_t c = 0; c < channels.size() && c < pattern.controls.size(); ++c) {
+                const auto& row = pattern.controls[c];
+                std::int64_t at = kNoEvent;
+                if (const ControlPoint* point = firstSendable(row, local, period))
+                    at = origin + pass * period + point->start;
+                else if (const ControlPoint* first = firstSendable(row, 0, period))
+                    at = origin + (pass + 1) * period + first->start; // the next pass
+                if (at < start + span)
+                    next = std::min(next, at);
+            }
         }
         for (const SongAudioClip& clip : current_->audioClips)
             if (clip.startTick >= from && clip.startTick <= kMaxTicks)
@@ -203,6 +252,10 @@ std::int64_t StepSequencer::nextNoteStart(std::int64_t from) const noexcept
         if (const Note* note = firstPlayable(channel.notes, local, period))
             next = std::min(next, loop * period + note->start);
         else if (const Note* first = firstPlayable(channel.notes, 0, period))
+            next = std::min(next, (loop + 1) * period + first->start);
+        if (const ControlPoint* point = firstSendable(channel.controls, local, period))
+            next = std::min(next, loop * period + point->start);
+        else if (const ControlPoint* first = firstSendable(channel.controls, 0, period))
             next = std::min(next, (loop + 1) * period + first->start);
     }
     return next;
@@ -246,6 +299,9 @@ void StepSequencer::startNotes(std::int64_t tick, double framesPerTick) noexcept
             }
             for (std::size_t c = 0; c < channels.size() && c < pattern.notes.size(); ++c)
                 notesAt(pattern.notes[c], local, period, [&](const Note& note) { play(channels[c], note); });
+            for (std::size_t c = 0; c < channels.size() && c < pattern.controls.size(); ++c)
+                pointsAt(pattern.controls[c], local, period,
+                    [&](const ControlPoint& point) { sendControl(channels[c], point); });
         }
         for (const SongAudioClip& clip : current_->audioClips)
             if (clip.startTick == tick)
@@ -259,8 +315,25 @@ void StepSequencer::startNotes(std::int64_t tick, double framesPerTick) noexcept
         return;
     }
     const std::int64_t period = static_cast<std::int64_t>(current_->stepCount) * ticksPerStep;
-    for (const ChannelState& channel : channels)
+    for (const ChannelState& channel : channels) {
+        // Controls before the notes at the same tick: a note starts at the pitch set for it.
+        pointsAt(channel.controls, tick % period, period,
+            [&](const ControlPoint& point) { sendControl(channel, point); });
         notesAt(channel.notes, tick % period, period, [&](const Note& note) { play(channel, note); });
+    }
+}
+
+void StepSequencer::sendControl(const ChannelState& channel, const ControlPoint& point) const noexcept
+{
+    ChannelVoices* voices = channel.voices.get();
+    if (channel.muted || voices == nullptr || channel.plugin == nullptr
+        || voices->controlCount == voices->controls.size())
+        return;
+    const float low = point.type == ControlEvent::Type::PitchBend ? -1.0f : 0.0f;
+    voices->controls[voices->controlCount++] = ControlEvent{eventFrame_, point.type,
+        static_cast<std::int16_t>(std::clamp<int>(point.number, 0, 127)), std::clamp(point.value, low, 1.0f)};
+    if (point.type == ControlEvent::Type::PitchBend)
+        voices->bent = point.value != 0.0f;
 }
 
 void StepSequencer::playNote(const ChannelState& channel, const Note& note, std::int64_t end) const noexcept
@@ -336,7 +409,8 @@ void StepSequencer::resetVoices() noexcept
 }
 
 StepSequencer::StepSequencer()
-    : extraMemory_(extraBuffers_.size() * static_cast<std::size_t>(kMaxBlockFrames), 0.0f)
+    : extraMemory_(
+          (2 * PluginInstance::kMaxExtraOutputs + 2) * static_cast<std::size_t>(kMaxBlockFrames), 0.0f)
 {
     for (std::size_t i = 0; i < extraBuffers_.size(); ++i)
         extraBuffers_[i] = extraMemory_.data() + i * static_cast<std::size_t>(kMaxBlockFrames);
@@ -350,6 +424,9 @@ void StepSequencer::activatePlugins(double sampleRate, int maxBlockFrames)
                 channel.plugin->activate(sampleRate, maxBlockFrames);
             if (channel.noteEffect != nullptr)
                 channel.noteEffect->activate(sampleRate, maxBlockFrames);
+            for (const auto& effect : channel.noteEffects)
+                if (effect != nullptr)
+                    effect->activate(sampleRate, maxBlockFrames);
         }
     };
     exchange_.forEachSnapshot(activate); // the one not picked up yet too
@@ -523,7 +600,8 @@ void StepSequencer::mix(
     int numFrames, float* const* buses, bool* used, const TransportInfo& transport) noexcept
 {
     ++block_;
-    const auto mixChannel = [&](const ChannelState& channel) {
+    // `source`: the channel whose notes this one's instrument plays too, if any.
+    const auto mixChannel = [&](const ChannelState& channel, const ChannelVoices* source) {
         ChannelVoices* voices = channel.voices.get();
         if (voices == nullptr || voices->mixedBlock == block_)
             return;
@@ -533,46 +611,161 @@ void StepSequencer::mix(
         if (channel.plugin != nullptr) {
             const auto frames = static_cast<std::size_t>(numFrames);
             std::span<const NoteEvent> notes = voices->plugin.events();
-            // A note effect first: the instrument plays what it makes.
-            if (channel.noteEffect != nullptr) {
+            // Note effects first: the instrument plays what they make. Only
+            // those that run and make notes; without any, the channel's
+            // notes go straight to the instrument.
+            std::array<PluginInstance*, 8> chain{};
+            int stages = 0;
+            const auto stage = [&](PluginInstance* effect) {
+                if (effect != nullptr && stages < static_cast<int>(chain.size()) && effect->isActive()
+                    && !effect->isBypassed() && effect->makesNotes())
+                    chain[static_cast<std::size_t>(stages++)] = effect;
+            };
+            stage(channel.noteEffect.get());
+            for (const auto& effect : channel.noteEffects)
+                stage(effect.get());
+            std::size_t given = 0; // notes for the instrument put together here, in madeNotes_
+            const auto end = [&](int frame, int key) {
+                if (given < madeNotes_.size())
+                    madeNotes_[given++]
+                        = NoteEvent{frame, NoteEvent::Type::Off, static_cast<std::int16_t>(key), 0.0f};
+            };
+            // The way notes reach the instrument changed: what it holds the
+            // old way is ended, since its note-offs now go elsewhere.
+            bool changed = stages != voices->lastEffectCount || voices->lastSource != source;
+            for (int s = 0; s < stages && !changed; ++s)
+                changed
+                    = voices->lastEffects[static_cast<std::size_t>(s)] != chain[static_cast<std::size_t>(s)];
+            if (changed) {
+                for (int key = 0; key < 128; ++key) {
+                    const auto k = static_cast<std::size_t>(key);
+                    if (voices->madeHeld[k])
+                        end(0, key);
+                }
+                voices->madeHeld.fill(false);
+                voices->lastEffectCount = stages;
+                voices->lastSource = source;
+                for (std::size_t s = 0; s < chain.size(); ++s)
+                    voices->lastEffects[s] = chain[s];
+            }
+            if (stages > 0) {
+                // Into the chain: the notes played by hand on the instrument, then the song's.
+                std::size_t fed = channel.plugin->takeLiveNotes(effectIn_);
+                for (const NoteEvent& note : notes)
+                    if (fed < effectIn_.size())
+                        effectIn_[fed++] = note;
+                std::span<const NoteEvent> passing(effectIn_.data(), fed);
                 float* unusedLeft = extraBuffers_[extraBuffers_.size() - 2];
                 float* unusedRight = extraBuffers_[extraBuffers_.size() - 1];
-                std::fill_n(unusedLeft, frames, 0.0f);
-                std::fill_n(unusedRight, frames, 0.0f);
-                int made = 0;
-                PluginInstance::Io noteIo;
-                noteIo.notesOut = madeNotes_;
-                noteIo.notesOutCount = &made;
-                channel.noteEffect->process(unusedLeft, unusedRight, numFrames, transport, notes, noteIo);
-                notes = std::span<const NoteEvent>(madeNotes_.data(), static_cast<std::size_t>(made));
+                for (int s = 0; s < stages; ++s) {
+                    std::fill_n(unusedLeft, frames, 0.0f);
+                    std::fill_n(unusedRight, frames, 0.0f);
+                    auto& out = stageNotes_[static_cast<std::size_t>(s % 2)];
+                    int made = 0;
+                    PluginInstance::Io noteIo;
+                    noteIo.notesOut = out;
+                    noteIo.notesOutCount = &made;
+                    chain[static_cast<std::size_t>(s)]->process(
+                        unusedLeft, unusedRight, numFrames, transport, passing, noteIo);
+                    passing = std::span<const NoteEvent>(out.data(), static_cast<std::size_t>(made));
+                }
+                for (const NoteEvent& note : passing) {
+                    if (given == madeNotes_.size())
+                        break;
+                    madeNotes_[given++] = note;
+                    if (note.key >= 0 && note.key < 128)
+                        voices->madeHeld[static_cast<std::size_t>(note.key)]
+                            = note.type == NoteEvent::Type::On;
+                }
+                // The song stopped or jumped: effects that go on by
+                // themselves (an arpeggiator) are told, and what they left sounding ends.
+                if (voices->endMade) {
+                    for (int s = 0; s < stages; ++s)
+                        chain[static_cast<std::size_t>(s)]->reset();
+                    for (int key = 0; key < 128; ++key)
+                        if (voices->madeHeld[static_cast<std::size_t>(key)])
+                            end(numFrames - 1, key);
+                    voices->madeHeld.fill(false);
+                }
+                notes = std::span<const NoteEvent>(madeNotes_.data(), given);
+            } else if (given > 0) {
+                // The note-offs above, then the channel's own notes.
+                for (const NoteEvent& note : notes)
+                    if (given < madeNotes_.size())
+                        madeNotes_[given++] = note;
+                notes = std::span<const NoteEvent>(madeNotes_.data(), given);
             }
+            voices->endMade = false;
+            // Another channel's notes as well, both in frame order.
+            if (source != nullptr && source->sentBlock == block_ && source->sentCount > 0) {
+                const std::span<const NoteEvent> theirs(source->sent.data(), source->sentCount);
+                std::size_t own = 0;
+                std::size_t other = 0;
+                std::size_t merged = 0;
+                while (merged < mergedNotes_.size() && (own < notes.size() || other < theirs.size())) {
+                    const bool mine = other == theirs.size()
+                        || (own < notes.size() && notes[own].frame <= theirs[other].frame);
+                    mergedNotes_[merged++] = mine ? notes[own++] : theirs[other++];
+                }
+                notes = std::span<const NoteEvent>(mergedNotes_.data(), merged);
+            }
+            // What the instrument is given: remembered for a channel that
+            // plays it too, and the keys now down for the day the way changes.
+            voices->sentCount = std::min(notes.size(), voices->sent.size());
+            std::copy_n(notes.begin(), voices->sentCount, voices->sent.begin());
+            voices->sentBlock = block_;
+            for (const NoteEvent& note : notes)
+                if (note.key >= 0 && note.key < 128)
+                    voices->madeHeld[static_cast<std::size_t>(note.key)] = note.type == NoteEvent::Type::On;
             const std::size_t pairs
                 = std::min(channel.pluginOutputs.size(), PluginInstance::kMaxExtraOutputs);
             PluginInstance::Io io;
             io.extraOutputs = std::span<float* const>(extraBuffers_.data(), 2 * pairs);
+            // The song's controls. Stopped with the pitch bent: back to the centre.
+            if (voices->centreBend && voices->controlCount < voices->controls.size()) {
+                voices->controls[voices->controlCount++]
+                    = ControlEvent{numFrames - 1, ControlEvent::Type::PitchBend, 0, 0.0f};
+                voices->bent = false;
+            }
+            voices->centreBend = false;
+            io.controls = std::span<const ControlEvent>(voices->controls.data(), voices->controlCount);
             channel.plugin->process(
                 voices->left.data(), voices->right.data(), numFrames, transport, notes, io);
             // Its other outputs, each into the insert chosen for it.
-            const StereoGain extraGain = balance(channel.gain, channel.pan);
+            // At the channel's volume and pan, ramped across the block like its main sound.
+            const StereoGain extraTo = balance(channel.gain, channel.pan);
+            const StereoGain extraFrom = voices->rampStarted ? voices->applied : extraTo;
+            const float extraStepLeft = (extraTo.left - extraFrom.left) / static_cast<float>(numFrames);
+            const float extraStepRight = (extraTo.right - extraFrom.right) / static_cast<float>(numFrames);
+            bool extraSounding = false;
             for (std::size_t k = 0; k < pairs; ++k) {
                 const int to = channel.pluginOutputs[k];
                 if (to < 0 || to > kMaxInserts)
                     continue;
                 const float* fromLeft = extraBuffers_[2 * k];
                 const float* fromRight = extraBuffers_[2 * k + 1];
+                // A silent output leaves its insert alone (it can go idle).
+                bool heard = false;
+                for (std::size_t i = 0; i < frames && !heard; ++i)
+                    heard = std::abs(fromLeft[i]) > 1e-6f || std::abs(fromRight[i]) > 1e-6f;
+                if (!heard)
+                    continue;
+                extraSounding = true;
                 float* toLeft = buses[2 * to];
                 float* toRight = buses[2 * to + 1];
                 used[to] = true;
                 for (std::size_t i = 0; i < frames; ++i) {
-                    toLeft[i] += fromLeft[i] * extraGain.left;
-                    toRight[i] += fromRight[i] * extraGain.right;
+                    const float step = static_cast<float>(i + 1);
+                    toLeft[i] += fromLeft[i] * (extraFrom.left + extraStepLeft * step);
+                    toRight[i] += fromRight[i] * (extraFrom.right + extraStepRight * step);
                 }
             }
-            bool sounding = false;
+            bool sounding = extraSounding; // a tail on any output keeps a removed channel alive
             for (int i = 0; i < numFrames && !sounding; ++i)
                 sounding = std::abs(voices->left[i]) > 1e-6f || std::abs(voices->right[i]) > 1e-6f;
             voices->plugin.processed(sounding, numFrames); // a tail keeps a removed channel alive
             voices->plugin.clearEvents();
+            voices->controlCount = 0;
             voices->written = true;
         } else if (voices->plugin.active() > 0) {
             voices->plugin.reset(); // the plugin went: nothing to end
@@ -607,14 +800,42 @@ void StepSequencer::mix(
         voices->applied = target;
         voices->written = false;
     };
-    if (current_ != nullptr)
-        for (const ChannelState& channel : current_->channels)
-            mixChannel(channel);
+    if (current_ != nullptr) {
+        const auto& channels = current_->channels;
+        const auto sourceOf = [&channels](std::size_t index) -> int {
+            const int from = channels[index].notesFrom;
+            return from >= 0 && static_cast<std::size_t>(from) < channels.size()
+                    && static_cast<std::size_t>(from) != index
+                ? from
+                : -1;
+        };
+        for (std::size_t i = 0; i < channels.size(); ++i) {
+            // A channel whose notes others play is mixed before them: back
+            // along the sources first, then down again.
+            std::array<std::size_t, 8> chain{};
+            std::size_t depth = 0;
+            for (std::size_t at = i;;) {
+                chain[depth++] = at;
+                const int from = sourceOf(at);
+                if (from < 0 || depth == chain.size()
+                    || std::find(chain.begin(), chain.begin() + static_cast<std::ptrdiff_t>(depth),
+                           static_cast<std::size_t>(from))
+                        != chain.begin() + static_cast<std::ptrdiff_t>(depth))
+                    break; // no source, too long, or back where it began
+                at = static_cast<std::size_t>(from);
+            }
+            while (depth-- > 0) {
+                const int from = sourceOf(chain[depth]);
+                mixChannel(channels[chain[depth]],
+                    from >= 0 ? channels[static_cast<std::size_t>(from)].voices.get() : nullptr);
+            }
+        }
+    }
     // Removed channels still fading: through the insert of their last state.
     exchange_.forEachDraining([&](const SequencerState& old) {
         for (const ChannelState& channel : old.channels)
             if (channel.voices != nullptr && !inCurrent(channel.voices.get()))
-                mixChannel(channel);
+                mixChannel(channel, nullptr);
     });
 }
 

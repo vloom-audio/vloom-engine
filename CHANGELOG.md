@@ -7,6 +7,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- A channel's instrument can play another channel's notes as well as its
+  own: `ChannelState::notesFrom`, taken after the source's note effects.
+- Pitch bend, controllers and pressure can be written into the song:
+  `ChannelState::controls` (pattern mode) and `SongPattern::controls`
+  (song mode) are `ControlPoint`s that play at their ticks, on their exact
+  frames, like notes. `PluginInstance::Io::controls` carries them.
 - Plugins get more than their main sound (ADR 0012), for CLAP, VST 3 and
   VST 2 alike:
   - **Sidechains.** `Send::sidechain` sends an insert's sound to another
@@ -25,6 +31,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
   `ProcessContext` carries all of it; processors that use none need no
   change. `PluginInstance::process()` has an overload with an `Io`.
+
+  Also: `ChannelState::noteEffects` for several note effects in a row;
+  notes played by hand on an instrument go through its note effects; an
+  effect behind one with latency hears the sidechain as late as its sound;
+  `droppedRoutes()` tells which routes the mixer leaves out; a bridged
+  VST 2 plugin gets a sidechain, eight more output pairs, its notes and its
+  programs across the bridge, and a bridge that ended is started again
+  with the plugin's last saved state.
 - VST 2 plugins are hosted (ADR 0010): `plugin/Vst2Host` has `Vst2Library`
   (`open`, `plugins`, `create`), `vst2SearchPaths()` and `findVst2Files()`.
   Effects and instruments, 32-bit audio, notes as MIDI, parameters, state,

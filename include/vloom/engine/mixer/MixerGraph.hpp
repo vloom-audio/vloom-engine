@@ -61,6 +61,16 @@ struct MixerGraph {
     /// Frames the master's sound comes late, compared with the transport:
     /// what the inserts add, plus the master's own effects.
     int latency = 0;
+    /// Per node that is sent a sidechain, per effect of its chain: frames
+    /// the sidechain is delayed for that effect, to match the latency of
+    /// the effects before it (they delay the sound it works on), and the
+    /// line that does it. Empty for a node no sidechain is sent to.
+    std::array<std::vector<int>, kNodes> sideDelay{};
+    std::array<std::vector<std::shared_ptr<DelayLine>>, kNodes> sideLine{};
+
+    /// The routes of the state that were left out: one that would close a
+    /// loop, goes to its own insert or to an insert that does not exist.
+    std::vector<MixerRoute> dropped;
 
     /// The insert `insert` (1 .. kMaxInserts) of the state, or unity.
     [[nodiscard]] const InsertState& insert(int insert) const noexcept;
@@ -76,5 +86,12 @@ struct MixerGraph {
 /// routes kept from `previous` (may be null). Control thread; allocates.
 [[nodiscard]] std::unique_ptr<MixerGraph> buildMixerGraph(
     std::unique_ptr<const MixerState> state, const MixerGraph* previous);
+
+/// The routes of `state` the mixer would leave out (MixerGraph::dropped),
+/// for an app to tell the user before or after it publishes the state:
+/// `source` is the insert, `slot` 0 its output and n its send n - 1. An
+/// output set to nowhere on purpose (a target below 0) is not among them.
+/// Control thread; allocates.
+[[nodiscard]] std::vector<MixerRoute> droppedRoutes(const MixerState& state);
 
 } // namespace vloom

@@ -44,6 +44,9 @@ public:
     bool activate(double sampleRate, int maxBlockFrames);
     void deactivate();
     [[nodiscard]] bool isActive() const noexcept { return active_.load(std::memory_order_acquire); }
+    /// AudioProcessor::makesNotes() as of the last activate(): for the audio
+    /// thread, which must not ask the processor.
+    [[nodiscard]] bool makesNotes() const noexcept { return makesNotes_.load(std::memory_order_relaxed); }
 
     /// Sets parameter `id` to `value` at the start of the next block. False
     /// if the queue is full (try again later). The built-ins take the value
@@ -105,6 +108,9 @@ public:
         /// ProcessContext::extraOutputs; at most 2 * kMaxExtraOutputs.
         /// Written with silence while the instance is inactive or bypassed.
         std::span<float* const> extraOutputs{};
+        /// Controls of the song, in frame order (frames past the block land
+        /// on its last frame). They follow the ones sent with sendControl().
+        std::span<const ControlEvent> controls{};
         /// Room for the notes the processor makes, and how many it made.
         std::span<NoteEvent> notesOut{};
         int* notesOutCount = nullptr;
@@ -124,6 +130,11 @@ public:
     /// Control thread (one thread at a time).
     bool playNote(int key, float velocity);
     bool stopNote(int key);
+    /// Audio thread: takes the notes played by hand that wait, into `out`
+    /// (at frame 0), instead of the next process() playing them: for a host
+    /// that sends them through something else first (a note effect).
+    /// Returns how many.
+    std::size_t takeLiveNotes(std::span<NoteEvent> out) noexcept;
 
     /// Controls that can wait for the audio thread; more are refused.
     static constexpr std::size_t kMaxLiveControls = 255;
@@ -153,6 +164,7 @@ private:
     std::unique_ptr<AudioProcessor> processor_;
     std::atomic<bool> active_{false};
     std::atomic<bool> bypassed_{false};
+    std::atomic<bool> makesNotes_{false};
     int maxBlockFrames_ = 0; ///< written before activation is published
     std::atomic<int> latency_{0}; ///< control thread writes, audio thread reads (bypass)
     DelayLine bypassLine_; ///< the dry path while bypassed: room for latency_ plus kBypassHeadroom
@@ -168,6 +180,7 @@ private:
     SpscQueue<ControlEvent, kMaxLiveControls + 1> liveControls_;
     /// Audio thread: the controls of one block (they go with its first chunk).
     std::array<ControlEvent, kMaxLiveControls> blockControls_{};
+    std::array<ControlEvent, kMaxLiveControls> chunkControls_{}; ///< one chunk's, frames made chunk-relative
 
     /// Audio thread: adds `numFrames` of output to the scope when it is on.
     void capture(const float* left, const float* right, int numFrames) noexcept;

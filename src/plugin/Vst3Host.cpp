@@ -1088,9 +1088,11 @@ public:
         for (std::size_t bus = 0; bus < inputs_.size(); ++bus)
             for (std::size_t ch = 0; ch < inputs_[bus].pointers.size(); ++ch) {
                 float* dst = inputs_[bus].pointers[ch];
-                if (bus == 1 && context.sidechain != nullptr && ch < 2 && inputs_[bus].pointers.size() > 1)
+                if (bus == 1 && hasSidechain_ && context.sidechain != nullptr && ch < 2
+                    && inputs_[bus].pointers.size() > 1)
                     std::copy_n(context.sidechain[ch], frames, dst);
-                else if (bus == 1 && context.sidechain != nullptr && inputs_[bus].pointers.size() == 1)
+                else if (bus == 1 && hasSidechain_ && context.sidechain != nullptr
+                    && inputs_[bus].pointers.size() == 1)
                     for (std::size_t i = 0; i < frames; ++i)
                         dst[i] = 0.5f * (context.sidechain[0][i] + context.sidechain[1][i]);
                 else if (bus != 0 || ch >= 2)
@@ -1348,9 +1350,16 @@ private:
                     bus.pointers.push_back(channel.data());
                 buses.push_back(std::move(bus));
                 // The main bus, the sidechain, and the outputs a host may route apart.
-                const bool wanted = direction == vst::kInput
-                    ? i < 2
-                    : i <= static_cast<int32>(PluginInstance::kMaxExtraOutputs);
+                bool wanted = i == 0;
+                if (direction == vst::kOutput) {
+                    wanted = i <= static_cast<int32>(PluginInstance::kMaxExtraOutputs);
+                } else if (i == 1) {
+                    // A second input is a sidechain only if the plugin calls it auxiliary.
+                    vst::BusInfo second{};
+                    sidechainBus_ = component_->getBusInfo(vst::kAudio, vst::kInput, 1, second) == kResultOk
+                        && second.busType == vst::kAux;
+                    wanted = sidechainBus_;
+                }
                 component_->activateBus(vst::kAudio, direction, i, wanted);
             }
             return true;
@@ -1358,7 +1367,7 @@ private:
         if (!size(inCount, vst::kInput, inputs_, inputBuffers_)
             || !size(outCount, vst::kOutput, outputs_, outputBuffers_))
             return false;
-        hasSidechain_ = inputs_.size() > 1 && !inputs_[1].pointers.empty();
+        hasSidechain_ = sidechainBus_ && inputs_.size() > 1 && !inputs_[1].pointers.empty();
         extraOutputs_ = 0;
         for (std::size_t bus = 1; bus < outputs_.size() && bus <= PluginInstance::kMaxExtraOutputs; ++bus)
             if (!outputs_[bus].pointers.empty())
@@ -1394,7 +1403,8 @@ private:
     bool processing_ = false; ///< audio thread, once active
     bool hasEventInput_ = false;
     bool hasEventOutput_ = false;
-    bool hasSidechain_ = false; ///< it has a second audio input bus
+    bool hasSidechain_ = false; ///< it has a second audio input bus that is a sidechain
+    bool sidechainBus_ = false; ///< configureBuses(): input bus 1 is of the auxiliary kind
     int extraOutputs_ = 0; ///< its output buses after the main one that a host can route
     /// Per MIDI control (0 .. 127 controllers, 128 pressure, 129 pitch
     /// bend): the parameter the plugin moves for it, if any.

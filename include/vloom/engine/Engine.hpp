@@ -218,7 +218,8 @@ private:
     std::array<bool, kMaxInserts + 1> sideUsed_{};
     /// Runs `effects` on `left` / `right` with node `index`'s sidechain, and empties it.
     void processEffects(const std::vector<std::shared_ptr<PluginInstance>>& effects, std::size_t index,
-        float* left, float* right, int numFrames, const TransportInfo& transport) noexcept;
+        float* left, float* right, int numFrames, const TransportInfo& transport,
+        const MixerGraph* graph = nullptr) noexcept;
     std::array<StereoGain, kMaxInserts + 1> insertApplied_{}; ///< audio thread: ramp start per insert
     std::array<bool, kMaxInserts + 1> insertSounding_{}; ///< audio thread: the insert had sound last block
     std::array<std::array<std::atomic<float>, 2>, kMaxInserts + 1> insertPeak_{};
@@ -230,6 +231,7 @@ private:
     std::array<float*, 2> post_{};
     std::array<float*, 2> routed_{};
     float* click_ = nullptr;
+    std::array<float*, 2> side_{}; ///< a sidechain delayed for one effect
     DelayLine clickLine_; ///< audio thread: the metronome, delayed as the music
     bool stopVoices_ = false; ///< audio thread: a Stop command arrived this block
     bool wasRolling_ = false; ///< audio thread: the transport played in the last block

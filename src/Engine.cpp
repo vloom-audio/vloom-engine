@@ -25,7 +25,7 @@ Engine::Engine()
     : unityMixer_(buildMixerGraph(nullptr, nullptr))
     , busMemory_(static_cast<std::size_t>(2 * (kMaxInserts + 1) * kMaxBlockFrames), 0.0f)
     , sideMemory_(static_cast<std::size_t>(2 * (kMaxInserts + 1) * kMaxBlockFrames), 0.0f)
-    , scratchMemory_(static_cast<std::size_t>(5 * kMaxBlockFrames), 0.0f)
+    , scratchMemory_(static_cast<std::size_t>(7 * kMaxBlockFrames), 0.0f)
     , clickLine_(kMaxLatencyFrames, 1)
 {
     for (std::size_t i = 0; i < buses_.size(); ++i) {
@@ -38,6 +38,7 @@ Engine::Engine()
     post_ = {scratch(0), scratch(1)};
     routed_ = {scratch(2), scratch(3)};
     click_ = scratch(4);
+    side_ = {scratch(5), scratch(6)};
 }
 
 void Engine::prepare(double sampleRate, int /*maxBlockSize*/)
@@ -421,19 +422,40 @@ const std::vector<std::shared_ptr<PluginInstance>> kNoEffects;
 } // namespace
 
 void Engine::processEffects(const std::vector<std::shared_ptr<PluginInstance>>& effects, std::size_t index,
-    float* left, float* right, int numFrames, const TransportInfo& transport) noexcept
+    float* left, float* right, int numFrames, const TransportInfo& transport,
+    const MixerGraph* graph) noexcept
 {
-    PluginInstance::Io io;
-    if (sideUsed_[index]) {
-        io.sidechainLeft = sideBuses_[2 * index];
-        io.sidechainRight = sideBuses_[2 * index + 1];
+    const bool heard = sideUsed_[index];
+    const auto frames = static_cast<std::size_t>(numFrames);
+    for (std::size_t k = 0; k < effects.size(); ++k) {
+        // The sidechain as this effect hears it: as late as the effects
+        // before it make the sound it works on.
+        DelayLine* line = graph != nullptr && k < graph->sideLine[index].size()
+            ? graph->sideLine[index][k].get()
+            : nullptr;
+        const int delay = line != nullptr ? graph->sideDelay[index][k] : 0;
+        PluginInstance::Io io;
+        if (line != nullptr && (heard || !line->idle())) {
+            if (heard) {
+                std::copy_n(sideBuses_[2 * index], frames, side_[0]);
+                std::copy_n(sideBuses_[2 * index + 1], frames, side_[1]);
+            } else { // nothing sent this block: what the line still holds comes out
+                std::fill_n(side_[0], frames, 0.0f);
+                std::fill_n(side_[1], frames, 0.0f);
+            }
+            line->process(side_.data(), 2, numFrames, delay);
+            io.sidechainLeft = side_[0];
+            io.sidechainRight = side_[1];
+        } else if (heard) {
+            io.sidechainLeft = sideBuses_[2 * index];
+            io.sidechainRight = sideBuses_[2 * index + 1];
+        }
+        if (effects[k] != nullptr)
+            effects[k]->process(left, right, numFrames, transport, {}, io);
     }
-    for (const auto& effect : effects)
-        if (effect != nullptr)
-            effect->process(left, right, numFrames, transport, {}, io);
-    if (sideUsed_[index]) { // heard: empty for the next block
-        std::memset(sideBuses_[2 * index], 0, sizeof(float) * static_cast<std::size_t>(numFrames));
-        std::memset(sideBuses_[2 * index + 1], 0, sizeof(float) * static_cast<std::size_t>(numFrames));
+    if (heard) { // empty for the next block
+        std::memset(sideBuses_[2 * index], 0, sizeof(float) * frames);
+        std::memset(sideBuses_[2 * index + 1], 0, sizeof(float) * frames);
         sideUsed_[index] = false;
     }
 }
@@ -472,7 +494,7 @@ void Engine::mixInsert(
     busUsed_[index] = false;
     float* left = buses_[2 * index];
     float* right = buses_[2 * index + 1];
-    processEffects(settings.effects, index, left, right, numFrames, transport);
+    processEffects(settings.effects, index, left, right, numFrames, transport, &graph);
 
     // Volume and pan, ramped from the last block.
     const float n = static_cast<float>(numFrames);
@@ -563,7 +585,7 @@ void Engine::mixBuses(
     // then the preview, which is neither delayed nor processed.
     delayInput(graph, 0, numFrames);
     processEffects(graph.state != nullptr ? graph.state->masterEffects : kNoEffects, 0, buses_[0], buses_[1],
-        numFrames, transport);
+        numFrames, transport, &graph);
     renderPreview(numFrames);
     const int latency = graph.latency;
     latency_.store(latency, std::memory_order_relaxed);
