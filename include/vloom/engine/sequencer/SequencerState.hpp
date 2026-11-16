@@ -77,8 +77,9 @@ public:
     // play: the host ends these keys itself when the effect is taken away,
     // switched off or stopped, since no note-off of the effect will come.
     std::array<bool, 128> madeHeld{};
-    bool throughEffect = false; ///< last block's notes went through a note effect
-    const void* lastEffect = nullptr; ///< which one (compared, never used)
+    /// The note effects the last block's notes went through (compared, never used).
+    std::array<const void*, 8> lastEffects{};
+    int lastEffectCount = 0;
     bool endMade = false; ///< stopAll() ran: end the made keys with the next block
     StereoGain applied{}; ///< gain at the end of the last block: the next ramp starts there
 };
@@ -124,7 +125,12 @@ struct ChannelState {
     /// A plugin that makes notes out of the channel's (an arpeggiator, a
     /// chord maker): it gets the channel's notes and `plugin` gets what it
     /// puts out instead. Activated like `plugin`; its sound is not used.
+    /// Notes played by hand on `plugin` (PluginInstance::playNote()) go
+    /// through it too.
     std::shared_ptr<PluginInstance> noteEffect{};
+    /// More of them, after `noteEffect` and in this order: each gets what
+    /// the one before made. Seven at most; more are left out.
+    std::vector<std::shared_ptr<PluginInstance>> noteEffects{};
     std::shared_ptr<const SampleBuffer> sample; ///< at the engine's sample rate (sample/SampleLoader)
     std::shared_ptr<ChannelVoices> voices; ///< required to sound; keep it across edits
     float gain = 1.0f; ///< channel volume, linear 0 .. 4; changes ramp over one block, ringing notes too

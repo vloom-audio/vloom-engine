@@ -351,6 +351,9 @@ void StepSequencer::activatePlugins(double sampleRate, int maxBlockFrames)
                 channel.plugin->activate(sampleRate, maxBlockFrames);
             if (channel.noteEffect != nullptr)
                 channel.noteEffect->activate(sampleRate, maxBlockFrames);
+            for (const auto& effect : channel.noteEffects)
+                if (effect != nullptr)
+                    effect->activate(sampleRate, maxBlockFrames);
         }
     };
     exchange_.forEachSnapshot(activate); // the one not picked up yet too
@@ -534,12 +537,19 @@ void StepSequencer::mix(
         if (channel.plugin != nullptr) {
             const auto frames = static_cast<std::size_t>(numFrames);
             std::span<const NoteEvent> notes = voices->plugin.events();
-            // A note effect first: the instrument plays what it makes. Only
-            // one that runs and makes notes; otherwise the channel's notes
-            // go straight to the instrument.
-            PluginInstance* effect = channel.noteEffect.get();
-            const bool through
-                = effect != nullptr && effect->isActive() && !effect->isBypassed() && effect->makesNotes();
+            // Note effects first: the instrument plays what they make. Only
+            // those that run and make notes; without any, the channel's
+            // notes go straight to the instrument.
+            std::array<PluginInstance*, 8> chain{};
+            int stages = 0;
+            const auto stage = [&](PluginInstance* effect) {
+                if (effect != nullptr && stages < static_cast<int>(chain.size()) && effect->isActive()
+                    && !effect->isBypassed() && effect->makesNotes())
+                    chain[static_cast<std::size_t>(stages++)] = effect;
+            };
+            stage(channel.noteEffect.get());
+            for (const auto& effect : channel.noteEffects)
+                stage(effect.get());
             std::size_t given = 0; // notes for the instrument put together here, in madeNotes_
             const auto end = [&](int frame, int key) {
                 if (given < madeNotes_.size())
@@ -548,37 +558,55 @@ void StepSequencer::mix(
             };
             // The way notes reach the instrument changed: what it holds the
             // old way is ended, since its note-offs now go elsewhere.
-            if (through != voices->throughEffect || (through && effect != voices->lastEffect)) {
+            bool changed = stages != voices->lastEffectCount;
+            for (int s = 0; s < stages && !changed; ++s)
+                changed
+                    = voices->lastEffects[static_cast<std::size_t>(s)] != chain[static_cast<std::size_t>(s)];
+            if (changed) {
                 for (int key = 0; key < 128; ++key) {
                     const auto k = static_cast<std::size_t>(key);
-                    if (voices->throughEffect ? voices->madeHeld[k] : voices->plugin.isHeld(key))
+                    if (voices->lastEffectCount > 0 ? voices->madeHeld[k] : voices->plugin.isHeld(key))
                         end(0, key);
                 }
                 voices->madeHeld.fill(false);
-                voices->throughEffect = through;
-                voices->lastEffect = effect;
+                voices->lastEffectCount = stages;
+                for (std::size_t s = 0; s < chain.size(); ++s)
+                    voices->lastEffects[s] = chain[s];
             }
-            if (through) {
+            if (stages > 0) {
+                // Into the chain: the notes played by hand on the instrument, then the song's.
+                std::size_t fed = channel.plugin->takeLiveNotes(effectIn_);
+                for (const NoteEvent& note : notes)
+                    if (fed < effectIn_.size())
+                        effectIn_[fed++] = note;
+                std::span<const NoteEvent> passing(effectIn_.data(), fed);
                 float* unusedLeft = extraBuffers_[extraBuffers_.size() - 2];
                 float* unusedRight = extraBuffers_[extraBuffers_.size() - 1];
-                std::fill_n(unusedLeft, frames, 0.0f);
-                std::fill_n(unusedRight, frames, 0.0f);
-                int made = 0;
-                PluginInstance::Io noteIo;
-                noteIo.notesOut = std::span<NoteEvent>(madeNotes_).subspan(given);
-                noteIo.notesOutCount = &made;
-                effect->process(unusedLeft, unusedRight, numFrames, transport, notes, noteIo);
-                for (int i = 0; i < made; ++i) {
-                    const NoteEvent& note = madeNotes_[given + static_cast<std::size_t>(i)];
+                for (int s = 0; s < stages; ++s) {
+                    std::fill_n(unusedLeft, frames, 0.0f);
+                    std::fill_n(unusedRight, frames, 0.0f);
+                    auto& out = stageNotes_[static_cast<std::size_t>(s % 2)];
+                    int made = 0;
+                    PluginInstance::Io noteIo;
+                    noteIo.notesOut = out;
+                    noteIo.notesOutCount = &made;
+                    chain[static_cast<std::size_t>(s)]->process(
+                        unusedLeft, unusedRight, numFrames, transport, passing, noteIo);
+                    passing = std::span<const NoteEvent>(out.data(), static_cast<std::size_t>(made));
+                }
+                for (const NoteEvent& note : passing) {
+                    if (given == madeNotes_.size())
+                        break;
+                    madeNotes_[given++] = note;
                     if (note.key >= 0 && note.key < 128)
                         voices->madeHeld[static_cast<std::size_t>(note.key)]
                             = note.type == NoteEvent::Type::On;
                 }
-                given += static_cast<std::size_t>(made);
-                // The song stopped or jumped: an effect that goes on by
-                // itself (an arpeggiator) is told, and what it left sounding ends.
+                // The song stopped or jumped: effects that go on by
+                // themselves (an arpeggiator) are told, and what they left sounding ends.
                 if (voices->endMade) {
-                    effect->reset();
+                    for (int s = 0; s < stages; ++s)
+                        chain[static_cast<std::size_t>(s)]->reset();
                     for (int key = 0; key < 128; ++key)
                         if (voices->madeHeld[static_cast<std::size_t>(key)])
                             end(numFrames - 1, key);
@@ -600,7 +628,11 @@ void StepSequencer::mix(
             channel.plugin->process(
                 voices->left.data(), voices->right.data(), numFrames, transport, notes, io);
             // Its other outputs, each into the insert chosen for it.
-            const StereoGain extraGain = balance(channel.gain, channel.pan);
+            // At the channel's volume and pan, ramped across the block like its main sound.
+            const StereoGain extraTo = balance(channel.gain, channel.pan);
+            const StereoGain extraFrom = voices->rampStarted ? voices->applied : extraTo;
+            const float extraStepLeft = (extraTo.left - extraFrom.left) / static_cast<float>(numFrames);
+            const float extraStepRight = (extraTo.right - extraFrom.right) / static_cast<float>(numFrames);
             bool extraSounding = false;
             for (std::size_t k = 0; k < pairs; ++k) {
                 const int to = channel.pluginOutputs[k];
@@ -619,8 +651,9 @@ void StepSequencer::mix(
                 float* toRight = buses[2 * to + 1];
                 used[to] = true;
                 for (std::size_t i = 0; i < frames; ++i) {
-                    toLeft[i] += fromLeft[i] * extraGain.left;
-                    toRight[i] += fromRight[i] * extraGain.right;
+                    const float step = static_cast<float>(i + 1);
+                    toLeft[i] += fromLeft[i] * (extraFrom.left + extraStepLeft * step);
+                    toRight[i] += fromRight[i] * (extraFrom.right + extraStepRight * step);
                 }
             }
             bool sounding = extraSounding; // a tail on any output keeps a removed channel alive

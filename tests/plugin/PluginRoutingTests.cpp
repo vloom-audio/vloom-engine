@@ -8,6 +8,7 @@
 #include "support/Allocations.hpp"
 
 #include <vloom/engine/Engine.hpp>
+#include <vloom/engine/mixer/MixerGraph.hpp>
 #include <vloom/engine/mixer/MixerState.hpp>
 #include <vloom/engine/plugin/PluginInstance.hpp>
 #include <vloom/engine/render/OfflineRenderer.hpp>
@@ -156,6 +157,28 @@ public:
 
 private:
     bool backwards_;
+};
+
+/// An effect with latency: it puts its input out 100 frames late and says so.
+class Late final : public vloom::AudioProcessor {
+public:
+    static constexpr int kFrames = 100;
+    [[nodiscard]] vloom::PluginInfo info() const override { return {"test.late", "Late", "Tests", "1", {}}; }
+    bool activate(double, int) override { return true; }
+    [[nodiscard]] int latencyFrames() const override { return kFrames; }
+    void process(const vloom::ProcessContext& context) noexcept override
+    {
+        for (int ch = 0; ch < context.numChannels && ch < 2; ++ch)
+            for (int i = 0; i < context.numFrames; ++i) {
+                float& kept = line_[static_cast<std::size_t>(ch)][at_[static_cast<std::size_t>(ch)]];
+                std::swap(kept, context.channels[ch][i]);
+                at_[static_cast<std::size_t>(ch)] = (at_[static_cast<std::size_t>(ch)] + 1) % kFrames;
+            }
+    }
+
+private:
+    std::array<std::array<float, kFrames>, 2> line_{};
+    std::array<std::size_t, 2> at_{};
 };
 
 /// An instrument that shows the controls it got: left = the last pitch
@@ -438,4 +461,96 @@ TEST_CASE("Notes a processor makes out of order reach the host in frame order", 
     CHECK(made[1].frame == 9);
     CHECK(made[2].frame == 30);
     CHECK(made[2].key == 64);
+}
+
+TEST_CASE("Note effects in a row each get what the one before made", "[plugin][sequencer][routing]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    auto state = std::make_unique<vloom::SequencerState>();
+    state->channels.push_back(channel(make<Keys>(), 0, true));
+    state->channels[0].noteEffect = make<Octaver>();
+    state->channels[0].noteEffects = {make<Octaver>()};
+    const int root = state->channels[0].rootKey;
+    engine.setSequencerState(std::move(state));
+    engine.play();
+    const auto audio = render(engine, 0.25);
+    // The key, an octave up, and two octaves up (the middle one twice: one key).
+    CHECK(audio[1000 * 2] == Approx(0.3f));
+    CHECK(audio[1000 * 2 + 1] == Approx(static_cast<float>(root + 24) / 1000.0f));
+    CHECK(audio[6400 * 2] == 0.0f);
+}
+
+TEST_CASE(
+    "A note played by hand on the instrument goes through its note effect", "[plugin][sequencer][routing]")
+{
+    const auto left = [](bool withEffect) {
+        vloom::Engine engine;
+        prepare(engine);
+        auto instrument = make<Keys>();
+        auto state = std::make_unique<vloom::SequencerState>();
+        state->channels.push_back(channel(instrument, 0));
+        if (withEffect)
+            state->channels[0].noteEffect = make<Octaver>();
+        engine.setSequencerState(std::move(state));
+        REQUIRE(instrument->playNote(60, 1.0f));
+        return render(engine, 0.05)[1000 * 2];
+    };
+    CHECK(left(false) == Approx(0.1f));
+    CHECK(left(true) == Approx(0.2f)); // the key and its octave
+}
+
+TEST_CASE(
+    "An effect behind one with latency hears the sidechain as late as its sound", "[plugin][mixer][routing]")
+{
+    // Insert 1: a drone at 0.1 through an effect 100 frames late, then a
+    // ducker. Insert 2 sends a note that ends at frame 6000 to its sidechain
+    // at gain 4. The ducker works on sound that is 100 frames late, so the
+    // duck has to end 100 frames late as well: at 6100.
+    vloom::Engine engine;
+    prepare(engine);
+    auto state = std::make_unique<vloom::SequencerState>();
+    state->channels.push_back(channel(make<Keys>(0, true), 1));
+    state->channels.push_back(channel(make<Keys>(), 2, true));
+    engine.setSequencerState(std::move(state));
+    auto mixer = std::make_unique<vloom::MixerState>();
+    mixer->inserts.resize(2);
+    mixer->inserts[0].effects = {make<Late>(), make<Ducker>()};
+    mixer->inserts[1].output = -1;
+    vloom::Send send;
+    send.target = 1;
+    send.gain = 4.0f;
+    send.sidechain = true;
+    mixer->inserts[1].sends = {send};
+    engine.setMixerState(std::move(mixer));
+    engine.play();
+    const auto audio = render(engine, 0.2);
+    CHECK(audio[3000 * 2] == Approx(0.1f * 0.6f)); // ducked while the note sounds
+    CHECK(audio[6050 * 2] == Approx(0.1f * 0.6f)); // still: the sound here is from before the note's end
+    CHECK(audio[6150 * 2] == Approx(0.1f)); // and over
+}
+
+TEST_CASE("The routes a mixer leaves out can be asked for", "[plugin][mixer][routing]")
+{
+    vloom::MixerState mixer;
+    mixer.inserts.resize(3);
+    mixer.inserts[0].output = 2; // 1 -> 2
+    mixer.inserts[1].output = 1; // 2 -> 1: closes a loop
+    mixer.inserts[2].output = -1; // nowhere, on purpose
+    vloom::Send toItself;
+    toItself.target = 3;
+    vloom::Send nowhere;
+    nowhere.target = 9000; // no such insert
+    nowhere.sidechain = true;
+    mixer.inserts[2].sends = {toItself, nowhere};
+    const auto dropped = vloom::droppedRoutes(mixer);
+    REQUIRE(dropped.size() == 3);
+    CHECK(dropped[0].source == 2);
+    CHECK(dropped[0].slot == 0);
+    CHECK(dropped[0].target == 1);
+    CHECK(dropped[1].source == 3);
+    CHECK(dropped[1].slot == 1);
+    CHECK(dropped[2].slot == 2);
+    CHECK(dropped[2].sidechain);
+    CHECK(vloom::droppedRoutes(vloom::MixerState{}).empty());
 }

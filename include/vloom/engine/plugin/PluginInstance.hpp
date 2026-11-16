@@ -127,6 +127,11 @@ public:
     /// Control thread (one thread at a time).
     bool playNote(int key, float velocity);
     bool stopNote(int key);
+    /// Audio thread: takes the notes played by hand that wait, into `out`
+    /// (at frame 0), instead of the next process() playing them: for a host
+    /// that sends them through something else first (a note effect).
+    /// Returns how many.
+    std::size_t takeLiveNotes(std::span<NoteEvent> out) noexcept;
 
     /// Controls that can wait for the audio thread; more are refused.
     static constexpr std::size_t kMaxLiveControls = 255;

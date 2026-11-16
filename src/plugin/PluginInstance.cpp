@@ -218,6 +218,16 @@ bool PluginInstance::sendControl(ControlEvent::Type type, int number, float valu
         0, type, static_cast<std::int16_t>(std::clamp(number, 0, 127)), std::clamp(value, low, 1.0f)});
 }
 
+std::size_t PluginInstance::takeLiveNotes(std::span<NoteEvent> out) noexcept
+{
+    std::size_t taken = 0;
+    for (NoteEvent note; taken < out.size() && liveNotes_.pop(note);) {
+        note.frame = 0;
+        out[taken++] = note;
+    }
+    return taken;
+}
+
 bool PluginInstance::stopNote(int key)
 {
     return liveNotes_.push(
