@@ -44,6 +44,9 @@ public:
     bool activate(double sampleRate, int maxBlockFrames);
     void deactivate();
     [[nodiscard]] bool isActive() const noexcept { return active_.load(std::memory_order_acquire); }
+    /// AudioProcessor::makesNotes() as of the last activate(): for the audio
+    /// thread, which must not ask the processor.
+    [[nodiscard]] bool makesNotes() const noexcept { return makesNotes_.load(std::memory_order_relaxed); }
 
     /// Sets parameter `id` to `value` at the start of the next block. False
     /// if the queue is full (try again later). The built-ins take the value
@@ -153,6 +156,7 @@ private:
     std::unique_ptr<AudioProcessor> processor_;
     std::atomic<bool> active_{false};
     std::atomic<bool> bypassed_{false};
+    std::atomic<bool> makesNotes_{false};
     int maxBlockFrames_ = 0; ///< written before activation is published
     std::atomic<int> latency_{0}; ///< control thread writes, audio thread reads (bypass)
     DelayLine bypassLine_; ///< the dry path while bypassed: room for latency_ plus kBypassHeadroom

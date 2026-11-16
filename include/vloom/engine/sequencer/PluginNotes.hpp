@@ -84,6 +84,11 @@ public:
         ringing_ = sounding && tailLeft_ > 0;
     }
     [[nodiscard]] int held() const noexcept { return held_; }
+    /// True while `key` is held.
+    [[nodiscard]] bool isHeld(int key) const noexcept
+    {
+        return key >= 0 && key < kKeys && releaseAt_[static_cast<std::size_t>(key)] != kNotHeld;
+    }
 
     /// The events of the block so far, in frame order.
     [[nodiscard]] std::span<const NoteEvent> events() const noexcept { return {events_.data(), count_}; }

@@ -9,7 +9,8 @@
 // - six outputs: after the main pair, a pair that carries the last pitch
 //   bend (left, 0 .. 1) and the last value of controller 1 (right, 0 .. 1),
 //   and a pair that carries 0.3;
-// - for every note-on it gets, it sends the host a note-on an octave up;
+// - for every note-on it gets, it sends the host a note-on an octave up, if
+//   the host says it takes MIDI from plugins (as careful plugins ask first);
 // - three programs, "Soft", "Hard" and "Wide".
 #include "plugin/Vst2Abi.hpp"
 
@@ -105,6 +106,9 @@ void VLOOM_VST2_CALL process(Effect* effect, float** inputs, float** outputs, st
 {
     Plugin* plugin = self(effect);
     // What it made of this block's notes goes back to the host.
+    char receives[] = "receiveVstMidiEvent";
+    if (plugin->host(effect, kHostCanDo, 0, 0, receives, 0.0f) != 1)
+        plugin->echoes = 0;
     if (plugin->echoes > 0) {
         struct {
             std::int32_t numEvents;

@@ -8,6 +8,7 @@
 
 #include "plugin/Vst2Abi.hpp"
 #include "plugin/bridge/BridgeProtocol.hpp"
+#include "vloom/engine/plugin/PluginInstance.hpp"
 #include "vloom/engine/time/MusicalTime.hpp"
 
 #include <algorithm>
@@ -376,7 +377,9 @@ public:
         };
         // Controls as MIDI, before the notes (they come at the block's start).
         for (const ControlEvent& control : context.controls) {
-            if (count == bridge::kMaxEvents || !std::isfinite(control.value))
+            // Room is kept for the note-offs after a reset and for the block's notes.
+            if (count + 128 + static_cast<std::int32_t>(PluginInstance::kMaxNotes) >= bridge::kMaxEvents
+                || !std::isfinite(control.value))
                 break;
             bridge::MidiMessage& m = audio.midi[count++];
             m.frame = std::clamp(control.frame, 0, context.numFrames - 1);

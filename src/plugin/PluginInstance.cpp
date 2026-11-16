@@ -22,6 +22,7 @@ bool PluginInstance::activate(double sampleRate, int maxBlockFrames)
     if (!processor_->activate(sampleRate, maxBlockFrames))
         return false;
     maxBlockFrames_ = maxBlockFrames;
+    makesNotes_.store(processor_->makesNotes(), std::memory_order_relaxed);
     const int latency = std::clamp(processor_->latencyFrames(), 0, kMaxLatencyFrames);
     latency_.store(latency, std::memory_order_relaxed);
     bypassLine_.resize(std::min(latency + kBypassHeadroom, kMaxLatencyFrames));
@@ -189,6 +190,11 @@ void PluginInstance::process(float* left, float* right, int numFrames, const Tra
         }
         notesMade += static_cast<std::size_t>(made);
     }
+    // In frame order, whatever order the processor made them in (the next
+    // processor needs them so). Few, and nearly sorted: an insertion sort.
+    for (std::size_t i = 1; i < notesMade; ++i)
+        for (std::size_t k = i; k > 0 && io.notesOut[k].frame < io.notesOut[k - 1].frame; --k)
+            std::swap(io.notesOut[k], io.notesOut[k - 1]);
     if (io.notesOutCount != nullptr)
         *io.notesOutCount = static_cast<int>(notesMade);
     pendingCount_ = 0;

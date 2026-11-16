@@ -64,6 +64,7 @@ public:
         sampler.stopAll();
         synth.stopAll();
         plugin.releaseHeld(frame); // the plugin fades its own notes
+        endMade = true; // and what a note effect made of them ends too
     }
 
     // ---- audio thread
@@ -72,6 +73,13 @@ public:
     std::vector<float> left, right; ///< the channel's signal in the block being rendered; zero otherwise
     bool written = false; ///< something was rendered into left / right this block
     bool rampStarted = false;
+    // What a note effect (ChannelState::noteEffect) has the instrument
+    // play: the host ends these keys itself when the effect is taken away,
+    // switched off or stopped, since no note-off of the effect will come.
+    std::array<bool, 128> madeHeld{};
+    bool throughEffect = false; ///< last block's notes went through a note effect
+    const void* lastEffect = nullptr; ///< which one (compared, never used)
+    bool endMade = false; ///< stopAll() ran: end the made keys with the next block
     StereoGain applied{}; ///< gain at the end of the last block: the next ramp starts there
 };
 

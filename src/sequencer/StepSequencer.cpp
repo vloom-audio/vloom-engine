@@ -336,7 +336,8 @@ void StepSequencer::resetVoices() noexcept
 }
 
 StepSequencer::StepSequencer()
-    : extraMemory_(extraBuffers_.size() * static_cast<std::size_t>(kMaxBlockFrames), 0.0f)
+    : extraMemory_(
+          (2 * PluginInstance::kMaxExtraOutputs + 2) * static_cast<std::size_t>(kMaxBlockFrames), 0.0f)
 {
     for (std::size_t i = 0; i < extraBuffers_.size(); ++i)
         extraBuffers_[i] = extraMemory_.data() + i * static_cast<std::size_t>(kMaxBlockFrames);
@@ -533,19 +534,65 @@ void StepSequencer::mix(
         if (channel.plugin != nullptr) {
             const auto frames = static_cast<std::size_t>(numFrames);
             std::span<const NoteEvent> notes = voices->plugin.events();
-            // A note effect first: the instrument plays what it makes.
-            if (channel.noteEffect != nullptr) {
+            // A note effect first: the instrument plays what it makes. Only
+            // one that runs and makes notes; otherwise the channel's notes
+            // go straight to the instrument.
+            PluginInstance* effect = channel.noteEffect.get();
+            const bool through
+                = effect != nullptr && effect->isActive() && !effect->isBypassed() && effect->makesNotes();
+            std::size_t given = 0; // notes for the instrument put together here, in madeNotes_
+            const auto end = [&](int frame, int key) {
+                if (given < madeNotes_.size())
+                    madeNotes_[given++]
+                        = NoteEvent{frame, NoteEvent::Type::Off, static_cast<std::int16_t>(key), 0.0f};
+            };
+            // The way notes reach the instrument changed: what it holds the
+            // old way is ended, since its note-offs now go elsewhere.
+            if (through != voices->throughEffect || (through && effect != voices->lastEffect)) {
+                for (int key = 0; key < 128; ++key) {
+                    const auto k = static_cast<std::size_t>(key);
+                    if (voices->throughEffect ? voices->madeHeld[k] : voices->plugin.isHeld(key))
+                        end(0, key);
+                }
+                voices->madeHeld.fill(false);
+                voices->throughEffect = through;
+                voices->lastEffect = effect;
+            }
+            if (through) {
                 float* unusedLeft = extraBuffers_[extraBuffers_.size() - 2];
                 float* unusedRight = extraBuffers_[extraBuffers_.size() - 1];
                 std::fill_n(unusedLeft, frames, 0.0f);
                 std::fill_n(unusedRight, frames, 0.0f);
                 int made = 0;
                 PluginInstance::Io noteIo;
-                noteIo.notesOut = madeNotes_;
+                noteIo.notesOut = std::span<NoteEvent>(madeNotes_).subspan(given);
                 noteIo.notesOutCount = &made;
-                channel.noteEffect->process(unusedLeft, unusedRight, numFrames, transport, notes, noteIo);
-                notes = std::span<const NoteEvent>(madeNotes_.data(), static_cast<std::size_t>(made));
+                effect->process(unusedLeft, unusedRight, numFrames, transport, notes, noteIo);
+                for (int i = 0; i < made; ++i) {
+                    const NoteEvent& note = madeNotes_[given + static_cast<std::size_t>(i)];
+                    if (note.key >= 0 && note.key < 128)
+                        voices->madeHeld[static_cast<std::size_t>(note.key)]
+                            = note.type == NoteEvent::Type::On;
+                }
+                given += static_cast<std::size_t>(made);
+                // The song stopped or jumped: an effect that goes on by
+                // itself (an arpeggiator) is told, and what it left sounding ends.
+                if (voices->endMade) {
+                    effect->reset();
+                    for (int key = 0; key < 128; ++key)
+                        if (voices->madeHeld[static_cast<std::size_t>(key)])
+                            end(numFrames - 1, key);
+                    voices->madeHeld.fill(false);
+                }
+                notes = std::span<const NoteEvent>(madeNotes_.data(), given);
+            } else if (given > 0) {
+                // The note-offs above, then the channel's own notes.
+                for (const NoteEvent& note : notes)
+                    if (given < madeNotes_.size())
+                        madeNotes_[given++] = note;
+                notes = std::span<const NoteEvent>(madeNotes_.data(), given);
             }
+            voices->endMade = false;
             const std::size_t pairs
                 = std::min(channel.pluginOutputs.size(), PluginInstance::kMaxExtraOutputs);
             PluginInstance::Io io;
@@ -554,12 +601,20 @@ void StepSequencer::mix(
                 voices->left.data(), voices->right.data(), numFrames, transport, notes, io);
             // Its other outputs, each into the insert chosen for it.
             const StereoGain extraGain = balance(channel.gain, channel.pan);
+            bool extraSounding = false;
             for (std::size_t k = 0; k < pairs; ++k) {
                 const int to = channel.pluginOutputs[k];
                 if (to < 0 || to > kMaxInserts)
                     continue;
                 const float* fromLeft = extraBuffers_[2 * k];
                 const float* fromRight = extraBuffers_[2 * k + 1];
+                // A silent output leaves its insert alone (it can go idle).
+                bool heard = false;
+                for (std::size_t i = 0; i < frames && !heard; ++i)
+                    heard = std::abs(fromLeft[i]) > 1e-6f || std::abs(fromRight[i]) > 1e-6f;
+                if (!heard)
+                    continue;
+                extraSounding = true;
                 float* toLeft = buses[2 * to];
                 float* toRight = buses[2 * to + 1];
                 used[to] = true;
@@ -568,7 +623,7 @@ void StepSequencer::mix(
                     toRight[i] += fromRight[i] * extraGain.right;
                 }
             }
-            bool sounding = false;
+            bool sounding = extraSounding; // a tail on any output keeps a removed channel alive
             for (int i = 0; i < numFrames && !sounding; ++i)
                 sounding = std::abs(voices->left[i]) > 1e-6f || std::abs(voices->right[i]) > 1e-6f;
             voices->plugin.processed(sounding, numFrames); // a tail keeps a removed channel alive

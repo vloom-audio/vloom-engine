@@ -28,7 +28,9 @@ that orders them and lines up their delays (ADR 0007).
    change. `AudioProcessor` says what it has: `hasSidechain()`,
    `extraOutputCount()`, `makesNotes()`, `programs()`.
 2. **A sidechain is a send.** `Send::sidechain` sends the copy to the target
-   insert's sidechain instead of into its sound. It is a route like any
+   insert's sidechain instead of into its sound. A VST 3 plugin's second
+   input counts as one only if the plugin calls that bus auxiliary; it is
+   then switched on whether anything is sent to it or not. It is a route like any
    other: ordered, checked for loops, lined up with the rest. All sidechain
    sends to an insert are added up, and every effect of the insert that has
    a second input hears the same.
@@ -37,7 +39,13 @@ that orders them and lines up their delays (ADR 0007).
    volume and pan. An output that is not named is not played.
 4. **A note effect sits in front of the instrument.**
    `ChannelState::noteEffect` gets the channel's notes; the instrument plays
-   what it puts out, in the same block.
+   what it puts out, in the same block, put in frame order by the host.
+   - An effect that is bypassed, not active, or makes no notes is skipped:
+     the channel's notes go to the instrument as if it were not there.
+   - The host keeps track of the keys the effect has the instrument hold.
+     It ends them itself when the effect is taken away, exchanged, switched
+     off or on, and when the song stops or jumps (the effect is reset
+     then): the effect's own note-offs can no longer be counted on.
 5. **Controls are sent to an instance** (`PluginInstance::sendControl()`),
    as notes played by hand are. Each format gets them its own way: MIDI for
    VST 2 and for CLAP plugins that take MIDI; for VST 3 the parameter the
@@ -74,6 +82,19 @@ that orders them and lines up their delays (ADR 0007).
   them all.
 - Extra outputs follow the channel's volume without a ramp: a jump in the
   volume can click there.
+- Notes played by hand (`PluginInstance::playNote()`) reach the instance
+  they are played on: to have them go through a note effect, an app plays
+  them on the effect.
+- A send that would close a loop is left out without a word, a sidechain
+  send as much as any other. A sidechain send counts for the mixer's delay
+  compensation even when no effect listens to it.
+- An effect that sits behind one with latency in the same insert hears the
+  sidechain that much early: the sidechain is lined up with the insert's
+  input, not with each effect.
+- A VST 2 plugin's inputs 3 and 4, and a CLAP plugin's second input port,
+  are taken for the sidechain without the plugin saying so.
+- VST 3 controls reach only plugins that say which parameter a control
+  moves, asked once for the first event bus and channel.
 - CLAP plugins that take notes as CLAP events only get no pitch bend or
   controllers. CLAP has no list of programs to read.
 - A bridged VST 2 plugin (ADR 0011) gets controls, but no sidechain and no

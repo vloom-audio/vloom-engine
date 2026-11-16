@@ -124,6 +124,40 @@ public:
     }
 };
 
+/// A note effect that starts notes and never ends them, and one that makes
+/// its notes in the wrong order: what a host has to put right.
+class Latch final : public vloom::AudioProcessor {
+public:
+    explicit Latch(bool backwards = false)
+        : backwards_(backwards)
+    {
+    }
+    [[nodiscard]] vloom::PluginInfo info() const override
+    {
+        return {"test.latch", "Latch", "Tests", "1", {}};
+    }
+    bool activate(double, int) override { return true; }
+    [[nodiscard]] bool makesNotes() const override { return true; }
+    void process(const vloom::ProcessContext& context) noexcept override
+    {
+        if (context.notesOutCount == nullptr)
+            return;
+        std::size_t made = 0;
+        for (const vloom::NoteEvent& note : context.notes)
+            if (note.type == vloom::NoteEvent::Type::On && made < context.notesOut.size())
+                context.notesOut[made++] = note;
+        if (backwards_)
+            std::reverse(
+                context.notesOut.begin(), context.notesOut.begin() + static_cast<std::ptrdiff_t>(made));
+        *context.notesOutCount = static_cast<int>(made);
+    }
+    void reset() noexcept override { ++resets; }
+    int resets = 0;
+
+private:
+    bool backwards_;
+};
+
 /// An instrument that shows the controls it got: left = the last pitch
 /// bend, right = the last value of controller 1.
 class Wheels final : public vloom::AudioProcessor {
@@ -327,4 +361,81 @@ TEST_CASE(
         onAudioThread += counter.count();
     }
     CHECK(onAudioThread == 0);
+}
+
+TEST_CASE("A note effect that is off or makes no notes lets the channel's notes through",
+    "[plugin][sequencer][routing]")
+{
+    const auto left = [](std::shared_ptr<vloom::PluginInstance> effect, bool bypass) {
+        vloom::Engine engine;
+        prepare(engine);
+        auto state = std::make_unique<vloom::SequencerState>();
+        state->channels.push_back(channel(make<Keys>(), 0, true));
+        effect->setBypassed(bypass);
+        state->channels[0].noteEffect = std::move(effect);
+        engine.setSequencerState(std::move(state));
+        engine.play();
+        return render(engine, 0.1)[1000 * 2];
+    };
+    CHECK(left(make<Octaver>(), false) == Approx(0.2f)); // at work: two keys
+    CHECK(left(make<Octaver>(), true) == Approx(0.1f)); // bypassed: the channel's own key
+    CHECK(left(make<Ducker>(), false) == Approx(0.1f)); // no note effect at all: the same
+}
+
+TEST_CASE("Switching a note effect off ends the notes it made", "[plugin][sequencer][routing]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    auto effect = make<Octaver>();
+    auto state = std::make_unique<vloom::SequencerState>();
+    state->channels.push_back(channel(make<Keys>(), 0));
+    state->channels[0].notes = {{0, 960, 60, 1.0f}}; // one long note: 24000 frames
+    state->channels[0].noteEffect = effect;
+    engine.setSequencerState(std::move(state));
+    engine.play();
+    CHECK(render(engine, 0.1)[2000 * 2] == Approx(0.2f)); // both keys held
+    effect->setBypassed(true); // their note-offs would now never come from the effect
+    const auto after = render(engine, 0.1);
+    CHECK(after[2000 * 2] == 0.0f); // the host ended them: nothing hangs
+}
+
+TEST_CASE("Stopping the song ends what a note effect left sounding", "[plugin][sequencer][routing]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    auto latch = std::make_unique<Latch>();
+    Latch* seen = latch.get();
+    auto effect = std::make_shared<vloom::PluginInstance>(std::move(latch));
+    REQUIRE(effect->activate(kRate, vloom::kMaxBlockFrames));
+    auto state = std::make_unique<vloom::SequencerState>();
+    state->channels.push_back(channel(make<Keys>(), 0, true));
+    state->channels[0].noteEffect = effect;
+    engine.setSequencerState(std::move(state));
+    engine.play();
+    const auto playing = render(engine, 0.2);
+    CHECK(playing[9000 * 2] == Approx(0.1f)); // past the step's end: the latch never let go
+    engine.stop();
+    const auto stopped = render(engine, 0.1);
+    CHECK(stopped[4000 * 2] == 0.0f); // the host ended the key
+    CHECK(seen->resets > 0); // and told the effect
+}
+
+TEST_CASE("Notes a processor makes out of order reach the host in frame order", "[plugin][routing]")
+{
+    auto latch = make<Latch>(true);
+    std::vector<float> left(64), right(64);
+    const std::array<vloom::NoteEvent, 3> notes{vloom::NoteEvent{2, vloom::NoteEvent::Type::On, 60, 1.0f},
+        vloom::NoteEvent{9, vloom::NoteEvent::Type::On, 62, 1.0f},
+        vloom::NoteEvent{30, vloom::NoteEvent::Type::On, 64, 1.0f}};
+    std::array<vloom::NoteEvent, 8> made{};
+    int count = 0;
+    vloom::PluginInstance::Io io;
+    io.notesOut = made;
+    io.notesOutCount = &count;
+    latch->process(left.data(), right.data(), 64, {}, notes, io);
+    REQUIRE(count == 3);
+    CHECK(made[0].frame == 2);
+    CHECK(made[1].frame == 9);
+    CHECK(made[2].frame == 30);
+    CHECK(made[2].key == 64);
 }

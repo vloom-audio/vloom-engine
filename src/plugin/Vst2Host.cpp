@@ -13,6 +13,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -324,7 +325,8 @@ public:
         };
         // Controls as MIDI, before the notes (they come at the block's start).
         for (const ControlEvent& control : context.controls) {
-            if (count == kMaxEvents || !std::isfinite(control.value))
+            // Room is kept for the note-offs after a reset and for the block's notes.
+            if (count + 128 + PluginInstance::kMaxNotes >= kMaxEvents || !std::isfinite(control.value))
                 break;
             vst2::MidiEvent& e = midi_[count++];
             e.deltaFrames = std::clamp(control.frame, 0, context.numFrames - 1);
@@ -561,8 +563,11 @@ private:
             if (sent == nullptr || std::this_thread::get_id() != audioThread_.load(std::memory_order_relaxed))
                 return 0;
             const std::int32_t events = std::clamp(sent->numEvents, 0, 1024);
+            // The list goes on past the two entries the structure declares.
+            const auto* list = reinterpret_cast<vst2::MidiEvent* const*>(
+                reinterpret_cast<const char*>(sent) + offsetof(vst2::Events, events));
             for (std::int32_t i = 0; i < events && madeCount_ < made_.size(); ++i) {
-                const vst2::MidiEvent* e = sent->events[i];
+                const vst2::MidiEvent* e = list[i];
                 if (e == nullptr || e->type != vst2::kMidiEventType)
                     continue;
                 const int status = static_cast<unsigned char>(e->midiData[0]) & 0xF0;
@@ -601,8 +606,8 @@ private:
         case vst2::kHostGetVendorVersion:
             return 1000;
         case vst2::kHostCanDo: {
-            static constexpr const char* kCan[]
-                = {"sendVstEvents", "sendVstMidiEvent", "sendVstTimeInfo", "sizeWindow"};
+            static constexpr const char* kCan[] = {"sendVstEvents", "sendVstMidiEvent", "sendVstTimeInfo",
+                "receiveVstEvents", "receiveVstMidiEvent", "sizeWindow"};
             const char* asked = static_cast<const char*>(ptr);
             if (asked == nullptr)
                 return 0;

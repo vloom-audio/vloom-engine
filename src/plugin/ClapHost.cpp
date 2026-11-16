@@ -408,7 +408,9 @@ public:
         }
         // Controls as MIDI, for a plugin whose note port takes MIDI.
         for (const ControlEvent& control : context.controls) {
-            if (eventCount_ == kMaxEvents || !midiControls_ || !std::isfinite(control.value))
+            // Room is kept for the block's notes.
+            if (eventCount_ + PluginInstance::kMaxNotes >= kMaxEvents || !midiControls_
+                || !std::isfinite(control.value))
                 break;
             clap_event_midi_t& midi = events_[eventCount_++].midi;
             midi = {};
@@ -817,7 +819,10 @@ private:
     /// Audio thread: keeps `e` if it is a note the plugin made.
     void collectNote(const clap_event_header_t* e) noexcept
     {
-        if (e == nullptr || e->space_id != CLAP_CORE_EVENT_SPACE_ID || madeCount_ == made_.size())
+        // Only from the thread that is processing a block, while it does.
+        if (e == nullptr || e->space_id != CLAP_CORE_EVENT_SPACE_ID || madeCount_ >= made_.size()
+            || !inAudioCall_.load(std::memory_order_relaxed)
+            || std::this_thread::get_id() != audioThread_.load(std::memory_order_relaxed))
             return;
         const int frame = static_cast<int>(std::min<std::uint32_t>(e->time, 1u << 30));
         if ((e->type == CLAP_EVENT_NOTE_ON || e->type == CLAP_EVENT_NOTE_OFF)
