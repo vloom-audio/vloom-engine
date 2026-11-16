@@ -29,6 +29,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -67,6 +68,10 @@ int blockFrames = 0;
 std::atomic<DWORD> audioThreadId{0};
 vst2::TimeInfo timeInfo{};
 SRWLOCK noticeLock = SRWLOCK_INIT;
+/// Audio thread: the notes the plugin sent while it processed the block.
+std::array<bridge::MidiMessage, bridge::kMaxMadeNotes> sentNotes{};
+std::int32_t madeCount = 0;
+bool collecting = false;
 HANDLE lastBlob = nullptr; ///< the blob of the last answer, kept until the next request
 
 std::vector<std::vector<float>> inputs, outputs;
@@ -132,6 +137,28 @@ std::intptr_t VLOOM_VST2_CALL hostCallback(
         if (shared != nullptr && index >= 0 && std::isfinite(opt))
             notify(1, index, std::clamp(opt, 0.0f, 1.0f), 0);
         return 0;
+    case vst2::kHostProcessEvents: {
+        // Notes from the plugin, taken only while it processes a block.
+        const auto* sent = static_cast<const vst2::Events*>(ptr);
+        if (sent == nullptr || GetCurrentThreadId() != audioThreadId.load(std::memory_order_relaxed)
+            || !collecting)
+            return 0;
+        const auto* list = reinterpret_cast<vst2::MidiEvent* const*>(
+            reinterpret_cast<const char*>(sent) + offsetof(vst2::Events, events));
+        const std::int32_t count = std::clamp(sent->numEvents, 0, 1024);
+        for (std::int32_t i = 0; i < count && madeCount < bridge::kMaxMadeNotes; ++i) {
+            const vst2::MidiEvent* e = list[i];
+            if (e == nullptr || e->type != vst2::kMidiEventType)
+                continue;
+            const int status = static_cast<unsigned char>(e->midiData[0]) & 0xF0;
+            if (status != 0x90 && status != 0x80)
+                continue;
+            bridge::MidiMessage& m = sentNotes[static_cast<std::size_t>(madeCount++)];
+            m.frame = e->deltaFrames;
+            std::memcpy(m.data, e->midiData, 4);
+        }
+        return 1;
+    }
     case vst2::kHostGetTime:
         return reinterpret_cast<std::intptr_t>(&timeInfo);
     case vst2::kHostSizeWindow:
@@ -155,8 +182,8 @@ std::intptr_t VLOOM_VST2_CALL hostCallback(
     case vst2::kHostGetVendorVersion:
         return 1000;
     case vst2::kHostCanDo: {
-        static constexpr const char* kCan[]
-            = {"sendVstEvents", "sendVstMidiEvent", "sendVstTimeInfo", "sizeWindow"};
+        static constexpr const char* kCan[] = {"sendVstEvents", "sendVstMidiEvent", "sendVstTimeInfo",
+            "receiveVstEvents", "receiveVstMidiEvent", "sizeWindow"};
         const char* asked = static_cast<const char*>(ptr);
         if (asked == nullptr)
             return 0;
@@ -265,6 +292,9 @@ bool load(bridge::Control& control)
     facts.uniqueId = effect->uniqueId;
     facts.version = effect->version;
     facts.latency = effect->initialDelay;
+    facts.programs = effect->numPrograms;
+    char sends[] = "sendVstMidiEvent";
+    facts.makesNotes = dispatch(vst2::kCanDo, 0, 0, sends) == 1 ? 1 : 0;
     pluginText(facts.name, vst2::kGetEffectName);
     if (facts.name[0] == '\0')
         pluginText(facts.name, vst2::kGetProductString);
@@ -428,6 +458,24 @@ bool answer()
         closeEditor();
         control.result = 1;
         break;
+    case bridge::Request::ProgramName:
+        control.text[0] = '\0';
+        if (index >= 0 && index < std::clamp(effect->numPrograms, 0, 4096)) {
+            pluginText(control.text, vst2::kGetProgramNameIndexed, index);
+            control.result = 1;
+        }
+        break;
+    case bridge::Request::GetProgram:
+        control.index
+            = static_cast<std::int32_t>(std::clamp<std::intptr_t>(dispatch(vst2::kGetProgram), -1, 4096));
+        control.result = 1;
+        break;
+    case bridge::Request::SetProgram:
+        if (index >= 0 && index < std::clamp(effect->numPrograms, 0, 4096)) {
+            dispatch(vst2::kSetProgram, 0, index);
+            control.result = 1;
+        }
+        break;
     case bridge::Request::EditorSize: {
         vst2::Rect* rect = nullptr;
         if (!editorOpen || dispatch(vst2::kEditGetRect, 0, 0, &rect) == 0 || rect == nullptr)
@@ -451,6 +499,10 @@ void processBlock()
     const auto count = static_cast<std::size_t>(frames);
     std::fill_n(audio.out[0], bridge::kMaxFrames, 0.0f);
     std::fill_n(audio.out[1], bridge::kMaxFrames, 0.0f);
+    const int pairs = std::clamp(audio.extraPairs, 0, bridge::kMaxExtraPairs);
+    for (int i = 0; i < 2 * pairs; ++i)
+        std::fill_n(audio.extra[i], count, 0.0f);
+    audio.madeNotes = 0;
     // A plugin that changed its channels since activation would write past
     // the buffers: silent until it is activated again.
     if (effect == nullptr || !active || frames == 0 || effect->numInputs != static_cast<int>(inputs.size())
@@ -491,21 +543,37 @@ void processBlock()
                 dst[i] = 0.5f * (audio.in[0][i] + audio.in[1][i]);
         else if (ch < 2)
             std::copy_n(audio.in[ch], count, dst);
+        else if (ch < 4 && audio.sidechain != 0)
+            std::copy_n(audio.side[ch - 2], count, dst); // inputs 3 and 4: the sidechain
         else
             std::fill_n(dst, count, 0.0f);
     }
     for (float* dst : outputPointers)
         std::fill_n(dst, count, 0.0f);
 
+    madeCount = 0;
+    collecting = true;
     if (messages > 0) {
         events.numEvents = messages;
         dispatch(vst2::kProcessEvents, 0, 0, &events);
     }
     effect->processReplacing(effect, inputPointers.data(), outputPointers.data(), frames);
+    collecting = false;
     if (!outputs.empty()) {
         std::copy_n(outputPointers[0], count, audio.out[0]);
         std::copy_n(outputPointers[outputs.size() > 1 ? 1 : 0], count, audio.out[1]);
     }
+    // Its outputs after the first two, in pairs, as far as the host asked and it has them.
+    for (int pair = 0; pair < pairs; ++pair) {
+        const auto first = static_cast<std::size_t>(2 * pair + 2);
+        if (first + 1 >= outputs.size())
+            break; // no such pair: the silence written above stays
+        std::copy_n(outputPointers[first], count, audio.extra[2 * pair]);
+        std::copy_n(outputPointers[first + 1], count, audio.extra[2 * pair + 1]);
+    }
+    for (std::int32_t i = 0; i < madeCount; ++i)
+        audio.made[i] = sentNotes[static_cast<std::size_t>(i)];
+    audio.madeNotes = madeCount;
     shared->plugin.latency = effect->initialDelay;
 }
 

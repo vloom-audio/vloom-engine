@@ -250,7 +250,7 @@ public:
         return std::min(std::max(static_cast<int>(outputs_.size()) - 1, 0),
             static_cast<int>(PluginInstance::kMaxExtraOutputs));
     }
-    [[nodiscard]] bool hasSidechain() const override { return inputs_.size() > 1; }
+    [[nodiscard]] bool hasSidechain() const override { return sidechainPort_ && inputs_.size() > 1; }
     [[nodiscard]] bool makesNotes() const override { return makesNotes_; }
 
     [[nodiscard]] int latencyFrames() const override
@@ -466,9 +466,11 @@ public:
         for (std::size_t port = 0; port < inputs_.size(); ++port)
             for (std::size_t ch = 0; ch < inputs_[port].channels.size(); ++ch) {
                 float* dst = inputs_[port].pointers[ch];
-                if (port == 1 && context.sidechain != nullptr && ch < 2 && inputs_[port].channels.size() > 1)
+                if (port == 1 && sidechainPort_ && context.sidechain != nullptr && ch < 2
+                    && inputs_[port].channels.size() > 1)
                     std::copy_n(context.sidechain[ch], frames, dst);
-                else if (port == 1 && context.sidechain != nullptr && inputs_[port].channels.size() == 1)
+                else if (port == 1 && sidechainPort_ && context.sidechain != nullptr
+                    && inputs_[port].channels.size() == 1)
                     for (std::size_t i = 0; i < frames; ++i)
                         dst[i] = 0.5f * (context.sidechain[0][i] + context.sidechain[1][i]);
                 else if (port != 0)
@@ -768,6 +770,8 @@ private:
                 clap_audio_port_info_t portInfo{};
                 if (!ports_->get(plugin_, i, input, &portInfo) || portInfo.channel_count > kMaxPortChannels)
                     return false;
+                if (input && i == 1) // a second main port is something else than a sidechain
+                    sidechainPort_ = (portInfo.flags & CLAP_AUDIO_PORT_IS_MAIN) == 0;
                 PortBuffers port;
                 port.channels.assign(std::max<std::uint32_t>(portInfo.channel_count, 1),
                     std::vector<float>(static_cast<std::size_t>(maxBlockFrames), 0.0f));
@@ -811,6 +815,7 @@ private:
     bool processing_ = false; ///< audio thread, once active
     bool midiNotes_ = false; ///< the plugin takes notes as MIDI only
     bool midiControls_ = false; ///< its note port takes MIDI: pitch bend and controllers go as that
+    bool sidechainPort_ = false; ///< its second input port is not a main one
     bool makesNotes_ = false; ///< it has a note port out
     std::array<NoteEvent, PluginInstance::kMaxNotes>
         made_{}; ///< audio thread: the notes it put out this block

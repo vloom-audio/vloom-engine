@@ -25,9 +25,10 @@ that process and the host pass audio and requests to each other.
    (`src/plugin/bridge/BridgeProtocol.hpp`), laid out the same for 32 and 64
    bits: an area for one control request and its answer, what the plugin
    is, a ring of things the plugin tells the host (edits in its editor, a
-   size it wants), and one audio block. Four events say "a request is
-   there" and "it is answered", for the control thread and for the audio
-   thread. State too large for the block goes through a second block made
+   size it wants), and one audio block: the sound in and out, a
+   sidechain, eight more output pairs, the block's MIDI and the notes the
+   plugin sends back. Four events say "a request is there" and "it is
+   answered", for the control thread and for the audio thread. State too large for the block goes through a second block made
    for that one transfer.
 3. **Nothing they share has a name.** The host makes the memory and the
    events, lets the bridge inherit exactly those handles (and one on the
@@ -69,6 +70,11 @@ that process and the host pass audio and requests to each other.
 10. **A bridge that is gone saves nothing.** `saveState()` returns nothing,
     not an empty state, so that a host does not write it over the last good
     one.
+11. **A bridge that ended is started again**, from the host's idle time, at
+    most every two seconds and three times in all. The plugin gets the
+    state that was last saved and is activated as it was. Its editor is
+    not opened again: the host was told it closed. `hasFailed()` is true
+    only once the three starts are used up.
 
 ## Alternatives considered
 
@@ -88,15 +94,15 @@ that process and the host pass audio and requests to each other.
 - An application that wants 32-bit plugins has to ship
   `vloom-plugin-bridge32.exe` next to itself, built with a 32-bit compiler.
 - A bridged plugin costs two thread switches per block and one process.
-  Only its first two inputs and outputs cross the bridge.
+  Of its outputs, the main pair and eight more cross the bridge.
 - The audio thread waits on another process for every block of a bridged
   plugin, for up to twice the block's length when a bridge is slow to
   answer. This is the one place the engine's rule against waiting on
   the audio thread (ADR 0005) is set aside.
 - The bridge keeps crashes out of the host. It is not a sandbox: the
   plugin's code runs with the user's rights there as it would in the host.
-- A bridge that has ended is not started again: the plugin has to be
-  loaded anew.
+- A plugin started again has the state of the last save, not what was
+  set since. Starting it blocks the control thread while it loads.
 - The automated tests cover the requests, not a real window. Opening and
   closing a real 32-bit plugin's editor inside a window of the host was
   tried by hand.

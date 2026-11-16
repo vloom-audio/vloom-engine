@@ -33,13 +33,17 @@ that orders them and lines up their delays (ADR 0007).
    then switched on whether anything is sent to it or not. It is a route like any
    other: ordered, checked for loops, lined up with the rest. All sidechain
    sends to an insert are added up, and every effect of the insert that has
-   a second input hears the same.
+   a second input hears the same, each as late as the effects before it
+   make the sound it works on (their latency).
 3. **Extra outputs go to inserts.** `ChannelState::pluginOutputs[k]` names
    the insert for the instrument's output k + 2. They get the channel's
-   volume and pan. An output that is not named is not played.
+   volume and pan, ramped over the block like its main sound. An output
+   that is not named is not played.
 4. **A note effect sits in front of the instrument.**
    `ChannelState::noteEffect` gets the channel's notes; the instrument plays
    what it puts out, in the same block, put in frame order by the host.
+   `ChannelState::noteEffects` are more of them in a row, each fed by the
+   one before. Notes played by hand on the instrument go through them too.
    - An effect that is bypassed, not active, or makes no notes is skipped:
      the channel's notes go to the instrument as if it were not there.
    - The host keeps track of the keys the effect has the instrument hold.
@@ -80,23 +84,21 @@ that orders them and lines up their delays (ADR 0007).
 - A plugin's sidechain bus and its extra outputs are switched on when it is
   activated, whether routed or not: a plugin with many outputs computes
   them all.
-- Extra outputs follow the channel's volume without a ramp: a jump in the
-  volume can click there.
-- Notes played by hand (`PluginInstance::playNote()`) reach the instance
-  they are played on: to have them go through a note effect, an app plays
-  them on the effect.
-- A send that would close a loop is left out without a word, a sidechain
-  send as much as any other. A sidechain send counts for the mixer's delay
-  compensation even when no effect listens to it.
-- An effect that sits behind one with latency in the same insert hears the
-  sidechain that much early: the sidechain is lined up with the insert's
-  input, not with each effect.
-- A VST 2 plugin's inputs 3 and 4, and a CLAP plugin's second input port,
-  are taken for the sidechain without the plugin saying so.
+- A send that would close a loop is left out, a sidechain send as much as
+  any other. `droppedRoutes()` tells an app which. A sidechain send counts
+  for the mixer's delay compensation even when no effect listens to it.
+- A VST 2 plugin's inputs 3 and 4 are taken for the sidechain without the
+  plugin saying so: the format has no way to say it. A CLAP plugin's
+  second input port counts as one unless it is marked as a main port.
+- Not done, each a piece of work of its own: notes from one channel to
+  another's instrument (the sequencer has no order between channels);
+  pitch bend and controllers written into the song (the sequencer's data
+  and its event scheduling have no place for them); MPE (a channel per
+  note); surround.
 - VST 3 controls reach only plugins that say which parameter a control
   moves, asked once for the first event bus and channel.
 - CLAP plugins that take notes as CLAP events only get no pitch bend or
   controllers. CLAP has no list of programs to read.
-- A bridged VST 2 plugin (ADR 0011) gets controls, but no sidechain and no
-  extra outputs: only its first two inputs and outputs cross the bridge.
+- A bridged VST 2 plugin (ADR 0011) gets all of it as well; of its extra
+  outputs the first eight pairs cross the bridge.
 - VST 2 editors on Linux are still not hosted.
