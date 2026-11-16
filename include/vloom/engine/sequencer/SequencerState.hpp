@@ -65,6 +65,7 @@ public:
         synth.stopAll();
         plugin.releaseHeld(frame); // the plugin fades its own notes
         endMade = true; // and what a note effect made of them ends too
+        centreBend = bent;
     }
 
     // ---- audio thread
@@ -81,6 +82,11 @@ public:
     std::array<const void*, 8> lastEffects{};
     int lastEffectCount = 0;
     bool endMade = false; ///< stopAll() ran: end the made keys with the next block
+    /// The song's controls for the plugin in the block being rendered, in frame order.
+    std::array<ControlEvent, 256> controls{};
+    std::size_t controlCount = 0;
+    bool bent = false; ///< a pitch bend of the song is in force
+    bool centreBend = false; ///< stopAll() ran while it was: put the pitch back
     StereoGain applied{}; ///< gain at the end of the last block: the next ramp starts there
 };
 
@@ -95,6 +101,16 @@ struct Note {
     std::int64_t length = 0; ///< > 0; may reach past the pattern's end
     int key = kMiddleC; ///< MIDI note number, kMinKey .. kMaxKey
     float velocity = 100.0f / 128.0f; ///< 0 .. 1; scales the note's gain linearly
+};
+
+/// A pitch bend, a controller value or pressure written into a pattern, for
+/// a channel whose instrument is a plugin: sent at its tick, like a note
+/// starts at its own. The value holds until the next point of its kind.
+struct ControlPoint {
+    std::int64_t start = 0; ///< from 0 to the pattern's length (excluded)
+    ControlEvent::Type type = ControlEvent::Type::Controller;
+    std::int16_t number = 0; ///< Controller: which one, 0 .. 127
+    float value = 0.0f; ///< PitchBend: -1 .. +1; the others: 0 .. 1
 };
 
 /// What a channel plays its steps and notes with.
@@ -143,6 +159,10 @@ struct ChannelState {
     /// (one semitone = a 2^(1/12) speed change). Steps play at rootKey.
     /// Notes out of range (start, length, key) are skipped.
     std::vector<Note> notes;
+    /// Pattern mode's controls for `plugin`, any order (ControlPoint). Points
+    /// out of range are skipped. When the song stops, a bent pitch is put
+    /// back to the centre.
+    std::vector<ControlPoint> controls{};
     int rootKey = Note::kMiddleC; ///< the key the sample plays unchanged at
 };
 
@@ -151,6 +171,7 @@ struct ChannelState {
 struct SongPattern {
     std::vector<std::vector<std::uint8_t>> steps; ///< non-zero = plays
     std::vector<std::vector<Note>> notes; ///< like ChannelState::notes
+    std::vector<std::vector<ControlPoint>> controls{}; ///< like ChannelState::controls
     /// The pattern's length in steps. A clip longer than that repeats the
     /// pattern (steps and notes) every stepCount steps, like FL Studio's
     /// pattern clips. 0: no repeat, a step past the end of a row is off.

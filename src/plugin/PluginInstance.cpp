@@ -125,6 +125,14 @@ void PluginInstance::process(float* left, float* right, int numFrames, const Tra
         control.frame = 0;
         blockControls_[controlCount++] = control;
     }
+    // Then the song's, at their frames.
+    for (const ControlEvent& control : io.controls) {
+        if (controlCount == blockControls_.size())
+            break;
+        blockControls_[controlCount] = control;
+        blockControls_[controlCount++].frame = std::clamp(control.frame, 0, numFrames - 1);
+    }
+    std::size_t nextControl = 0;
     const bool sidechain = io.sidechainLeft != nullptr && io.sidechainRight != nullptr;
     std::array<float*, 2 * kMaxExtraOutputs> extraChunk{};
     std::size_t notesMade = 0;
@@ -156,10 +164,17 @@ void PluginInstance::process(float* left, float* right, int numFrames, const Tra
         context.channels = channels;
         context.numChannels = 2;
         context.numFrames = frames;
-        if (offset == 0) {
+        if (offset == 0)
             context.parameters = std::span<const ParameterEvent>(pending_.data(), pendingCount_);
-            context.controls = std::span<const ControlEvent>(blockControls_.data(), controlCount);
+        // This chunk's controls, at frames relative to it.
+        std::size_t chunkControls = 0;
+        while (nextControl < controlCount && (last || blockControls_[nextControl].frame < offset + frames)) {
+            chunkControls_[chunkControls] = blockControls_[nextControl++];
+            chunkControls_[chunkControls].frame
+                = std::clamp(chunkControls_[chunkControls].frame - offset, 0, frames - 1);
+            ++chunkControls;
         }
+        context.controls = std::span<const ControlEvent>(chunkControls_.data(), chunkControls);
         context.notes = std::span<const NoteEvent>(chunkNotes_.data(), count);
         context.transport = transport;
         const float* const sidechainChunk[2] = {sidechain ? io.sidechainLeft + offset : nullptr,

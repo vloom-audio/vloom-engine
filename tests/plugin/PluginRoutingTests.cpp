@@ -192,14 +192,18 @@ public:
     bool activate(double, int) override { return true; }
     void process(const vloom::ProcessContext& context) noexcept override
     {
-        for (const vloom::ControlEvent& control : context.controls) {
-            if (control.type == vloom::ControlEvent::Type::PitchBend)
-                bend_ = control.value;
-            else if (control.type == vloom::ControlEvent::Type::Controller && control.number == 1)
-                wheel_ = control.value;
+        std::size_t next = 0;
+        for (int i = 0; i < context.numFrames; ++i) {
+            for (; next < context.controls.size() && context.controls[next].frame <= i; ++next) {
+                const vloom::ControlEvent& control = context.controls[next];
+                if (control.type == vloom::ControlEvent::Type::PitchBend)
+                    bend_ = control.value;
+                else if (control.type == vloom::ControlEvent::Type::Controller && control.number == 1)
+                    wheel_ = control.value;
+            }
+            context.channels[0][i] = bend_;
+            context.channels[1][i] = wheel_;
         }
-        std::fill_n(context.channels[0], context.numFrames, bend_);
-        std::fill_n(context.channels[1], context.numFrames, wheel_);
     }
 
 private:
@@ -553,4 +557,71 @@ TEST_CASE("The routes a mixer leaves out can be asked for", "[plugin][mixer][rou
     CHECK(dropped[2].slot == 2);
     CHECK(dropped[2].sidechain);
     CHECK(vloom::droppedRoutes(vloom::MixerState{}).empty());
+}
+
+TEST_CASE("Controls written into a pattern reach the plugin on their frames", "[plugin][sequencer][routing]")
+{
+    using Type = vloom::ControlEvent::Type;
+    vloom::Engine engine;
+    prepare(engine); // a tick is 25 frames
+    auto state = std::make_unique<vloom::SequencerState>();
+    state->channels.push_back(channel(make<Wheels>(), 0));
+    // Not in order, as an app may give them.
+    state->channels[0].controls = {{240, Type::PitchBend, 0, -1.0f}, {0, Type::PitchBend, 0, 0.5f},
+        {120, Type::Controller, 1, 0.75f}, {120, Type::Controller, 7, 0.1f}, {-5, Type::PitchBend, 0, 0.9f}};
+    engine.setSequencerState(std::move(state));
+    engine.play();
+    const auto audio = render(engine, 0.2);
+    CHECK(audio[0] == 0.5f); // the bend at tick 0, from the first frame
+    CHECK(audio[2999 * 2 + 1] == 0.0f); // the wheel: not before its tick
+    CHECK(audio[3000 * 2 + 1] == 0.75f); // on its frame
+    CHECK(audio[5999 * 2] == 0.5f);
+    CHECK(audio[6000 * 2] == -1.0f); // the second bend, on its frame
+
+    // Stopped with the pitch bent: it goes back to the centre.
+    engine.stop();
+    const auto stopped = render(engine, 0.05);
+    CHECK(stopped[2000 * 2] == 0.0f);
+    CHECK(stopped[2000 * 2 + 1] == 0.75f); // a controller keeps its value
+}
+
+TEST_CASE("Controls of a pattern play where its clip sits in the song", "[plugin][sequencer][routing]")
+{
+    using Type = vloom::ControlEvent::Type;
+    vloom::Engine engine;
+    prepare(engine);
+    auto state = std::make_unique<vloom::SequencerState>();
+    state->channels.push_back(channel(make<Wheels>(), 0));
+    state->song = true;
+    vloom::SongPattern pattern;
+    pattern.controls = {{{0, Type::PitchBend, 0, 0.25f}, {120, Type::PitchBend, 0, 0.5f}}};
+    state->patterns.push_back(pattern);
+    vloom::SongPatternClip clip;
+    clip.pattern = 0;
+    clip.startTick = 240; // frame 6000
+    clip.lengthTicks = 480;
+    state->patternClips.push_back(clip);
+    engine.setSequencerState(std::move(state));
+    engine.play();
+    const auto audio = render(engine, 0.3);
+    CHECK(audio[5999 * 2] == 0.0f); // before the clip
+    CHECK(audio[6000 * 2] == 0.25f); // the clip's start: the pattern's tick 0
+    CHECK(audio[9000 * 2] == 0.5f); // 120 ticks into it
+}
+
+TEST_CASE("The song's controls keep their frames in a block longer than the processor's", "[plugin][routing]")
+{
+    using Type = vloom::ControlEvent::Type;
+    auto wheels = std::make_shared<vloom::PluginInstance>(std::make_unique<Wheels>());
+    REQUIRE(wheels->activate(kRate, 64)); // blocks of 64: a block of 200 is processed in four parts
+    std::vector<float> left(200), right(200);
+    const std::array<vloom::ControlEvent, 2> controls{vloom::ControlEvent{70, Type::PitchBend, 0, 0.5f},
+        vloom::ControlEvent{150, Type::PitchBend, 0, 1.0f}};
+    vloom::PluginInstance::Io io;
+    io.controls = controls;
+    wheels->process(left.data(), right.data(), 200, {}, {}, io);
+    CHECK(left[69] == 0.0f);
+    CHECK(left[70] == 0.5f);
+    CHECK(left[149] == 0.5f);
+    CHECK(left[150] == 1.0f);
 }

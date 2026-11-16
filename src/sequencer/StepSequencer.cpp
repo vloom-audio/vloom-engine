@@ -41,6 +41,36 @@ void notesAt(const std::vector<Note>& row, std::int64_t at, std::int64_t span, P
             play(*it);
 }
 
+/// A control point the sequencer sends: inside the pattern, with a number
+/// for a value.
+bool sendable(const ControlPoint& point, std::int64_t span) noexcept
+{
+    return point.start >= 0 && point.start < span && std::isfinite(point.value);
+}
+
+/// The first sendable point of `row` (sorted by start) at or after `from`, or null.
+const ControlPoint* firstSendable(
+    const std::vector<ControlPoint>& row, std::int64_t from, std::int64_t span) noexcept
+{
+    auto it = std::lower_bound(row.begin(), row.end(), from,
+        [](const ControlPoint& point, std::int64_t at) { return point.start < at; });
+    for (; it != row.end() && it->start < span; ++it)
+        if (sendable(*it, span))
+            return &*it;
+    return nullptr;
+}
+
+/// Calls `send(point)` for the sendable points of `row` exactly at `at`.
+template <typename Send>
+void pointsAt(const std::vector<ControlPoint>& row, std::int64_t at, std::int64_t span, Send&& send)
+{
+    auto it = std::lower_bound(row.begin(), row.end(), at,
+        [](const ControlPoint& point, std::int64_t t) { return point.start < t; });
+    for (; it != row.end() && it->start == at; ++it)
+        if (sendable(*it, span))
+            send(*it);
+}
+
 /// Ticks after which a pattern repeats inside a clip: its own length when
 /// it has one (SongPattern::stepCount). Without, it never repeats: the
 /// period is the furthest the clip reaches into it, its offset plus its span.
@@ -131,6 +161,15 @@ void StepSequencer::publish(std::unique_ptr<SequencerState> state)
         for (SongPattern& pattern : state->patterns)
             for (std::vector<Note>& row : pattern.notes)
                 sortNotes(row);
+        const auto sortPoints = [](std::vector<ControlPoint>& points) {
+            std::stable_sort(points.begin(), points.end(),
+                [](const ControlPoint& a, const ControlPoint& b) { return a.start < b.start; });
+        };
+        for (ChannelState& channel : state->channels)
+            sortPoints(channel.controls);
+        for (SongPattern& pattern : state->patterns)
+            for (std::vector<ControlPoint>& row : pattern.controls)
+                sortPoints(row);
         // The sum of its clips' hashes: the same clips in another order
         // (a clip removed before them) give the same key.
         state->audioClipKeys.assign(state->channels.size(), 0);
@@ -189,6 +228,16 @@ std::int64_t StepSequencer::nextNoteStart(std::int64_t from) const noexcept
                 if (at < start + span) // not past the clip's end
                     next = std::min(next, at);
             }
+            for (std::size_t c = 0; c < channels.size() && c < pattern.controls.size(); ++c) {
+                const auto& row = pattern.controls[c];
+                std::int64_t at = kNoEvent;
+                if (const ControlPoint* point = firstSendable(row, local, period))
+                    at = origin + pass * period + point->start;
+                else if (const ControlPoint* first = firstSendable(row, 0, period))
+                    at = origin + (pass + 1) * period + first->start; // the next pass
+                if (at < start + span)
+                    next = std::min(next, at);
+            }
         }
         for (const SongAudioClip& clip : current_->audioClips)
             if (clip.startTick >= from && clip.startTick <= kMaxTicks)
@@ -203,6 +252,10 @@ std::int64_t StepSequencer::nextNoteStart(std::int64_t from) const noexcept
         if (const Note* note = firstPlayable(channel.notes, local, period))
             next = std::min(next, loop * period + note->start);
         else if (const Note* first = firstPlayable(channel.notes, 0, period))
+            next = std::min(next, (loop + 1) * period + first->start);
+        if (const ControlPoint* point = firstSendable(channel.controls, local, period))
+            next = std::min(next, loop * period + point->start);
+        else if (const ControlPoint* first = firstSendable(channel.controls, 0, period))
             next = std::min(next, (loop + 1) * period + first->start);
     }
     return next;
@@ -246,6 +299,9 @@ void StepSequencer::startNotes(std::int64_t tick, double framesPerTick) noexcept
             }
             for (std::size_t c = 0; c < channels.size() && c < pattern.notes.size(); ++c)
                 notesAt(pattern.notes[c], local, period, [&](const Note& note) { play(channels[c], note); });
+            for (std::size_t c = 0; c < channels.size() && c < pattern.controls.size(); ++c)
+                pointsAt(pattern.controls[c], local, period,
+                    [&](const ControlPoint& point) { sendControl(channels[c], point); });
         }
         for (const SongAudioClip& clip : current_->audioClips)
             if (clip.startTick == tick)
@@ -259,8 +315,25 @@ void StepSequencer::startNotes(std::int64_t tick, double framesPerTick) noexcept
         return;
     }
     const std::int64_t period = static_cast<std::int64_t>(current_->stepCount) * ticksPerStep;
-    for (const ChannelState& channel : channels)
+    for (const ChannelState& channel : channels) {
+        // Controls before the notes at the same tick: a note starts at the pitch set for it.
+        pointsAt(channel.controls, tick % period, period,
+            [&](const ControlPoint& point) { sendControl(channel, point); });
         notesAt(channel.notes, tick % period, period, [&](const Note& note) { play(channel, note); });
+    }
+}
+
+void StepSequencer::sendControl(const ChannelState& channel, const ControlPoint& point) const noexcept
+{
+    ChannelVoices* voices = channel.voices.get();
+    if (channel.muted || voices == nullptr || channel.plugin == nullptr
+        || voices->controlCount == voices->controls.size())
+        return;
+    const float low = point.type == ControlEvent::Type::PitchBend ? -1.0f : 0.0f;
+    voices->controls[voices->controlCount++] = ControlEvent{eventFrame_, point.type,
+        static_cast<std::int16_t>(std::clamp<int>(point.number, 0, 127)), std::clamp(point.value, low, 1.0f)};
+    if (point.type == ControlEvent::Type::PitchBend)
+        voices->bent = point.value != 0.0f;
 }
 
 void StepSequencer::playNote(const ChannelState& channel, const Note& note, std::int64_t end) const noexcept
@@ -625,6 +698,14 @@ void StepSequencer::mix(
                 = std::min(channel.pluginOutputs.size(), PluginInstance::kMaxExtraOutputs);
             PluginInstance::Io io;
             io.extraOutputs = std::span<float* const>(extraBuffers_.data(), 2 * pairs);
+            // The song's controls. Stopped with the pitch bent: back to the centre.
+            if (voices->centreBend && voices->controlCount < voices->controls.size()) {
+                voices->controls[voices->controlCount++]
+                    = ControlEvent{numFrames - 1, ControlEvent::Type::PitchBend, 0, 0.0f};
+                voices->bent = false;
+            }
+            voices->centreBend = false;
+            io.controls = std::span<const ControlEvent>(voices->controls.data(), voices->controlCount);
             channel.plugin->process(
                 voices->left.data(), voices->right.data(), numFrames, transport, notes, io);
             // Its other outputs, each into the insert chosen for it.
@@ -661,6 +742,7 @@ void StepSequencer::mix(
                 sounding = std::abs(voices->left[i]) > 1e-6f || std::abs(voices->right[i]) > 1e-6f;
             voices->plugin.processed(sounding, numFrames); // a tail keeps a removed channel alive
             voices->plugin.clearEvents();
+            voices->controlCount = 0;
             voices->written = true;
         } else if (voices->plugin.active() > 0) {
             voices->plugin.reset(); // the plugin went: nothing to end

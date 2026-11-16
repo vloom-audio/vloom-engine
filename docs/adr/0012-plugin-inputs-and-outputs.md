@@ -55,6 +55,12 @@ that orders them and lines up their delays (ADR 0007).
    VST 2 and for CLAP plugins that take MIDI; for VST 3 the parameter the
    plugin says the control moves (`IMidiMapping`), asked once when the
    plugin is created, since the audio thread must not ask.
+   **Controls can be written into the song**: `ChannelState::controls` and
+   `SongPattern::controls` are points with a tick, like notes. They go
+   through the scheduler that starts notes, so each lands on its frame, in
+   pattern mode and in a song's clips, and comes round when a pattern
+   repeats. A pitch left bent when the song stops is put back to the
+   centre.
 6. **Programs are a list of names and an index.** VST 2 has them as such;
    for VST 3 they are the first program list and the parameter marked as
    the program change.
@@ -91,10 +97,8 @@ that orders them and lines up their delays (ADR 0007).
   plugin saying so: the format has no way to say it. A CLAP plugin's
   second input port counts as one unless it is marked as a main port.
 - Not done, each a piece of work of its own: notes from one channel to
-  another's instrument (the sequencer has no order between channels);
-  pitch bend and controllers written into the song (the sequencer's data
-  and its event scheduling have no place for them); MPE (a channel per
-  note); surround.
+  another's instrument (the sequencer has no order between channels); MPE
+  (a channel per note); surround.
 - VST 3 controls reach only plugins that say which parameter a control
   moves, asked once for the first event bus and channel.
 - CLAP plugins that take notes as CLAP events only get no pitch bend or

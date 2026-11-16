@@ -7,6 +7,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Pitch bend, controllers and pressure can be written into the song:
+  `ChannelState::controls` (pattern mode) and `SongPattern::controls`
+  (song mode) are `ControlPoint`s that play at their ticks, on their exact
+  frames, like notes. `PluginInstance::Io::controls` carries them.
 - Plugins get more than their main sound (ADR 0012), for CLAP, VST 3 and
   VST 2 alike:
   - **Sidechains.** `Send::sidechain` sends an insert's sound to another

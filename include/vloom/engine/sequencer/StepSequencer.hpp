@@ -142,6 +142,8 @@ private:
     /// Plays one step of `channel`: its sample, or on a synth or plugin its
     /// root key until tick `end`.
     void playStep(const ChannelState& channel, std::int64_t end) const noexcept;
+    /// Sends `point` to `channel`'s plugin at the frame events fire at now.
+    void sendControl(const ChannelState& channel, const ControlPoint& point) const noexcept;
     /// The tick an audio clip stops at (kNoEvent: the sample's end).
     [[nodiscard]] std::int64_t audioClipEnd(const SongAudioClip& clip) const noexcept;
     /// Starts `note` on `channel`, ending at `end` ticks.

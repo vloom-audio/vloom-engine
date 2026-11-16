@@ -108,6 +108,9 @@ public:
         /// ProcessContext::extraOutputs; at most 2 * kMaxExtraOutputs.
         /// Written with silence while the instance is inactive or bypassed.
         std::span<float* const> extraOutputs{};
+        /// Controls of the song, in frame order (frames past the block land
+        /// on its last frame). They follow the ones sent with sendControl().
+        std::span<const ControlEvent> controls{};
         /// Room for the notes the processor makes, and how many it made.
         std::span<NoteEvent> notesOut{};
         int* notesOutCount = nullptr;
@@ -177,6 +180,7 @@ private:
     SpscQueue<ControlEvent, kMaxLiveControls + 1> liveControls_;
     /// Audio thread: the controls of one block (they go with its first chunk).
     std::array<ControlEvent, kMaxLiveControls> blockControls_{};
+    std::array<ControlEvent, kMaxLiveControls> chunkControls_{}; ///< one chunk's, frames made chunk-relative
 
     /// Audio thread: adds `numFrames` of output to the scope when it is on.
     void capture(const float* left, const float* right, int numFrames) noexcept;
