@@ -836,3 +836,45 @@ TEST_CASE("A control written into the song goes out on its channel", "[plugin][s
     CHECK(audio[1000 * 2] == Approx(0.1f));
     CHECK(audio[1000 * 2 + 1] == Approx(0.5f)); // channel 3's bend reached the note on channel 3
 }
+
+TEST_CASE("Stopping the song centres the pitch on every channel it was bent on",
+    "[plugin][sequencer][routing][mpe]")
+{
+    using Type = vloom::ControlEvent::Type;
+    vloom::Engine engine;
+    prepare(engine);
+    auto poly = make<Poly>();
+    auto state = std::make_unique<vloom::SequencerState>();
+    state->channels.push_back(channel(poly, 0));
+    state->channels[0].controls = {{0, Type::PitchBend, 0, 0.5f, 3}, {0, Type::PitchBend, 0, 1.0f, 4}};
+    engine.setSequencerState(std::move(state));
+    REQUIRE(poly->playNote(64, 1.0f, 3));
+    REQUIRE(poly->playNote(65, 1.0f, 4));
+    engine.play();
+    CHECK(render(engine, 0.05)[1000 * 2 + 1] == Approx(1.5f)); // both bends in force
+    engine.stop();
+    const auto stopped = render(engine, 0.05);
+    CHECK(stopped[2000 * 2] == Approx(0.2f)); // the notes played by hand are still down
+    CHECK(stopped[2000 * 2 + 1] == 0.0f); // and both channels are back at the centre
+}
+
+TEST_CASE(
+    "A note the host has to end is ended on the channel it is down on", "[plugin][sequencer][routing][mpe]")
+{
+    // A note played on channel 5 goes through a note effect that never ends
+    // notes. Switching the effect off, the host ends it: on channel 5, or
+    // an instrument that tells channels apart would go on holding it.
+    vloom::Engine engine;
+    prepare(engine);
+    auto poly = make<Poly>();
+    auto effect = make<Latch>();
+    auto state = std::make_unique<vloom::SequencerState>();
+    state->channels.push_back(channel(poly, 0));
+    state->channels[0].noteEffect = effect;
+    engine.setSequencerState(std::move(state));
+    REQUIRE(poly->playNote(60, 1.0f, 5));
+    engine.play();
+    CHECK(render(engine, 0.05)[1000 * 2] == Approx(0.1f));
+    effect->setBypassed(true);
+    CHECK(render(engine, 0.05)[1000 * 2] == 0.0f);
+}

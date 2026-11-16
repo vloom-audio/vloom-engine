@@ -735,16 +735,20 @@ void StepSequencer::mix(
                 = std::min(channel.pluginOutputs.size(), PluginInstance::kMaxExtraOutputs);
             PluginInstance::Io io;
             io.extraOutputs = std::span<float* const>(extraBuffers_.data(), 2 * pairs);
-            // The song's controls. Stopped with the pitch bent: back to the centre.
-            if (voices->centreBend)
-                for (int midiChannel = 0; midiChannel < 16; ++midiChannel)
-                    if (((voices->bent >> midiChannel) & 1u) != 0
-                        && voices->controlCount < voices->controls.size())
-                        voices->controls[voices->controlCount++] = ControlEvent{numFrames - 1,
-                            ControlEvent::Type::PitchBend, 0, 0.0f, static_cast<std::int16_t>(midiChannel)};
-            if (voices->centreBend)
-                voices->bent = 0;
-            voices->centreBend = false;
+            // The song's controls. Stopped with the pitch bent: back to the centre,
+            // on every channel it was bent on. One that finds no room in
+            // this block's controls stays marked, and goes with the next.
+            if (voices->centreBend) {
+                for (int midiChannel = 0; midiChannel < 16; ++midiChannel) {
+                    const unsigned bit = 1u << midiChannel;
+                    if ((voices->bent & bit) == 0 || voices->controlCount == voices->controls.size())
+                        continue;
+                    voices->controls[voices->controlCount++] = ControlEvent{numFrames - 1,
+                        ControlEvent::Type::PitchBend, 0, 0.0f, static_cast<std::int16_t>(midiChannel)};
+                    voices->bent = static_cast<std::uint16_t>(voices->bent & ~bit);
+                }
+                voices->centreBend = voices->bent != 0;
+            }
             io.controls = std::span<const ControlEvent>(voices->controls.data(), voices->controlCount);
             channel.plugin->process(
                 voices->left.data(), voices->right.data(), numFrames, transport, notes, io);
