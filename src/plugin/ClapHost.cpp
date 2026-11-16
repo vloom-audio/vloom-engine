@@ -4,6 +4,7 @@
 
 #include "plugin/EditorRunLoop.hpp"
 #include "plugin/PluginFiles.hpp"
+#include "plugin/SpeakerFold.hpp"
 #include "vloom/engine/core/SpscQueue.hpp"
 #include "vloom/engine/plugin/PluginInstance.hpp"
 #include "vloom/engine/time/MusicalTime.hpp"
@@ -480,10 +481,12 @@ public:
                 else if (inputs_[port].channels.size() == 1)
                     for (std::size_t i = 0; i < frames; ++i)
                         dst[i] = 0.5f * (left[i] + right[i]);
-                else if (ch < 2)
-                    std::copy_n(ch == 0 ? left : right, frames, dst);
+                else if (static_cast<int>(ch) == inLayout_.left)
+                    std::copy_n(left, frames, dst);
+                else if (static_cast<int>(ch) == inLayout_.right)
+                    std::copy_n(right, frames, dst);
                 else
-                    std::fill_n(dst, frames, 0.0f);
+                    std::fill_n(dst, frames, 0.0f); // its other speakers: the plugin fills them, not the host
             }
         for (PortBuffers& port : outputs_)
             for (float* dst : port.pointers)
@@ -556,9 +559,22 @@ public:
         // The main output back. A plugin with no audio input (an
         // instrument) adds to what is there; an effect replaces it.
         const PortBuffers& out = outputs_[0];
+        const bool add = inputs_.empty();
+        // A port of several speakers is folded down to the stereo pair.
+        if (outLayout_.wide && static_cast<std::size_t>(outLayout_.channels) == out.pointers.size()) {
+            for (std::size_t i = 0; i < frames; ++i) {
+                const speakers::Gains sum = speakers::folded(
+                    outLayout_, [&](int ch) { return out.pointers[static_cast<std::size_t>(ch)][i]; });
+                left[i] = add ? left[i] + sum.left : sum.left;
+                if (right != left)
+                    right[i] = add ? right[i] + sum.right : sum.right;
+                else if (!add)
+                    left[i] = 0.5f * (sum.left + sum.right);
+            }
+            return;
+        }
         const float* outLeft = out.pointers[0];
         const float* outRight = out.pointers.size() > 1 ? out.pointers[1] : out.pointers[0];
-        const bool add = inputs_.empty();
         for (std::size_t i = 0; i < frames; ++i) {
             left[i] = add ? left[i] + outLeft[i] : outLeft[i];
             if (right != left)
@@ -774,6 +790,8 @@ private:
                     return false;
                 if (input && i == 1) // a second main port is something else than a sidechain
                     sidechainPort_ = (portInfo.flags & CLAP_AUDIO_PORT_IS_MAIN) == 0;
+                if (i == 0) // which speakers the main port has
+                    (input ? inLayout_ : outLayout_) = layoutFor(input, portInfo.channel_count);
                 PortBuffers port;
                 port.channels.assign(std::max<std::uint32_t>(portInfo.channel_count, 1),
                     std::vector<float>(static_cast<std::size_t>(maxBlockFrames), 0.0f));
@@ -818,6 +836,31 @@ private:
     bool midiNotes_ = false; ///< the plugin takes notes as MIDI only
     bool midiControls_ = false; ///< its note port takes MIDI: pitch bend and controllers go as that
     bool sidechainPort_ = false; ///< its second input port is not a main one
+    speakers::Layout inLayout_, outLayout_; ///< the main ports' speakers, as of the last activation
+
+    /// The layout of the plugin's main port: the speakers it names (the
+    /// surround extension), or the usual ones for that many channels.
+    [[nodiscard]] speakers::Layout layoutFor(bool input, std::uint32_t channels) const
+    {
+        const auto count = static_cast<int>(std::min<std::uint32_t>(channels, speakers::kMaxChannels));
+        const auto* surround
+            = static_cast<const clap_plugin_surround_t*>(plugin_->get_extension(plugin_, CLAP_EXT_SURROUND));
+        std::array<std::uint8_t, speakers::kMaxChannels> map{};
+        if (surround != nullptr && surround->get_channel_map != nullptr && count > 2
+            && surround->get_channel_map(plugin_, input, 0, map.data(), static_cast<std::uint32_t>(count))
+                == static_cast<std::uint32_t>(count)) {
+            // CLAP's speaker numbers are speakers::Speaker's, in the same order.
+            std::array<speakers::Speaker, speakers::kMaxChannels> bus{};
+            for (int ch = 0; ch < count; ++ch)
+                bus[static_cast<std::size_t>(ch)] = map[static_cast<std::size_t>(ch)]
+                        < static_cast<std::uint8_t>(speakers::Speaker::Unknown)
+                    ? static_cast<speakers::Speaker>(map[static_cast<std::size_t>(ch)])
+                    : speakers::Speaker::Unknown;
+            return speakers::layoutOf(
+                std::span<const speakers::Speaker>(bus.data(), static_cast<std::size_t>(count)));
+        }
+        return speakers::layoutOfCount(count);
+    }
     bool makesNotes_ = false; ///< it has a note port out
     std::array<NoteEvent, PluginInstance::kMaxNotes>
         made_{}; ///< audio thread: the notes it put out this block
