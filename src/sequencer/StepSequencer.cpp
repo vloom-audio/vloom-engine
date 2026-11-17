@@ -363,6 +363,74 @@ void StepSequencer::playNote(const ChannelState& channel, const Note& note, std:
     channel.voices->sampler.play(channel.sample.get(), options);
 }
 
+void StepSequencer::playLive(int index, const MidiEvent& event) noexcept
+{
+    if (current_ == nullptr || index < 0 || static_cast<std::size_t>(index) >= current_->channels.size()
+        || event.kind == MidiEvent::Kind::None)
+        return;
+    const ChannelState& channel = current_->channels[static_cast<std::size_t>(index)];
+    ChannelVoices* voices = channel.voices.get();
+    if (voices == nullptr)
+        return;
+    const bool on = event.kind == MidiEvent::Kind::NoteOn;
+    const bool off = event.kind == MidiEvent::Kind::NoteOff;
+    if ((on || off) && (event.key < Note::kMinKey || event.key > Note::kMaxKey))
+        return;
+    const int midiChannel = std::clamp(event.channel, 0, 15);
+    const auto velocity = std::clamp(event.value, 0.0f, 1.0f);
+    if (channel.instrument == Instrument::Plugin) {
+        if (channel.plugin == nullptr)
+            return;
+        if (on || off) {
+            if (voices->liveCount < voices->live.size())
+                voices->live[voices->liveCount++] = NoteEvent{0,
+                    on ? NoteEvent::Type::On : NoteEvent::Type::Off, static_cast<std::int16_t>(event.key),
+                    on ? velocity : 0.0f, static_cast<std::int16_t>(midiChannel)};
+            return;
+        }
+        if (voices->controlCount == voices->controls.size())
+            return;
+        ControlEvent control{
+            0, ControlEvent::Type::Controller, 0, 0.0f, static_cast<std::int16_t>(midiChannel)};
+        if (event.kind == MidiEvent::Kind::PitchBend) {
+            control.type = ControlEvent::Type::PitchBend;
+            control.value = std::clamp(event.value, -1.0f, 1.0f);
+        } else {
+            control.type = event.kind == MidiEvent::Kind::Pressure ? ControlEvent::Type::Pressure
+                                                                   : ControlEvent::Type::Controller;
+            control.number = static_cast<std::int16_t>(std::clamp(event.number, 0, 127));
+            control.value = velocity;
+        }
+        // Live controls go before the song's of this block (which come later, at their frames).
+        std::copy_backward(voices->controls.begin(),
+            voices->controls.begin() + static_cast<std::ptrdiff_t>(voices->controlCount),
+            voices->controls.begin() + static_cast<std::ptrdiff_t>(voices->controlCount + 1));
+        voices->controls[0] = control;
+        ++voices->controlCount;
+        return;
+    }
+    if (!on && !off)
+        return;
+    // Each live key on each MIDI channel is a note of its own, held until
+    // releaseExactly() with the same mark.
+    const std::int64_t mark = Sampler::kLiveFirst + static_cast<std::int64_t>(midiChannel) * 128 + event.key;
+    if (channel.instrument == Instrument::Synth) {
+        voices->synth.releaseExactly(mark);
+        if (on)
+            voices->synth.noteOn(keyFrequency(event.key), velocity, mark);
+        return;
+    }
+    voices->sampler.releaseExactly(mark);
+    if (!on || channel.sample == nullptr)
+        return;
+    const int root = std::clamp(channel.rootKey, Note::kMinKey, Note::kMaxKey);
+    Sampler::PlayOptions options;
+    options.gain = velocity;
+    options.rate = std::exp2(static_cast<double>(event.key - root) / 12.0);
+    options.releaseAt = mark;
+    voices->sampler.play(channel.sample.get(), options);
+}
+
 void StepSequencer::playStep(const ChannelState& channel, std::int64_t stepEnd) const noexcept
 {
     // Volume and pan are applied to the whole channel in mix(), live.
@@ -503,7 +571,7 @@ void StepSequencer::resumeAt(double ticks, double framesPerTick) noexcept
     // Whatever the clips' channels were playing belongs to the old position.
     for (const SongAudioClip& clip : current_->audioClips)
         if (const ChannelState* channel = clipChannel(clip))
-            channel->voices->stopAll(eventFrame_);
+            channel->voices->stopAll(eventFrame_, true); // keys held live stay
     for (const SongAudioClip& clip : current_->audioClips) {
         const ChannelState* channel = clipChannel(clip);
         if (channel == nullptr)
@@ -552,7 +620,7 @@ void StepSequencer::resyncAudioClips(double ticks, std::int64_t from, double fra
     };
     for (std::size_t c = 0; c < current_->channels.size(); ++c)
         if (differs(c) && current_->channels[c].voices != nullptr)
-            current_->channels[c].voices->sampler.stopAll();
+            current_->channels[c].voices->sampler.stopAll(true);
     for (const SongAudioClip& clip : current_->audioClips) {
         const ChannelState* channel = clipChannel(clip);
         if (channel == nullptr || !differs(static_cast<std::size_t>(clip.channel)))
@@ -615,6 +683,17 @@ void StepSequencer::mix(
         if (channel.plugin != nullptr) {
             const auto frames = static_cast<std::size_t>(numFrames);
             std::span<const NoteEvent> notes = voices->plugin.events();
+            // Notes played live: at the block's first frame, before the song's.
+            if (voices->liveCount > 0) {
+                std::size_t count = 0;
+                for (std::size_t i = 0; i < voices->liveCount && count < withLive_.size(); ++i)
+                    withLive_[count++] = voices->live[i];
+                for (const NoteEvent& note : notes)
+                    if (count < withLive_.size())
+                        withLive_[count++] = note;
+                voices->liveCount = 0;
+                notes = std::span<const NoteEvent>(withLive_.data(), count);
+            }
             // Note effects first: the instrument plays what they make. Only
             // those that run and make notes; without any, the channel's
             // notes go straight to the instrument.
@@ -862,16 +941,16 @@ void StepSequencer::mix(
 
 void StepSequencer::stopAll() noexcept
 {
-    const auto stop = [this](const ChannelState& channel) {
+    const auto stop = [this](const ChannelState& channel, bool keepLive) {
         if (channel.voices != nullptr)
-            channel.voices->stopAll(eventFrame_);
+            channel.voices->stopAll(eventFrame_, keepLive);
     };
     if (current_ != nullptr)
         for (const ChannelState& channel : current_->channels)
-            stop(channel);
+            stop(channel, true);
     exchange_.forEachDraining([&](const SequencerState& old) {
         for (const ChannelState& channel : old.channels)
-            stop(channel);
+            stop(channel, inCurrent(channel.voices.get())); // a removed channel's go too
     });
 }
 

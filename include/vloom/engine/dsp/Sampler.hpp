@@ -49,6 +49,10 @@ public:
         std::int64_t startFrame = 0) noexcept;
 
     static constexpr std::int64_t kNoRelease = INT64_MAX;
+    /// A releaseAt from here on marks a note played live (a MIDI keyboard,
+    /// held for as long as its key is down): release(), releaseHeld() and
+    /// nextRelease() leave it alone; releaseExactly() ends it.
+    static constexpr std::int64_t kLiveFirst = std::int64_t{1} << 62;
     /// Length of a note's release (10 ms at 48 kHz).
     static constexpr int kReleaseFrames = 480;
     static constexpr double kMinRate = 1.0 / 16.0;
@@ -85,16 +89,20 @@ public:
     [[nodiscard]] std::int64_t nextRelease() const noexcept;
     /// Releases the held notes whose releaseAt is at or before `upTo`.
     void release(std::int64_t upTo) noexcept;
-    /// Releases every held note, whatever its releaseAt (a jump in the song).
+    /// Releases every held note, whatever its releaseAt (a jump in the
+    /// song), but the live ones.
     void releaseHeld() noexcept;
+    /// Releases the held notes whose releaseAt is exactly `at` (a live note's key let go).
+    void releaseExactly(std::int64_t at) noexcept;
 
     /// Adds every voice into `out[ch][startFrame .. startFrame + numFrames)`.
     /// Mono samples go to both of the first two channels; channels after the
     /// second get nothing.
     void render(float* const* out, int numChannels, int startFrame, int numFrames) noexcept;
 
-    /// Fades out every voice over kFadeFrames.
-    void stopAll() noexcept;
+    /// Fades out every voice over kFadeFrames; with `keepLive`, all but the
+    /// live notes (a transport stop: their keys are still down).
+    void stopAll(bool keepLive = false) noexcept;
 
     [[nodiscard]] bool uses(const SampleBuffer* sample) const noexcept;
     /// Voices still sounding, fading ones included.

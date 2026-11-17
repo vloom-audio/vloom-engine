@@ -59,10 +59,12 @@ public:
         synth.releaseHeld();
         plugin.releaseHeld(frame);
     }
-    void stopAll(int frame = 0) noexcept
+    /// `keepLive`: a transport stop, which leaves the notes played live
+    /// (their keys are still down); a channel that goes stops them too.
+    void stopAll(int frame = 0, bool keepLive = false) noexcept
     {
-        sampler.stopAll();
-        synth.stopAll();
+        sampler.stopAll(keepLive);
+        synth.stopAll(keepLive);
         plugin.releaseHeld(frame); // the plugin fades its own notes
         endMade = true; // and what a note effect made of them ends too
         centreBend = bent != 0;
@@ -93,6 +95,10 @@ public:
     std::array<ControlEvent, 256> controls{};
     std::size_t controlCount = 0;
     std::uint16_t bent = 0; ///< the channels a pitch bend of the song is in force on
+    /// Notes played live (Engine::playMidi()) for the instrument plugin in
+    /// the block being rendered, at its first frame; further ones are dropped.
+    std::array<NoteEvent, 128> live{};
+    std::size_t liveCount = 0;
     bool centreBend = false; ///< stopAll() ran while it was: put the pitch back
     StereoGain applied{}; ///< gain at the end of the last block: the next ramp starts there
 };

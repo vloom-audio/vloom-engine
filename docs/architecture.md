@@ -8,7 +8,7 @@
 | core | `core/` | Lock-free queue, version, small utilities | — |
 | time | `time/` | PPQ, bar/beat/tick, transport clock | core |
 | dsp | `dsp/` | Sound generators and processors | core |
-| io | `io/` | Hardware audio devices (WASAPI, CoreAudio, ALSA) | core |
+| io | `io/` | Hardware audio devices (WASAPI, CoreAudio, ALSA) and MIDI inputs (WinMM, CoreMIDI, ALSA sequencer) | core |
 | mixer | `mixer/` | Insert settings (volume, pan, effect chain, output, sends), the pan law, and `MixerGraph`: inserts in processing order with delay compensation (ADR 0007); Engine mixes the buses along it | core, dsp, plugin |
 | plugin | `plugin/` | Hosted processors behind one interface (ADR 0006): CLAP, VST 3 and VST 2 (ADR 0010) hosts, built-in processors from vloom-dsp (ADR 0008) | core, time |
 | sample | `sample/` | Decoded audio in memory: WAV reading, resampling | core |
@@ -18,8 +18,9 @@
 Rules:
 
 - Lower modules never include higher ones (`dsp` never includes `Engine.hpp`).
-- Platform audio APIs are used only in `src/io/<Name>Backend.cpp`, one file per
-  OS behind the internal `io::AudioBackend` interface. No platform header
+- Platform audio and MIDI APIs are used only in `src/io/<Name>Backend.cpp`,
+  one file per OS behind the internal `io::AudioBackend` and `io::MidiBackend`
+  interfaces. No platform header
   appears in `include/` (see [ADR 0004](adr/0004-native-audio-io.md)).
 - Each public header in `include/vloom/engine/<module>/` has its `.cpp` in
   `src/<module>/` and its tests in `tests/<module>/`.
@@ -80,4 +81,5 @@ sample-exact results across many block sizes. Rendering must be deterministic.
 6. **M4** plugin host interface, CLAP hosting ✅ (ADR 0006: `AudioProcessor`,
    insert effect chains, CLAP effects and instruments)
 7. **M5** VST3 hosting, built-in effects, sends, delay compensation ← *next*
-8. **M6** audio input and recording, MIDI input
+8. **M6** audio input and recording, MIDI input: MIDI input and recording ✅
+   (ADR 0015); audio input and recording ← *in progress*

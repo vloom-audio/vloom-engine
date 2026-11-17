@@ -58,7 +58,7 @@ std::int64_t Sampler::nextRelease() const noexcept
 {
     std::int64_t next = kNoRelease;
     for (const Voice& v : voices_)
-        if (v.sample != nullptr && !v.fading)
+        if (v.sample != nullptr && !v.fading && (v.releaseAt < kLiveFirst || v.releaseAt == kNoRelease))
             next = std::min(next, v.releaseAt);
     return next;
 }
@@ -70,7 +70,14 @@ void Sampler::release(std::int64_t upTo) noexcept
             startFade(v, kReleaseFrames);
 }
 
-void Sampler::releaseHeld() noexcept { release(kNoRelease - 1); }
+void Sampler::releaseHeld() noexcept { release(kLiveFirst - 1); }
+
+void Sampler::releaseExactly(std::int64_t at) noexcept
+{
+    for (Voice& v : voices_)
+        if (v.sample != nullptr && !v.fading && v.releaseAt == at)
+            startFade(v, kReleaseFrames);
+}
 
 void Sampler::play(const SampleBuffer* sample, const PlayOptions& options) noexcept
 {
@@ -222,10 +229,10 @@ void Sampler::renderVoice(
         v = Voice{}; // finished: the slot is free again
 }
 
-void Sampler::stopAll() noexcept
+void Sampler::stopAll(bool keepLive) noexcept
 {
     for (Voice& v : voices_)
-        if (v.sample != nullptr)
+        if (v.sample != nullptr && !(keepLive && v.releaseAt >= kLiveFirst && v.releaseAt != kNoRelease))
             startFade(v, kFadeFrames); // a release in progress ends sooner too
 }
 

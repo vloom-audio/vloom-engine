@@ -228,7 +228,8 @@ std::int64_t Synth::nextRelease() const noexcept
 {
     std::int64_t next = kNoRelease;
     for (const Voice& v : voices_)
-        if (v.stage != Stage::Off && v.stage != Stage::Release && !v.fading)
+        if (v.stage != Stage::Off && v.stage != Stage::Release && !v.fading
+            && (v.releaseAt < kLiveFirst || v.releaseAt == kNoRelease))
             next = std::min(next, v.releaseAt);
     return next;
 }
@@ -246,16 +247,27 @@ void Synth::release(std::int64_t upTo) noexcept
 void Synth::releaseHeld() noexcept
 {
     for (Voice& v : voices_)
-        if (v.stage != Stage::Off && v.stage != Stage::Release && !v.fading) {
+        if (v.stage != Stage::Off && v.stage != Stage::Release && !v.fading
+            && (v.releaseAt < kLiveFirst || v.releaseAt == kNoRelease)) {
             v.stage = Stage::Release;
             v.releaseStep = 0.0f;
         }
 }
 
-void Synth::stopAll() noexcept
+void Synth::releaseExactly(std::int64_t at) noexcept
 {
     for (Voice& v : voices_)
-        if (v.stage != Stage::Off && !v.fading) {
+        if (v.stage != Stage::Off && v.stage != Stage::Release && !v.fading && v.releaseAt == at) {
+            v.stage = Stage::Release;
+            v.releaseStep = 0.0f;
+        }
+}
+
+void Synth::stopAll(bool keepLive) noexcept
+{
+    for (Voice& v : voices_)
+        if (v.stage != Stage::Off && !v.fading
+            && !(keepLive && v.releaseAt >= kLiveFirst && v.releaseAt != kNoRelease)) {
             v.fading = true;
             v.fadeLeft = kFadeFrames;
         }

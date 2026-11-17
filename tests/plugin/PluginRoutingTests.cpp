@@ -878,3 +878,74 @@ TEST_CASE(
     effect->setBypassed(true);
     CHECK(render(engine, 0.05)[1000 * 2] == 0.0f);
 }
+
+TEST_CASE("Live MIDI reaches an instrument plugin with its MIDI channel, through the note effects",
+    "[plugin][sequencer][routing][midi]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    auto poly = make<Poly>();
+    auto state = std::make_unique<vloom::SequencerState>();
+    state->channels.push_back(channel(poly, 0));
+    engine.setSequencerState(std::move(state));
+
+    REQUIRE(engine.playMidi(0, {0x93, 64, 127})); // a note on MIDI channel 3
+    REQUIRE(engine.playMidi(0, {0xE3, 0x7F, 0x7F})); // and a full bend up on it
+    REQUIRE(engine.playMidi(0, {0xE4, 0x00, 0x00})); // a bend on a channel with no note
+    auto audio = render(engine, 0.05);
+    CHECK(audio[1000 * 2] == Approx(0.1f));
+    CHECK(audio[1000 * 2 + 1] == Approx(1.0f));
+    // The song stopping does not end a key that is still down.
+    engine.play();
+    render(engine, 0.05);
+    engine.stop();
+    CHECK(render(engine, 0.05)[1000 * 2] == Approx(0.1f));
+    REQUIRE(engine.playMidi(0, {0x83, 64, 0}));
+    CHECK(render(engine, 0.05)[1000 * 2] == 0.0f);
+
+    // Through a note effect: the octaver doubles it.
+    auto withEffect = std::make_unique<vloom::SequencerState>();
+    withEffect->channels.push_back(channel(poly, 0));
+    withEffect->channels[0].noteEffect = make<Octaver>();
+    engine.setSequencerState(std::move(withEffect));
+    render(engine, 0.01);
+    REQUIRE(engine.playMidi(0, {0x90, 60, 100}));
+    CHECK(render(engine, 0.05)[1000 * 2] == Approx(0.2f));
+    REQUIRE(engine.playMidi(0, {0x80, 60, 0}));
+    CHECK(render(engine, 0.05)[1000 * 2] == 0.0f);
+}
+
+TEST_CASE("Playing and recording live MIDI does not allocate", "[plugin][sequencer][routing][midi]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    auto state = std::make_unique<vloom::SequencerState>();
+    state->channels.push_back(channel(make<Poly>(), 0));
+    state->channels[0].noteEffect = make<Octaver>();
+    vloom::ChannelState synth;
+    synth.instrument = vloom::Instrument::Synth;
+    synth.voices = std::make_shared<vloom::ChannelVoices>();
+    state->channels.push_back(synth);
+    engine.setSequencerState(std::move(state));
+    engine.setLoop(0.0, 960.0);
+    engine.setRecording(true);
+    engine.play();
+    std::vector<float> l(256), r(256);
+    std::array<float*, 2> out{l.data(), r.data()};
+    std::array<vloom::RecordedMidi, 64> recorded{};
+    std::size_t taken = 0;
+    long long onAudioThread = 0;
+    for (int block = 0; block < 400; ++block) {
+        const auto key = static_cast<std::uint8_t>(48 + block % 24);
+        const auto status = static_cast<std::uint8_t>((block % 2 == 0 ? 0x90 : 0x80) | (block % 16));
+        engine.playMidi(block % 2, {status, key, 100});
+        engine.playMidi(
+            0, {static_cast<std::uint8_t>(0xE0 | (block % 16)), 0, static_cast<std::uint8_t>(block % 128)});
+        const vloom::test::AllocationCounter counter;
+        engine.process(out.data(), 2, 256);
+        onAudioThread += counter.count();
+        taken += engine.takeRecordedMidi(recorded);
+    }
+    CHECK(onAudioThread == 0);
+    CHECK(taken == 800);
+}

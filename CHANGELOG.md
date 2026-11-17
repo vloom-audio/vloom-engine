@@ -7,6 +7,22 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- MIDI input and recording (ADR 0015), the first half of M6:
+  - `MidiInput` reads a MIDI port: WinMM on Windows, CoreMIDI on macOS,
+    the ALSA sequencer on Linux. `MidiMessage` and `decodeMidi()` read
+    what it sends.
+  - `Engine::playMidi()` plays a message live on any channel, from any
+    thread: the synth, the sampler (its sample at the key) and instrument
+    plugins (with the MIDI channel, through the note effects). A note is
+    held until its note-off, whatever the song does meanwhile.
+  - `Engine::setRecording()` records what is played while the song plays,
+    at the position the player heard it (`setRecordLatency()` and the
+    plugins' latency taken off; loop passes counted).
+    `takeRecordedMidi()` hands it over; `MidiTake`, `quantize()`,
+    `patternNotes()` and `patternControls()` turn it into a pattern's notes
+    and controls.
+  - `Synth` and `Sampler` gain `releaseExactly()` and `kLiveFirst`, and
+    `stopAll(keepLive)`.
 - MPE (ADR 0013): `NoteEvent`, `ControlEvent` and `ControlPoint` carry a
   MIDI channel, and `PluginInstance::playNote()`, `stopNote()` and
   `sendControl()` take one. CLAP, VST 3 and VST 2 plugins (bridged ones

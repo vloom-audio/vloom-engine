@@ -46,6 +46,10 @@ public:
     /// Length of the fade when a voice is stolen or stopped.
     static constexpr int kFadeFrames = 64;
     static constexpr std::int64_t kNoRelease = INT64_MAX;
+    /// A releaseAt from here on marks a note played live (a MIDI keyboard,
+    /// held for as long as its key is down): release(), releaseHeld() and
+    /// nextRelease() leave it alone; releaseExactly() ends it.
+    static constexpr std::int64_t kLiveFirst = std::int64_t{1} << 62;
 
     /// `maxVoices` is clamped to 1 .. kMaxPolyphony.
     explicit Synth(int maxVoices = kDefaultVoices);
@@ -77,10 +81,13 @@ public:
     [[nodiscard]] std::int64_t nextRelease() const noexcept;
     /// Releases the held notes whose releaseAt is at or before `upTo`.
     void release(std::int64_t upTo) noexcept;
-    /// Releases every held note.
+    /// Releases every held note but the live ones.
     void releaseHeld() noexcept;
-    /// Fades out every voice over kFadeFrames.
-    void stopAll() noexcept;
+    /// Releases the held notes whose releaseAt is exactly `at` (a live note's key let go).
+    void releaseExactly(std::int64_t at) noexcept;
+    /// Fades out every voice over kFadeFrames; with `keepLive`, all but the
+    /// live notes (a transport stop: their keys are still down).
+    void stopAll(bool keepLive = false) noexcept;
 
     /// Voices still sounding: held, releasing or fading.
     [[nodiscard]] int activeVoices() const noexcept;
