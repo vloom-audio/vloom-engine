@@ -361,3 +361,36 @@ TEST_CASE("A tempo change while recording starts a stretch at the new tempo", "[
     CHECK(segments[1].startTicks == Approx(102.4));
     CHECK(segments[1].ticksPerFrame == Approx(kTicksPerFrame / 2.0));
 }
+
+TEST_CASE("A take whose first blocks are lost starts where its first kept block is", "[engine][record]")
+{
+    TempFolder folder;
+    Rig rig;
+    const int fits = static_cast<int>(vloom::Engine::kRecordRingFrames) / kBlock;
+    // A first take fills the ring and is not taken.
+    rig.engine.setAudioRecording(true);
+    rig.engine.play();
+    for (int b = 0; b < fits; ++b)
+        rig.block(0.1f, 0.1f);
+    rig.engine.stop();
+    rig.silentBlock();
+    // A second take starts while the ring is still full: its first blocks are lost.
+    rig.engine.locate(0.0);
+    rig.engine.play();
+    for (int b = 0; b < 3; ++b)
+        rig.block(0.2f, 0.2f);
+
+    vloom::AudioTake take;
+    REQUIRE(take.open(folder.file("first.wav"), 48000));
+    REQUIRE(take.collect(rig.engine));
+    rig.block(0.2f, 0.2f); // the second take's first kept block, 3 blocks in
+    rig.engine.stop();
+    rig.silentBlock();
+    REQUIRE(take.finish(rig.engine));
+    const auto segments = take.segments();
+    REQUIRE(segments.size() == 2);
+    CHECK(segments[1].newTake);
+    CHECK(segments[1].firstFrame == fits * kBlock);
+    CHECK(segments[1].startTicks == Approx(3 * kBlock * kTicksPerFrame));
+    CHECK(segments[1].frames == kBlock);
+}

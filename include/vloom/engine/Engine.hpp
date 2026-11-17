@@ -351,6 +351,7 @@ private:
     bool audioRecording_ = false; ///< audio thread
     bool audioTake_ = false; ///< audio thread: a take is under way (the song plays and it records)
     bool audioResync_ = false; ///< audio thread: frames were lost, mark where the next ones are
+    bool audioStartPending_ = false; ///< audio thread: a take started; no block of it written yet
     int audioRecordLatency_ = 0; ///< audio thread: frames
     std::int64_t recordedFrames_ = 0; ///< audio thread: frames in the recorded stream so far
     std::int32_t audioPass_ = 0; ///< audio thread: loop passes in this take

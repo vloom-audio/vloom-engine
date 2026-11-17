@@ -232,6 +232,7 @@ void Engine::recordInput(int numFrames) noexcept
 {
     if (!audioBlockRolling_ || !audioRecording_) {
         audioTake_ = false;
+        audioStartPending_ = false;
         return;
     }
     const auto frames = static_cast<std::size_t>(numFrames);
@@ -242,7 +243,15 @@ void Engine::recordInput(int numFrames) noexcept
         audioResync_ = true;
         return;
     }
-    if (audioResync_) {
+    if (audioStartPending_) {
+        // The take's first block that reaches the reader: where it starts.
+        const int shift = latency_.load(std::memory_order_relaxed) + audioRecordLatency_ + inputWaiting_;
+        audioMarks_.push(AudioRecordMark{AudioRecordMark::Kind::Start, recordedFrames_, audioBlockTicks_,
+            transport_.ticksPerSample(), audioPass_, shift});
+        audioTicksPerFrame_ = transport_.ticksPerSample();
+        audioStartPending_ = false;
+        audioResync_ = false;
+    } else if (audioResync_) {
         audioMarks_.push(AudioRecordMark{AudioRecordMark::Kind::Jump, recordedFrames_, audioBlockTicks_,
             transport_.ticksPerSample(), audioPass_, 0});
         audioResync_ = false;
@@ -902,13 +911,10 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
             audioTake_ = true;
             audioPass_ = 0;
             audioResync_ = false;
-            const int shift = latency_.load(std::memory_order_relaxed) + audioRecordLatency_ + inputWaiting_;
-            audioMarks_.push(AudioRecordMark{AudioRecordMark::Kind::Start, recordedFrames_, audioBlockTicks_,
-                transport_.ticksPerSample(), 0, shift});
-            audioTicksPerFrame_ = transport_.ticksPerSample();
+            audioStartPending_ = true; // marked with the first block that is written
         } else if ((std::abs(audioBlockTicks_ - audioExpected_) > 1e-6
                        || transport_.ticksPerSample() != audioTicksPerFrame_)
-            && !audioResync_) {
+            && !audioResync_ && !audioStartPending_) {
             // A locate, or a new tempo: from here on frames are other ticks.
             audioMarks_.push(AudioRecordMark{AudioRecordMark::Kind::Jump, recordedFrames_, audioBlockTicks_,
                 transport_.ticksPerSample(), audioPass_, 0});
@@ -978,7 +984,7 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
             // expectedTicks_ is the loop end, the position now the loop start:
             // the next span sees a jump.
             transport_.locate(loopStart_);
-            if (audioBlockRolling_ && audioRecording_ && audioTake_ && !audioResync_) {
+            if (audioBlockRolling_ && audioRecording_ && audioTake_ && !audioResync_ && !audioStartPending_) {
                 ++audioPass_;
                 audioMarks_.push(AudioRecordMark{AudioRecordMark::Kind::Jump, recordedFrames_ + done,
                     loopStart_, transport_.ticksPerSample(), audioPass_, 0});
