@@ -29,7 +29,7 @@ struct AudioRecordMark {
         /// switched on while it played): a new take.
         Start,
         /// The song jumped here (a loop going back, a locate, recording
-        /// going on after frames were lost).
+        /// going on after frames were lost), or its tempo changed.
         Jump,
     };
     Kind kind = Kind::Start;
@@ -343,6 +343,7 @@ private:
     float* inputInterleaved_ = nullptr; ///< audio thread: 2 * kMaxBlockFrames
     int inputWaiting_ = 0; ///< audio thread: frames left in the ring after this block's
     int monitorInsert_ = -1; ///< audio thread
+    int monitorActive_ = -1; ///< audio thread: the insert the input went into last block
     float monitorGain_ = 1.0f; ///< audio thread: the target
     float monitorApplied_ = 0.0f; ///< audio thread: where the last block's ramp ended
     SpscRing recordRing_{2 * kRecordRingFrames}; ///< interleaved stereo, audio thread -> control thread
@@ -355,6 +356,7 @@ private:
     std::int32_t audioPass_ = 0; ///< audio thread: loop passes in this take
     double audioExpected_ = 0.0; ///< audio thread: where the position should be at the next block
     double audioBlockTicks_ = 0.0; ///< audio thread: the position at this block's start
+    double audioTicksPerFrame_ = 0.0; ///< audio thread: the tempo the last mark was made at
     bool audioBlockRolling_ = false; ///< audio thread: the song played at this block's start
     std::atomic<bool> audioRecordingStatus_{false};
     std::atomic<std::uint64_t> inputDropouts_{0};

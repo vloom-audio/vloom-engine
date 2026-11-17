@@ -322,3 +322,42 @@ TEST_CASE("An audio input that is not open reports nothing and refuses to start"
     CHECK_FALSE(input.open(far, [](const float* const*, int, int) { }, &error));
     CHECK_FALSE(error.empty());
 }
+
+TEST_CASE("Switching the monitor off or to another insert fades it, without a click", "[engine][record]")
+{
+    Rig rig;
+    rig.engine.setInputMonitor(0, 1.0f);
+    rig.block(0.25f, 0.25f);
+    rig.block(0.25f, 0.25f);
+    rig.engine.setInputMonitor(-1);
+    rig.block(0.25f, 0.25f);
+    CHECK(rig.left[0] > 0.24f); // from where it was ...
+    CHECK(rig.left[kBlock - 1] == Approx(0.0f).margin(1e-6)); // ... down to nothing over the block
+    rig.block(0.25f, 0.25f);
+    CHECK(rig.left[0] == 0.0f);
+}
+
+TEST_CASE("A tempo change while recording starts a stretch at the new tempo", "[engine][record]")
+{
+    TempFolder folder;
+    Rig rig;
+    rig.engine.setAudioRecording(true);
+    rig.engine.play();
+    for (int b = 0; b < 10; ++b) // 102.4 ticks
+        rig.block(0.1f, 0.1f);
+    rig.engine.setTempo(60.0);
+    for (int b = 0; b < 10; ++b)
+        rig.block(0.1f, 0.1f);
+    rig.engine.stop();
+    rig.silentBlock();
+
+    vloom::AudioTake take;
+    REQUIRE(take.open(folder.file("tempo.wav"), 48000));
+    REQUIRE(take.finish(rig.engine));
+    const auto segments = take.segments();
+    REQUIRE(segments.size() == 2);
+    CHECK(segments[0].ticksPerFrame == Approx(kTicksPerFrame));
+    CHECK(segments[1].firstFrame == 10 * kBlock);
+    CHECK(segments[1].startTicks == Approx(102.4));
+    CHECK(segments[1].ticksPerFrame == Approx(kTicksPerFrame / 2.0));
+}

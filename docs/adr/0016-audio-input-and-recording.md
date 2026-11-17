@@ -36,13 +36,15 @@ and however long the input waited in the engine.
    no resampling.
 3. **Monitoring** (`setInputMonitor(insert, gain)`) adds the input into an
    insert's bus, where it goes through the insert's effects, volume and
-   routes like a channel's sound.
+   routes like a channel's sound. Switching it off or to another insert
+   fades the old one out over a block.
 4. **Recording happens on the audio thread, writing on the control
    thread.** While `setAudioRecording(true)` is on and the song plays, every
    block's input goes into a second ring (about 10 s), with **marks**: where
    a take starts (the song's position, and the shift: the round trip set
    with `setAudioRecordLatency()`, plus the plugins' latency, plus the input
-   waiting), and where the position jumps (a loop going back, a locate).
+   waiting), and where the position jumps (a loop going back, a locate) or
+   the tempo changes.
    `AudioTake` empties both into a WAV file as it goes (`WavFileWriter`)
    and works out **segments**: which stretch of the file plays where. A
    take's first frames are moved back by the shift, and a jump shows in the

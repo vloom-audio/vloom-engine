@@ -97,7 +97,11 @@ std::vector<AudioTakeSegment> AudioTake::segments() const
             const auto skip
                 = static_cast<std::int64_t>(std::ceil(-segment.startTicks / segment.ticksPerFrame));
             segment.firstFrame += skip;
-            segment.startTicks += static_cast<double>(skip) * segment.ticksPerFrame;
+            // Rounding leaves a hair either side of 0: it is the start.
+            segment.startTicks
+                = std::max(segment.startTicks + static_cast<double>(skip) * segment.ticksPerFrame, 0.0);
+            if (segment.startTicks < 1e-9)
+                segment.startTicks = 0.0;
         }
         segment.frames = end - segment.firstFrame;
         if (segment.frames > 0)

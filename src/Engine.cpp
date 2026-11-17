@@ -202,20 +202,29 @@ void Engine::readInput(int numFrames) noexcept
 
 void Engine::monitorInput(int numFrames) noexcept
 {
-    if (monitorInsert_ < 0 || monitorInsert_ > kMaxInserts) {
+    // Adds the input into `insert`'s bus, its gain ramped from `from` to `to`.
+    const auto feed = [&](int insert, float from, float to) {
+        const float step = (to - from) / static_cast<float>(numFrames);
+        float* left = buses_[static_cast<std::size_t>(2 * insert)];
+        float* right = buses_[static_cast<std::size_t>(2 * insert + 1)];
+        for (int i = 0; i < numFrames; ++i) {
+            const float g = from + step * static_cast<float>(i + 1);
+            left[i] += input_[0][i] * g;
+            right[i] += input_[1][i] * g;
+        }
+        busUsed_[static_cast<std::size_t>(insert)] = true;
+    };
+    // Switched off or moved: the insert it fed fades out over this block.
+    if (monitorActive_ >= 0 && monitorActive_ != monitorInsert_) {
+        if (monitorApplied_ > 0.0f)
+            feed(monitorActive_, monitorApplied_, 0.0f);
+        monitorActive_ = -1;
         monitorApplied_ = 0.0f;
+    }
+    if (monitorInsert_ < 0 || monitorInsert_ > kMaxInserts)
         return;
-    }
-    const float from = monitorApplied_;
-    const float step = (monitorGain_ - from) / static_cast<float>(numFrames);
-    float* left = buses_[static_cast<std::size_t>(2 * monitorInsert_)];
-    float* right = buses_[static_cast<std::size_t>(2 * monitorInsert_ + 1)];
-    for (int i = 0; i < numFrames; ++i) {
-        const float g = from + step * static_cast<float>(i + 1);
-        left[i] += input_[0][i] * g;
-        right[i] += input_[1][i] * g;
-    }
-    busUsed_[static_cast<std::size_t>(monitorInsert_)] = true;
+    feed(monitorInsert_, monitorApplied_, monitorGain_);
+    monitorActive_ = monitorInsert_;
     monitorApplied_ = monitorGain_;
 }
 
@@ -896,9 +905,14 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
             const int shift = latency_.load(std::memory_order_relaxed) + audioRecordLatency_ + inputWaiting_;
             audioMarks_.push(AudioRecordMark{AudioRecordMark::Kind::Start, recordedFrames_, audioBlockTicks_,
                 transport_.ticksPerSample(), 0, shift});
-        } else if (std::abs(audioBlockTicks_ - audioExpected_) > 1e-6 && !audioResync_) {
+            audioTicksPerFrame_ = transport_.ticksPerSample();
+        } else if ((std::abs(audioBlockTicks_ - audioExpected_) > 1e-6
+                       || transport_.ticksPerSample() != audioTicksPerFrame_)
+            && !audioResync_) {
+            // A locate, or a new tempo: from here on frames are other ticks.
             audioMarks_.push(AudioRecordMark{AudioRecordMark::Kind::Jump, recordedFrames_, audioBlockTicks_,
                 transport_.ticksPerSample(), audioPass_, 0});
+            audioTicksPerFrame_ = transport_.ticksPerSample();
         }
     }
 
