@@ -22,13 +22,18 @@ bool AudioTake::open(const std::string& path, int sampleRate, std::string* error
 
 bool AudioTake::collect(Engine& engine, std::string* error)
 {
-    std::array<AudioRecordMark, 64> marks{};
-    for (std::size_t got = 0; (got = engine.takeAudioMarks(marks)) > 0;)
-        marks_.insert(marks_.end(), marks.begin(), marks.begin() + static_cast<std::ptrdiff_t>(got));
+    // The audio first, the marks after: the audio thread pushes a mark before
+    // the frames it marks, so every frame taken here has its mark taken too.
+    const auto takeMarks = [&] {
+        std::array<AudioRecordMark, 64> marks{};
+        for (std::size_t got = 0; (got = engine.takeAudioMarks(marks)) > 0;)
+            marks_.insert(marks_.end(), marks.begin(), marks.begin() + static_cast<std::ptrdiff_t>(got));
+    };
     if (!open_) {
         // Nothing to write to: still empty the engine, so it does not lose
         // frames later on.
         while (engine.takeRecordedAudio(buffer_) > 0) { }
+        takeMarks();
         if (error != nullptr)
             *error = "the take is not open";
         return false;
@@ -36,13 +41,16 @@ bool AudioTake::collect(Engine& engine, std::string* error)
     for (;;) {
         const std::size_t frames = engine.takeRecordedAudio(buffer_);
         if (frames == 0)
-            return true;
+            break;
         if (!writer_.write(std::span<const float>(buffer_.data(), 2 * frames), error)) {
             open_ = false;
+            takeMarks();
             return false;
         }
         written_ += static_cast<std::int64_t>(frames);
     }
+    takeMarks();
+    return true;
 }
 
 bool AudioTake::finish(Engine& engine, std::string* error)
