@@ -18,6 +18,8 @@
 //   host's thread check, and a block that lacks a port or comes from a
 //   thread the host does not call the audio thread. Its right channel is the
 //   time signature's beats per bar / 100.
+// - "vloom.test.wide" (effect): one port of six channels each way, a
+//   surround port without a list of its speakers (the host takes it for 5.1).
 #include <algorithm>
 #include <clap/clap.h>
 #include <cstring>
@@ -40,6 +42,7 @@ struct Plugin {
     const clap_host_t* host = nullptr;
     bool instrument = false;
     bool pads = false;
+    bool wide = false;
     bool guiCreated = false;
     std::uint32_t width = 300;
     std::uint32_t height = 200;
@@ -62,6 +65,10 @@ const clap_plugin_descriptor_t kKeysDescriptor = {CLAP_VERSION_INIT, "vloom.test
 const clap_plugin_descriptor_t kPadsDescriptor = {CLAP_VERSION_INIT, "vloom.test.pads", "Test Pads",
     "Vloom Tests", "", "", "", "1.0", "", kInstrumentFeatures};
 constexpr std::uint32_t kPadsOutputs = 40;
+const char* const kSurroundFeatures[]
+    = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_SURROUND, nullptr};
+const clap_plugin_descriptor_t kWideDescriptor = {CLAP_VERSION_INIT, "vloom.test.wide", "Test Wide",
+    "Vloom Tests", "", "", "", "1.0", "", kSurroundFeatures};
 
 // ---- params
 std::uint32_t paramCount(const clap_plugin_t* p) { return self(p)->instrument ? 0 : 1; }
@@ -126,8 +133,8 @@ bool portInfo(const clap_plugin_t* p, std::uint32_t index, bool input, clap_audi
     info->id = input ? 0 : 1 + index;
     std::strcpy(info->name, input ? "In" : "Out");
     info->flags = index == 0 ? CLAP_AUDIO_PORT_IS_MAIN : 0;
-    info->channel_count = 2;
-    info->port_type = CLAP_PORT_STEREO;
+    info->channel_count = self(p)->wide ? 6 : 2;
+    info->port_type = self(p)->wide ? CLAP_PORT_SURROUND : CLAP_PORT_STEREO;
     info->in_place_pair = CLAP_INVALID_ID;
     return true;
 }
@@ -321,7 +328,18 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proces
                 break;
             handle(plugin, e);
         }
-        if (plugin->instrument) {
+        if (plugin->wide) {
+            // 5.1: left and right as they came, 0.2 on the centre, 0.9 on the
+            // bass channel, 0.1 on the left surround; on the right surround
+            // whatever the host put into the other inputs (nothing).
+            float* const* in = process->audio_inputs[0].data32;
+            out[0][i] = in[0][i];
+            out[1][i] = in[1][i];
+            out[2][i] = 0.2f;
+            out[3][i] = 0.9f;
+            out[4][i] = 0.1f;
+            out[5][i] = in[2][i] + in[3][i] + in[4][i] + in[5][i];
+        } else if (plugin->instrument) {
             out[0][i] = 0.1f * static_cast<float>(plugin->count);
             if (plugin->pads) { // its second port carries 0.2
                 process->audio_outputs[1].data32[0][i] = 0.2f;
@@ -350,7 +368,7 @@ const void* extension(const clap_plugin_t* p, const char* id)
         return &kPorts;
     if (self(p)->pads && std::strcmp(id, CLAP_EXT_NOTE_PORTS) == 0)
         return &kNotePorts;
-    if (self(p)->instrument)
+    if (self(p)->instrument || self(p)->wide)
         return nullptr;
     if (std::strcmp(id, CLAP_EXT_PARAMS) == 0)
         return &kParams;
@@ -368,23 +386,27 @@ const void* extension(const clap_plugin_t* p, const char* id)
 void onMainThread(const clap_plugin_t*) { }
 
 // ---- factory, entry
-std::uint32_t pluginCount(const clap_plugin_factory_t*) { return 3; }
+std::uint32_t pluginCount(const clap_plugin_factory_t*) { return 4; }
 const clap_plugin_descriptor_t* descriptor(const clap_plugin_factory_t*, std::uint32_t index)
 {
-    const clap_plugin_descriptor_t* const all[] = {&kLevelDescriptor, &kKeysDescriptor, &kPadsDescriptor};
-    return index < 3 ? all[index] : nullptr;
+    const clap_plugin_descriptor_t* const all[]
+        = {&kLevelDescriptor, &kKeysDescriptor, &kPadsDescriptor, &kWideDescriptor};
+    return index < 4 ? all[index] : nullptr;
 }
 const clap_plugin_t* create(const clap_plugin_factory_t*, const clap_host_t* host, const char* id)
 {
     const bool keys = std::strcmp(id, kKeysDescriptor.id) == 0;
     const bool pads = std::strcmp(id, kPadsDescriptor.id) == 0;
-    if (!keys && !pads && std::strcmp(id, kLevelDescriptor.id) != 0)
+    const bool wide = std::strcmp(id, kWideDescriptor.id) == 0;
+    if (!keys && !pads && !wide && std::strcmp(id, kLevelDescriptor.id) != 0)
         return nullptr;
     auto* plugin = new Plugin;
     plugin->host = host;
     plugin->instrument = keys || pads;
     plugin->pads = pads;
-    plugin->clap = {pads ? &kPadsDescriptor
+    plugin->wide = wide;
+    plugin->clap = {wide ? &kWideDescriptor
+            : pads       ? &kPadsDescriptor
             : keys       ? &kKeysDescriptor
                          : &kLevelDescriptor,
         plugin, init, destroy, activate, deactivate, startProcessing, stopProcessing, reset, process,

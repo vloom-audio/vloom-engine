@@ -4,6 +4,7 @@
 
 #include "plugin/EditorRunLoop.hpp"
 #include "plugin/PluginFiles.hpp"
+#include "plugin/SpeakerFold.hpp"
 #include "pluginterfaces/base/ibstream.h"
 #include "pluginterfaces/base/ipluginbase.h"
 #include "pluginterfaces/gui/iplugview.h"
@@ -1105,13 +1106,17 @@ public:
                     && inputs_[bus].pointers.size() == 1)
                     for (std::size_t i = 0; i < frames; ++i)
                         dst[i] = 0.5f * (context.sidechain[0][i] + context.sidechain[1][i]);
-                else if (bus != 0 || ch >= 2)
+                else if (bus != 0)
                     std::fill_n(dst, frames, 0.0f);
                 else if (inputs_[bus].pointers.size() == 1)
                     for (std::size_t i = 0; i < frames; ++i)
                         dst[i] = 0.5f * (left[i] + right[i]);
+                else if (static_cast<int>(ch) == inLayout_.left)
+                    std::copy_n(left, frames, dst);
+                else if (static_cast<int>(ch) == inLayout_.right)
+                    std::copy_n(right, frames, dst);
                 else
-                    std::copy_n(ch == 0 ? left : right, frames, dst);
+                    std::fill_n(dst, frames, 0.0f); // its other speakers: the plugin fills them, not the host
             }
         for (BusBuffers& bus : outputs_)
             for (float* dst : bus.pointers)
@@ -1209,9 +1214,22 @@ public:
         const BusBuffers& out = outputs_[0];
         if (out.pointers.empty())
             return;
+        const bool add = inputs_.empty();
+        // A bus of several speakers is folded down to the stereo pair.
+        if (outLayout_.wide && static_cast<std::size_t>(outLayout_.channels) == out.pointers.size()) {
+            for (std::size_t i = 0; i < frames; ++i) {
+                const speakers::Gains sum = speakers::folded(
+                    outLayout_, [&](int ch) { return out.pointers[static_cast<std::size_t>(ch)][i]; });
+                left[i] = add ? left[i] + sum.left : sum.left;
+                if (right != left)
+                    right[i] = add ? right[i] + sum.right : sum.right;
+                else if (!add)
+                    left[i] = 0.5f * (sum.left + sum.right);
+            }
+            return;
+        }
         const float* outLeft = out.pointers[0];
         const float* outRight = out.pointers.size() > 1 ? out.pointers[1] : out.pointers[0];
-        const bool add = inputs_.empty();
         for (std::size_t i = 0; i < frames; ++i) {
             left[i] = add ? left[i] + outLeft[i] : outLeft[i];
             if (right != left)
@@ -1343,8 +1361,18 @@ private:
         };
         auto ins = arrangements(inCount, vst::kInput);
         auto outs = arrangements(outCount, vst::kOutput);
-        processor_->setBusArrangements(ins.empty() ? nullptr : ins.data(), inCount,
-            outs.empty() ? nullptr : outs.data(), outCount); // refused: what the plugin has stays
+        if (processor_->setBusArrangements(
+                ins.empty() ? nullptr : ins.data(), inCount, outs.empty() ? nullptr : outs.data(), outCount)
+            != kResultOk) {
+            // Stereo refused (a plugin for 5.1 only, a mono one): the host
+            // takes the arrangements the plugin has, and says so.
+            for (int32 i = 0; i < inCount; ++i)
+                processor_->getBusArrangement(vst::kInput, i, ins[static_cast<std::size_t>(i)]);
+            for (int32 i = 0; i < outCount; ++i)
+                processor_->getBusArrangement(vst::kOutput, i, outs[static_cast<std::size_t>(i)]);
+            processor_->setBusArrangements(
+                ins.empty() ? nullptr : ins.data(), inCount, outs.empty() ? nullptr : outs.data(), outCount);
+        }
         const auto size = [&](int32 count, vst::BusDirection direction, std::vector<BusBuffers>& buses,
                               std::vector<vst::AudioBusBuffers>& buffers) {
             buses.clear();
@@ -1355,6 +1383,8 @@ private:
                 const int channels = std::popcount(arrangement);
                 if (channels > kMaxBusChannels)
                     return false;
+                if (i == 0) // which speakers the main bus has, for the way in and the fold-down out
+                    (direction == vst::kInput ? inLayout_ : outLayout_) = layoutFor(arrangement);
                 BusBuffers bus;
                 bus.channels.assign(static_cast<std::size_t>(channels),
                     std::vector<float>(static_cast<std::size_t>(maxBlockFrames), 0.0f));
@@ -1414,6 +1444,22 @@ private:
     bool active_ = false;
     bool processing_ = false; ///< audio thread, once active
     bool hasEventInput_ = false;
+    speakers::Layout inLayout_, outLayout_; ///< the main buses' speakers, as of the last activation
+
+    /// The layout of a VST 3 speaker arrangement: its channels are its set
+    /// bits in rising order, and the first 18 bits are the speakers of
+    /// speakers::Speaker in the same order.
+    [[nodiscard]] static speakers::Layout layoutFor(vst::SpeakerArrangement arrangement) noexcept
+    {
+        std::array<speakers::Speaker, speakers::kMaxChannels> bus{};
+        std::size_t count = 0;
+        for (int bit = 0; bit < 64 && count < bus.size(); ++bit)
+            if (((arrangement >> bit) & 1u) != 0)
+                bus[count++] = bit < static_cast<int>(speakers::Speaker::Unknown)
+                    ? static_cast<speakers::Speaker>(bit)
+                    : speakers::Speaker::Unknown;
+        return speakers::layoutOf(std::span<const speakers::Speaker>(bus.data(), count));
+    }
     bool hasEventOutput_ = false;
     bool hasSidechain_ = false; ///< it has a second audio input bus that is a sidechain
     bool sidechainBus_ = false; ///< configureBuses(): input bus 1 is of the auxiliary kind

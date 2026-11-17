@@ -86,7 +86,7 @@ TEST_CASE("A .vst3 is loaded and lists its audio plugins", "[plugin][vst3]")
     auto library = vloom::Vst3Library::open(kTestVst3, &error);
     INFO(error);
     REQUIRE(library != nullptr);
-    REQUIRE(library->plugins().size() == 3); // the controller class is not a plugin
+    REQUIRE(library->plugins().size() == 4); // the controller class is not a plugin
     const auto& level = library->plugins()[0];
     CHECK(level.name == "Level");
     CHECK(level.vendor == "Vloom Tests");
@@ -343,4 +343,18 @@ TEST_CASE(
     drums->process(left.data(), right.data(), 64, {}, {}, io);
     CHECK(second[10] == Approx(0.2f));
     CHECK(secondRight[10] == Approx(0.2f));
+}
+
+TEST_CASE(
+    "A VST 3 plugin for 5.1 runs in its own layout and is folded down to stereo", "[plugin][vst3][surround]")
+{
+    // It refuses stereo: the host takes the arrangement it has.
+    auto wide = load("Wide");
+    // In: 0.5 left and right. Out of its six speakers: left and right as
+    // they came, the centre (0.2) to both and the left surround (0.1) to the
+    // left, each at -3 dB; the bass channel (0.9) is left out.
+    std::vector<float> left(64, 0.5f), right(64, 0.5f);
+    wide->process(left.data(), right.data(), 64, {});
+    CHECK(left[10] == Approx(0.5f + 0.70710678f * 0.2f + 0.70710678f * 0.1f));
+    CHECK(right[10] == Approx(0.5f + 0.70710678f * 0.2f)); // nothing of the host's went into its other inputs
 }

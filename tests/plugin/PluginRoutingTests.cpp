@@ -5,6 +5,7 @@
 // sound: a sidechain, extra outputs, the notes of a note effect, and
 // controls. With processors written for the tests, so the routing is
 // checked on its own; each plugin format has its own tests for the rest.
+#include "plugin/SpeakerFold.hpp"
 #include "support/Allocations.hpp"
 
 #include <vloom/engine/Engine.hpp>
@@ -988,4 +989,31 @@ TEST_CASE("A key held live through a note effect goes on sounding when the song 
     engine.play();
     engine.stop();
     CHECK(render(engine, 0.05)[1000 * 2] == 0.0f);
+}
+
+TEST_CASE("Speaker layouts fold down to stereo by the usual shares", "[plugin][surround]")
+{
+    using namespace vloom::speakers;
+    const Layout five = layoutOfCount(6); // L R C LFE Ls Rs
+    REQUIRE(five.wide);
+    CHECK(five.left == 0);
+    CHECK(five.right == 1);
+    const std::array<float, 6> ones{1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+    const Gains sum = folded(five, [&](int ch) { return ones[static_cast<std::size_t>(ch)]; });
+    CHECK(sum.left == Approx(1.0f + 2.0f * 0.70710678f)); // left, centre, left surround; no bass channel
+    CHECK(sum.right == Approx(sum.left));
+
+    // Speakers in another order: left and right are found where they are.
+    const std::array<Speaker, 3> odd{Speaker::Centre, Speaker::Right, Speaker::Left};
+    const Layout found = layoutOf(odd);
+    CHECK(found.wide);
+    CHECK(found.left == 2);
+    CHECK(found.right == 1);
+
+    // Not layouts to fold: stereo, mono, a count nothing is known about, speakers without a left.
+    CHECK_FALSE(layoutOfCount(2).wide);
+    CHECK_FALSE(layoutOfCount(1).wide);
+    CHECK_FALSE(layoutOfCount(11).wide);
+    const std::array<Speaker, 3> noLeft{Speaker::Centre, Speaker::Right, Speaker::Lfe};
+    CHECK_FALSE(layoutOf(noLeft).wide);
 }
