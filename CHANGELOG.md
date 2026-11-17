@@ -7,6 +7,19 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Audio input, monitoring and recording it (ADR 0016), the second half of M6:
+  - `AudioInput` captures from a microphone or an audio interface: WASAPI
+    on Windows, CoreAudio on macOS, ALSA on Linux.
+  - `Engine::pushAudioInput()` takes it in through a lock-free ring;
+    `setInputMonitor()` plays it into an insert; `inputDropouts()` counts
+    blocks it was late for.
+  - `Engine::setAudioRecording()` records it while the song plays, with
+    marks for where takes start and the song jumps;
+    `setAudioRecordLatency()` gives the device's round trip.
+    `AudioTake` writes it to a WAV file as it comes and says which stretch
+    of the file plays where in the song (`AudioTakeSegment`), each loop
+    pass and each take apart.
+  - `SpscRing`, a lock-free ring of floats.
 - MPE (ADR 0013): `NoteEvent`, `ControlEvent` and `ControlPoint` carry a
   MIDI channel, and `PluginInstance::playNote()`, `stopNote()` and
   `sendControl()` take one. CLAP, VST 3 and VST 2 plugins (bridged ones

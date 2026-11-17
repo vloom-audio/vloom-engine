@@ -8,18 +8,20 @@
 | core | `core/` | Lock-free queue, version, small utilities | — |
 | time | `time/` | PPQ, bar/beat/tick, transport clock | core |
 | dsp | `dsp/` | Sound generators and processors | core |
-| io | `io/` | Hardware audio devices (WASAPI, CoreAudio, ALSA) | core |
+| io | `io/` | Hardware audio devices, output and input (WASAPI, CoreAudio, ALSA) | core |
 | mixer | `mixer/` | Insert settings (volume, pan, effect chain, output, sends), the pan law, and `MixerGraph`: inserts in processing order with delay compensation (ADR 0007); Engine mixes the buses along it | core, dsp, plugin |
 | plugin | `plugin/` | Hosted processors behind one interface (ADR 0006): CLAP, VST 3 and VST 2 (ADR 0010) hosts, built-in processors from vloom-dsp (ADR 0008) | core, time |
 | sample | `sample/` | Decoded audio in memory: WAV reading, resampling | core |
 | sequencer | `sequencer/` | Channel rack state and step playback (built-in and plugin instruments) | core, dsp, plugin, sample, time |
+| record | `record/` | Recordings put together on the control thread: `AudioTake` writes the engine's recorded input to a file and places it in the song (ADR 0016) | engine, render |
 | render | `render/` | Offline rendering, file export | engine |
 
 Rules:
 
 - Lower modules never include higher ones (`dsp` never includes `Engine.hpp`).
-- Platform audio APIs are used only in `src/io/<Name>Backend.cpp`, one file per
-  OS behind the internal `io::AudioBackend` interface. No platform header
+- Platform audio APIs are used only in `src/io/<Name>Backend.cpp` (output) and
+  `src/io/<Name>InputBackend.cpp` (input), one file per OS behind the internal
+  `io::AudioBackend` and `io::InputBackend` interfaces. No platform header
   appears in `include/` (see [ADR 0004](adr/0004-native-audio-io.md)).
 - Each public header in `include/vloom/engine/<module>/` has its `.cpp` in
   `src/<module>/` and its tests in `tests/<module>/`.
@@ -80,4 +82,5 @@ sample-exact results across many block sizes. Rendering must be deterministic.
 6. **M4** plugin host interface, CLAP hosting ✅ (ADR 0006: `AudioProcessor`,
    insert effect chains, CLAP effects and instruments)
 7. **M5** VST3 hosting, built-in effects, sends, delay compensation ← *next*
-8. **M6** audio input and recording, MIDI input
+8. **M6** audio input and recording, MIDI input: audio input, monitoring and
+   recording ✅ (ADR 0016)

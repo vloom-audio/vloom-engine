@@ -21,9 +21,13 @@ target_sources(vloom_engine PRIVATE
 
     # io — hardware audio devices; each backend compiles only on its OS
     io/AlsaBackend.cpp
+    io/AlsaInputBackend.cpp
     io/AudioDevice.cpp
+    io/AudioInput.cpp
     io/CoreAudioBackend.cpp
+    io/CoreAudioInputBackend.cpp
     io/WasapiBackend.cpp
+    io/WasapiInputBackend.cpp
 
     # sample — decoded audio in memory: WAV reading, resampling
     sample/Resampler.cpp
@@ -46,6 +50,9 @@ target_sources(vloom_engine PRIVATE
 
     # sequencer — the channel rack: steps that trigger samples
     sequencer/StepSequencer.cpp
+
+    # record — recordings put together on the control thread (ADR 0016)
+    record/AudioTake.cpp
 
     # render — offline (faster than real time) rendering
     render/OfflineRenderer.cpp
