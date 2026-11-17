@@ -9,12 +9,14 @@
 #include "vloom/engine/dsp/Sampler.hpp"
 #include "vloom/engine/mixer/MixerGraph.hpp"
 #include "vloom/engine/mixer/MixerState.hpp"
+#include "vloom/engine/sequencer/MidiTake.hpp"
 #include "vloom/engine/sequencer/StepSequencer.hpp"
 #include "vloom/engine/time/Transport.hpp"
 
 #include <array>
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <vector>
 
@@ -172,8 +174,44 @@ public:
     /// Takes the marks of the recorded stream, oldest first; returns how many.
     std::size_t takeAudioMarks(std::span<AudioRecordMark> out) noexcept;
 
+    // ---- MIDI played live, and recording it (ADR 0015)
+    /// Live messages that can wait for the audio thread; more are refused.
+    static constexpr std::size_t kMaxLiveMidi = 1023;
+    /// Plays `message` live on channel `channel` (an index into
+    /// SequencerState::channels) with the next block, whether or not the song
+    /// plays: a MIDI keyboard (from MidiInput's callback), an on-screen one.
+    /// See StepSequencer::playLive(). While recording and the song plays, it
+    /// is recorded too. Any thread, several at once: the callers take a short
+    /// lock among themselves, never one the audio thread waits for. False if
+    /// too many wait.
+    bool playMidi(int channel, const MidiMessage& message);
+    /// Ends every note played live, on every channel (all notes off on each
+    /// MIDI channel): when a keyboard is closed or goes away with keys down.
+    /// Any thread, like playMidi(). False if the queue is full.
+    bool releaseLiveNotes();
+    /// While on and the song plays, what playMidi() plays is recorded, for
+    /// takeRecordedMidi(). Switching it on counts the loop's passes from 0.
+    bool setRecording(bool enabled);
+    /// How many frames after the engine renders a moment the player hears it
+    /// (the output device's latency, and the input's): recorded messages are
+    /// placed that much earlier in the song, and latencyFrames() earlier
+    /// still. Clamped to 0 .. kMaxRecordLatency.
+    bool setRecordLatency(int frames);
+    static constexpr int kMaxRecordLatency = 192000;
+    /// Recorded messages that can wait for takeRecordedMidi(); further ones are lost.
+    static constexpr std::size_t kMaxRecordedMidi = 4095;
+    /// Takes what was recorded since the last call into `out`, oldest first;
+    /// returns how many. Call it often (a UI timer) and feed a MidiTake.
+    /// Control thread (one reader).
+    std::size_t takeRecordedMidi(std::span<RecordedMidi> out) noexcept;
+
     // ---- status (any thread)
     [[nodiscard]] bool isPlaying() const noexcept { return playing_.load(std::memory_order_relaxed); }
+    /// True while setRecording() is on (whether or not the song plays).
+    [[nodiscard]] bool isRecording() const noexcept
+    {
+        return recordingStatus_.load(std::memory_order_relaxed);
+    }
     /// True while setAudioRecording() is on (whether or not the song plays).
     [[nodiscard]] bool isRecordingAudio() const noexcept
     {
@@ -235,7 +273,9 @@ private:
             SetStopAt,
             SetInputMonitor,
             SetAudioRecording,
-            SetAudioRecordLatency
+            SetAudioRecordLatency,
+            SetRecording,
+            SetRecordLatency
         };
         Type type;
         double value;
@@ -253,6 +293,8 @@ private:
     void monitorInput(int numFrames) noexcept;
     /// Writes this block's input to the recording, if it records.
     void recordInput(int numFrames) noexcept;
+    /// Plays the live MIDI that waits, and records it.
+    void playLiveMidi() noexcept;
     void publishStatus() noexcept;
     void applyMasterGain(float* const* out, int numChannels, int numFrames) noexcept;
     [[nodiscard]] float channelGainTarget(int channel, int numChannels) const noexcept;
@@ -362,8 +404,19 @@ private:
     std::atomic<bool> audioRecordingStatus_{false};
     std::atomic<std::uint64_t> inputDropouts_{0};
     std::atomic<std::uint64_t> recordLost_{0};
+    struct LiveMidi {
+        int channel = 0;
+        MidiMessage message;
+    };
+    std::mutex liveMutex_; ///< among the threads calling playMidi()
+    SpscQueue<LiveMidi, kMaxLiveMidi + 1> liveMidi_;
+    SpscQueue<RecordedMidi, kMaxRecordedMidi + 1> recordedMidi_;
+    bool recording_ = false; ///< audio thread
+    int recordLatency_ = 0; ///< audio thread: frames
+    std::int32_t loopPass_ = 0; ///< audio thread: loop passes since the song started
 
     std::atomic<bool> playing_{false};
+    std::atomic<bool> recordingStatus_{false};
     std::atomic<bool> previewPlaying_{false};
     std::atomic<double> position_{0.0};
     std::atomic<double> tempo_{120.0};

@@ -19,15 +19,19 @@ target_sources(vloom_engine PRIVATE
     dsp/Sampler.cpp
     dsp/Synth.cpp
 
-    # io — hardware audio devices; each backend compiles only on its OS
+    # io — hardware audio and MIDI devices; each backend compiles only on its OS
     io/AlsaBackend.cpp
     io/AlsaInputBackend.cpp
+    io/AlsaMidiBackend.cpp
     io/AudioDevice.cpp
     io/AudioInput.cpp
     io/CoreAudioBackend.cpp
     io/CoreAudioInputBackend.cpp
+    io/CoreMidiBackend.cpp
+    io/MidiInput.cpp
     io/WasapiBackend.cpp
     io/WasapiInputBackend.cpp
+    io/WinMmMidiBackend.cpp
 
     # sample — decoded audio in memory: WAV reading, resampling
     sample/Resampler.cpp
@@ -49,6 +53,7 @@ target_sources(vloom_engine PRIVATE
     mixer/MixerGraph.cpp
 
     # sequencer — the channel rack: steps that trigger samples
+    sequencer/MidiTake.cpp
     sequencer/StepSequencer.cpp
 
     # record — recordings put together on the control thread (ADR 0016)
@@ -77,12 +82,13 @@ target_link_libraries(vloom_engine PRIVATE vloom::dsp)
 
 if(WIN32)
     # WASAPI: COM (ole32) and the MMCSS "Pro Audio" thread class (avrt).
-    target_link_libraries(vloom_engine PRIVATE ole32 avrt)
+    target_link_libraries(vloom_engine PRIVATE ole32 avrt winmm)
 elseif(APPLE)
     target_link_libraries(vloom_engine PRIVATE
         "-framework CoreFoundation"
         "-framework CoreAudio"
-        "-framework AudioToolbox")
+        "-framework AudioToolbox"
+        "-framework CoreMIDI")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(vloom_engine PRIVATE ALSA::ALSA m)
 endif()

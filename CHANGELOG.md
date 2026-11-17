@@ -20,6 +20,24 @@ and the project uses [Semantic Versioning](https://semver.org/).
     of the file plays where in the song (`AudioTakeSegment`), each loop
     pass and each take apart.
   - `SpscRing`, a lock-free ring of floats.
+- MIDI input and recording (ADR 0015), the first half of M6:
+  - `MidiInput` reads a MIDI port: WinMM on Windows, CoreMIDI on macOS,
+    the ALSA sequencer on Linux. `MidiMessage` and `decodeMidi()` read
+    what it sends.
+  - `Engine::playMidi()` plays a message live on any channel, from any
+    thread: the synth, the sampler (its sample at the key) and instrument
+    plugins (with the MIDI channel, through the note effects). A note is
+    held until its note-off, whatever the song does meanwhile; all notes
+    off (controller 123 or 120), `Engine::releaseLiveNotes()` and a
+    `MidiInput` being stopped or closed end it.
+  - `Engine::setRecording()` records what is played while the song plays,
+    at the position the player heard it (`setRecordLatency()` and the
+    plugins' latency taken off; loop passes counted).
+    `takeRecordedMidi()` hands it over; `MidiTake`, `quantize()`,
+    `patternNotes()` and `patternControls()` turn it into a pattern's notes
+    and controls.
+  - `Synth` and `Sampler` gain `releaseExactly()` and `kLiveFirst`, and
+    `stopAll(keepLive)`.
 - Surround plugins in the stereo mixer (ADR 0014): a VST 3 or CLAP plugin
   whose main bus is wider than stereo runs in its own layout. The host's
   left and right go to its left and right speakers, and its speakers are

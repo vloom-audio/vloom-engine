@@ -3,6 +3,7 @@
 #pragma once
 
 #include "vloom/engine/core/SnapshotExchange.hpp"
+#include "vloom/engine/io/MidiMessage.hpp"
 #include "vloom/engine/plugin/PluginInstance.hpp"
 #include "vloom/engine/sequencer/SequencerState.hpp"
 
@@ -109,6 +110,17 @@ public:
     void mix(int numFrames, float* const* buses, bool* used, const TransportInfo& transport = {}) noexcept;
     /// Fades out every note and audio clip (transport stop).
     void stopAll() noexcept;
+    /// Plays `event` live on channel `channel` of the current state (ADR
+    /// 0015), from the next render() on: a note is held until its note-off
+    /// comes, whatever the song does meanwhile (a stop or a loop leaves it).
+    /// The channel's instrument plays it, muted or not: the synth, the
+    /// sampler (its sample at the key, from rootKey), or the instrument
+    /// plugin with its MIDI channel, through the channel's note effects.
+    /// Pitch bend, controllers and pressure go to an instrument plugin only.
+    /// All notes off and all sound off (controllers 123 and 120) end every
+    /// note played live on that MIDI channel, whatever the instrument; with
+    /// `channel` -1 on every channel of the rack. Out of range: nothing.
+    void playLive(int channel, const MidiEvent& event) noexcept;
 
 private:
     [[nodiscard]] bool inCurrent(const ChannelVoices* voices) const noexcept;
@@ -140,6 +152,7 @@ private:
     std::array<NoteEvent, PluginInstance::kMaxNotes> effectIn_{};
     std::array<std::array<NoteEvent, PluginInstance::kMaxNotes>, 2> stageNotes_{};
     std::array<NoteEvent, PluginInstance::kMaxNotes> mergedNotes_{}; ///< with another channel's
+    std::array<NoteEvent, PluginInstance::kMaxNotes> withLive_{}; ///< the live notes, then the song's
     /// Plays one step of `channel`: its sample, or on a synth or plugin its
     /// root key until tick `end`.
     void playStep(const ChannelState& channel, std::int64_t end) const noexcept;
