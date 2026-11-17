@@ -36,7 +36,9 @@ reused by other Vloom Audio tools.
   comes back through atomics.
 - **Native audio I/O, no third-party audio library**: WASAPI on Windows,
   CoreAudio on macOS, ALSA on Linux (PulseAudio and PipeWire through ALSA).
-  See [ADR 0004](docs/adr/0004-native-audio-io.md). MIDI input the same way:
+  See [ADR 0004](docs/adr/0004-native-audio-io.md). Input the same way, heard
+  through an insert and recorded with its latency taken off
+  ([ADR 0016](docs/adr/0016-audio-input-and-recording.md)). MIDI input too:
   WinMM, CoreMIDI and the ALSA sequencer, played live on any channel and
   recorded ([ADR 0015](docs/adr/0015-midi-input-and-recording.md)).
 - **Offline rendering** to 32-bit float WAV, used by the tests and by
@@ -158,7 +160,7 @@ vloom-engine/
 | **M3** | Arrangement (patterns on a timeline), song mode, loop region, WAV export | *Done* |
 | **M4** | Plugin host interface, CLAP hosting (effects and instruments) | *Done* |
 | **M5** | VST3 hosting, built-in effects, sends, delay compensation | *Next* |
-| **M6** | Audio input and recording, MIDI input | *In progress* (MIDI done) |
+| **M6** | Audio input and recording, MIDI input | *Done* |
 
 Details: [docs/architecture.md#roadmap](docs/architecture.md#roadmap); the
 whole plan, engine and app, is in VloomDAW's

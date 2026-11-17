@@ -25,7 +25,7 @@ Engine::Engine()
     : unityMixer_(buildMixerGraph(nullptr, nullptr))
     , busMemory_(static_cast<std::size_t>(2 * (kMaxInserts + 1) * kMaxBlockFrames), 0.0f)
     , sideMemory_(static_cast<std::size_t>(2 * (kMaxInserts + 1) * kMaxBlockFrames), 0.0f)
-    , scratchMemory_(static_cast<std::size_t>(7 * kMaxBlockFrames), 0.0f)
+    , scratchMemory_(static_cast<std::size_t>(11 * kMaxBlockFrames), 0.0f)
     , clickLine_(kMaxLatencyFrames, 1)
 {
     for (std::size_t i = 0; i < buses_.size(); ++i) {
@@ -39,6 +39,9 @@ Engine::Engine()
     routed_ = {scratch(2), scratch(3)};
     click_ = scratch(4);
     side_ = {scratch(5), scratch(6)};
+    input_ = {scratch(7), scratch(8)};
+    inputInterleaved_ = scratch(9); // and 10
+    pushScratch_.assign(static_cast<std::size_t>(2 * kMaxBlockFrames), 0.0f);
 }
 
 void Engine::prepare(double sampleRate, int /*maxBlockSize*/)
@@ -118,6 +121,64 @@ bool Engine::setStopAt(double ticks)
 
 bool Engine::play() { return send(Command::Type::Play); }
 
+void Engine::pushAudioInput(const float* left, const float* right, int numFrames) noexcept
+{
+    if (left == nullptr || numFrames <= 0)
+        return;
+    if (right == nullptr)
+        right = left;
+    inputComing_.store(true, std::memory_order_relaxed);
+    for (int done = 0; done < numFrames;) {
+        const int block = std::min(numFrames - done, kMaxBlockFrames);
+        const auto frames = static_cast<std::size_t>(
+            std::min<std::size_t>(static_cast<std::size_t>(block), inputRing_.space() / 2));
+        for (std::size_t i = 0; i < frames; ++i) {
+            const float l = left[static_cast<std::size_t>(done) + i];
+            const float r = right[static_cast<std::size_t>(done) + i];
+            pushScratch_[2 * i] = std::isfinite(l) ? l : 0.0f;
+            pushScratch_[2 * i + 1] = std::isfinite(r) ? r : 0.0f;
+        }
+        inputRing_.write(pushScratch_.data(), 2 * frames);
+        done += block;
+    }
+}
+
+bool Engine::setInputMonitor(int insert, float gain)
+{
+    const int to = insert >= 0 && insert <= kMaxInserts ? insert : -1;
+    const float level = std::isfinite(gain) ? std::clamp(gain, 0.0f, 4.0f) : 0.0f;
+    return send(Command::Type::SetInputMonitor, static_cast<double>(to), static_cast<double>(level));
+}
+
+bool Engine::setAudioRecording(bool enabled)
+{
+    if (!send(Command::Type::SetAudioRecording, enabled ? 1.0 : 0.0))
+        return false;
+    audioRecordingStatus_.store(enabled, std::memory_order_relaxed);
+    return true;
+}
+
+bool Engine::setAudioRecordLatency(int frames)
+{
+    return send(Command::Type::SetAudioRecordLatency,
+        static_cast<double>(std::clamp(frames, 0, kMaxRecordLatencyFrames)));
+}
+
+std::size_t Engine::takeRecordedAudio(std::span<float> out) noexcept
+{
+    const std::size_t frames = std::min(out.size() / 2, recordRing_.available() / 2);
+    recordRing_.read(out.data(), 2 * frames);
+    return frames;
+}
+
+std::size_t Engine::takeAudioMarks(std::span<AudioRecordMark> out) noexcept
+{
+    std::size_t taken = 0;
+    while (taken < out.size() && audioMarks_.pop(out[taken]))
+        ++taken;
+    return taken;
+}
+
 bool Engine::playMidi(int channel, const MidiMessage& message)
 {
     const std::lock_guard lock(liveMutex_);
@@ -154,6 +215,91 @@ std::size_t Engine::takeRecordedMidi(std::span<RecordedMidi> out) noexcept
     while (taken < out.size() && recordedMidi_.pop(out[taken]))
         ++taken;
     return taken;
+}
+
+void Engine::readInput(int numFrames) noexcept
+{
+    const auto frames = static_cast<std::size_t>(numFrames);
+    // More than about four blocks waiting: the input's clock runs ahead (or
+    // the engine was not running). Drop the oldest so the lag stays small.
+    const std::size_t keep = 2 * (4 * frames + 256);
+    const std::size_t waiting = inputRing_.available();
+    if (waiting > keep)
+        inputRing_.skip((waiting - keep) & ~std::size_t{1});
+    const std::size_t got = inputRing_.read(inputInterleaved_, 2 * frames) / 2;
+    if (got < frames && inputComing_.load(std::memory_order_relaxed))
+        inputDropouts_.fetch_add(1, std::memory_order_relaxed);
+    for (std::size_t i = 0; i < got; ++i) {
+        input_[0][i] = inputInterleaved_[2 * i];
+        input_[1][i] = inputInterleaved_[2 * i + 1];
+    }
+    std::fill(input_[0] + got, input_[0] + frames, 0.0f);
+    std::fill(input_[1] + got, input_[1] + frames, 0.0f);
+    inputWaiting_ = static_cast<int>(inputRing_.available() / 2);
+}
+
+void Engine::monitorInput(int numFrames) noexcept
+{
+    // Adds the input into `insert`'s bus, its gain ramped from `from` to `to`.
+    const auto feed = [&](int insert, float from, float to) {
+        const float step = (to - from) / static_cast<float>(numFrames);
+        float* left = buses_[static_cast<std::size_t>(2 * insert)];
+        float* right = buses_[static_cast<std::size_t>(2 * insert + 1)];
+        for (int i = 0; i < numFrames; ++i) {
+            const float g = from + step * static_cast<float>(i + 1);
+            left[i] += input_[0][i] * g;
+            right[i] += input_[1][i] * g;
+        }
+        busUsed_[static_cast<std::size_t>(insert)] = true;
+    };
+    // Switched off or moved: the insert it fed fades out over this block.
+    if (monitorActive_ >= 0 && monitorActive_ != monitorInsert_) {
+        if (monitorApplied_ > 0.0f)
+            feed(monitorActive_, monitorApplied_, 0.0f);
+        monitorActive_ = -1;
+        monitorApplied_ = 0.0f;
+    }
+    if (monitorInsert_ < 0 || monitorInsert_ > kMaxInserts)
+        return;
+    feed(monitorInsert_, monitorApplied_, monitorGain_);
+    monitorActive_ = monitorInsert_;
+    monitorApplied_ = monitorGain_;
+}
+
+void Engine::recordInput(int numFrames) noexcept
+{
+    if (!audioBlockRolling_ || !audioRecording_) {
+        audioTake_ = false;
+        audioStartPending_ = false;
+        return;
+    }
+    const auto frames = static_cast<std::size_t>(numFrames);
+    if (recordRing_.space() < 2 * frames) {
+        // The reader is behind: this block is lost; the next one that fits
+        // is marked where it is in the song.
+        recordLost_.fetch_add(frames, std::memory_order_relaxed);
+        audioResync_ = true;
+        return;
+    }
+    if (audioStartPending_) {
+        // The take's first block that reaches the reader: where it starts.
+        const int shift = latency_.load(std::memory_order_relaxed) + audioRecordLatency_ + inputWaiting_;
+        audioMarks_.push(AudioRecordMark{AudioRecordMark::Kind::Start, recordedFrames_, audioBlockTicks_,
+            transport_.ticksPerSample(), audioPass_, shift});
+        audioTicksPerFrame_ = transport_.ticksPerSample();
+        audioStartPending_ = false;
+        audioResync_ = false;
+    } else if (audioResync_) {
+        audioMarks_.push(AudioRecordMark{AudioRecordMark::Kind::Jump, recordedFrames_, audioBlockTicks_,
+            transport_.ticksPerSample(), audioPass_, 0});
+        audioResync_ = false;
+    }
+    for (std::size_t i = 0; i < frames; ++i) {
+        inputInterleaved_[2 * i] = input_[0][i];
+        inputInterleaved_[2 * i + 1] = input_[1][i];
+    }
+    recordRing_.write(inputInterleaved_, 2 * frames);
+    recordedFrames_ += numFrames;
 }
 
 void Engine::playLiveMidi() noexcept
@@ -349,6 +495,17 @@ void Engine::applyCommands() noexcept
         case Command::Type::SetStopAt:
             stopAt_ = cmd.value;
             break;
+        case Command::Type::SetInputMonitor:
+            monitorInsert_ = static_cast<int>(cmd.value);
+            monitorGain_ = static_cast<float>(cmd.value2);
+            break;
+        case Command::Type::SetAudioRecording:
+            audioRecording_ = cmd.value != 0.0;
+            break;
+        case Command::Type::SetAudioRecordLatency:
+            audioRecordLatency_ = static_cast<int>(cmd.value);
+            break;
+
         case Command::Type::SetRecording:
             if (cmd.value != 0.0 && !recording_)
                 loopPass_ = 0;
@@ -819,6 +976,27 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
     sequencer_.beginBlock();
     if (stopVoices_)
         sequencer_.stopAll();
+    readInput(numFrames);
+
+    // Recording: a take starts when the song plays and it records; a jump
+    // of the position meanwhile (a locate) is marked.
+    audioBlockRolling_ = transport_.isPlaying() && std::isfinite(transport_.positionTicks());
+    audioBlockTicks_ = audioBlockRolling_ ? transport_.positionTicks() : 0.0;
+    if (audioBlockRolling_ && audioRecording_) {
+        if (!audioTake_) {
+            audioTake_ = true;
+            audioPass_ = 0;
+            audioResync_ = false;
+            audioStartPending_ = true; // marked with the first block that is written
+        } else if ((std::abs(audioBlockTicks_ - audioExpected_) > 1e-6
+                       || transport_.ticksPerSample() != audioTicksPerFrame_)
+            && !audioResync_ && !audioStartPending_) {
+            // A locate, or a new tempo: from here on frames are other ticks.
+            audioMarks_.push(AudioRecordMark{AudioRecordMark::Kind::Jump, recordedFrames_, audioBlockTicks_,
+                transport_.ticksPerSample(), audioPass_, 0});
+            audioTicksPerFrame_ = transport_.ticksPerSample();
+        }
+    }
     playLiveMidi();
 
     for (int ch = 0; ch < numChannels; ++ch)
@@ -883,12 +1061,22 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
             // expectedTicks_ is the loop end, the position now the loop start:
             // the next span sees a jump.
             transport_.locate(loopStart_);
+            if (audioBlockRolling_ && audioRecording_ && audioTake_ && !audioResync_ && !audioStartPending_) {
+                ++audioPass_;
+                audioMarks_.push(AudioRecordMark{AudioRecordMark::Kind::Jump, recordedFrames_ + done,
+                    loopStart_, transport_.ticksPerSample(), audioPass_, 0});
+            } else if (audioTake_) {
+                ++audioPass_;
+            }
             ++loopPass_;
         }
     }
 
     sequencer_.mix(numFrames, buses_.data(), busUsed_.data(), blockTransport);
+    monitorInput(numFrames);
     mixBuses(out, numChannels, numFrames, blockTransport);
+    recordInput(numFrames);
+    audioExpected_ = transport_.positionTicks();
     sequencer_.endBlock();
     applyMasterGain(out, numChannels, numFrames);
     sanitizeOutput(out, numChannels, numFrames);

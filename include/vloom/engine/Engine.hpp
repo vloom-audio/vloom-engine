@@ -3,6 +3,7 @@
 #pragma once
 
 #include "vloom/engine/core/SpscQueue.hpp"
+#include "vloom/engine/core/SpscRing.hpp"
 #include "vloom/engine/dsp/DelayLine.hpp"
 #include "vloom/engine/dsp/Metronome.hpp"
 #include "vloom/engine/dsp/Sampler.hpp"
@@ -20,6 +21,30 @@
 #include <vector>
 
 namespace vloom {
+
+/// Where recorded audio (Engine::takeRecordedAudio()) sits in the song
+/// (ADR 0016). The frames recorded form one stream counted from the first
+/// recording; a mark says what the engine's position was at one of them.
+struct AudioRecordMark {
+    enum class Kind : std::uint8_t {
+        /// Recording began here (the song started, or recording was
+        /// switched on while it played): a new take.
+        Start,
+        /// The song jumped here (a loop going back, a locate, recording
+        /// going on after frames were lost), or its tempo changed.
+        Jump,
+    };
+    Kind kind = Kind::Start;
+    std::int64_t frame = 0; ///< in the recorded stream
+    double ticks = 0.0; ///< the engine's position at that frame
+    double ticksPerFrame = 0.0; ///< the tempo then
+    std::int32_t pass = 0; ///< loop passes since the take started
+    /// Start only: frames from when the engine renders a moment to when its
+    /// sound, played along with, comes back in: the device's round trip
+    /// (Engine::setAudioRecordLatency()), the plugins' latency and the input
+    /// waiting in the engine. The audio is that much behind the song.
+    std::int32_t shiftFrames = 0;
+};
 
 /// The audio engine.
 ///
@@ -117,6 +142,38 @@ public:
     /// (stop()) silences it too.
     void previewSample(std::shared_ptr<const SampleBuffer> sample, float gain = 1.0f);
 
+    // ---- audio input, monitoring and recording it (ADR 0016)
+    /// Input frames that can wait for the audio thread (1.4 s at 48 kHz).
+    static constexpr std::size_t kInputRingFrames = 65536;
+    /// Hands the engine `numFrames` of input at the engine's rate: `left`,
+    /// and `right` or null for a mono input. From one thread: the input's
+    /// (AudioInput's callback). Real-time safe. Input that does not fit is
+    /// dropped. The audio thread takes one block of it per block it
+    /// renders; it keeps no more than about four blocks waiting, dropping
+    /// the oldest, so a fast input clock cannot make it lag more and more.
+    void pushAudioInput(const float* left, const float* right, int numFrames) noexcept;
+    /// Plays the input into mixer insert `insert` (0 = the master; -1 or
+    /// out of range = not at all) at linear `gain` (0 .. 4; changes ramp):
+    /// hearing what is being played or recorded. It goes through the insert
+    /// like a channel's sound, so it is as late as the plugins there make it.
+    bool setInputMonitor(int insert, float gain = 1.0f);
+    /// While on and the song plays, the input is recorded, for
+    /// takeRecordedAudio() and takeAudioMarks() (AudioTake does both).
+    bool setAudioRecording(bool enabled);
+    /// The device's round trip in frames: from rendering a moment to its
+    /// sound, played along with, coming back as input (the output's latency
+    /// plus the input's). Clamped to 0 .. kMaxRecordLatencyFrames.
+    bool setAudioRecordLatency(int frames);
+    static constexpr int kMaxRecordLatencyFrames = 192000;
+    /// Recorded frames that can wait (10.9 s at 48 kHz); when the reader
+    /// falls further behind, blocks are lost (recordedAudioLost()).
+    static constexpr std::size_t kRecordRingFrames = 524288;
+    /// Takes up to out.size() / 2 recorded frames, interleaved stereo,
+    /// oldest first; returns how many frames. Control thread (one reader).
+    std::size_t takeRecordedAudio(std::span<float> out) noexcept;
+    /// Takes the marks of the recorded stream, oldest first; returns how many.
+    std::size_t takeAudioMarks(std::span<AudioRecordMark> out) noexcept;
+
     // ---- MIDI played live, and recording it (ADR 0015)
     /// Live messages that can wait for the audio thread; more are refused.
     static constexpr std::size_t kMaxLiveMidi = 1023;
@@ -154,6 +211,22 @@ public:
     [[nodiscard]] bool isRecording() const noexcept
     {
         return recordingStatus_.load(std::memory_order_relaxed);
+    }
+    /// True while setAudioRecording() is on (whether or not the song plays).
+    [[nodiscard]] bool isRecordingAudio() const noexcept
+    {
+        return audioRecordingStatus_.load(std::memory_order_relaxed);
+    }
+    /// Blocks that found too little input waiting since the input started
+    /// coming (the input's clock is slower, or it stalled).
+    [[nodiscard]] std::uint64_t inputDropouts() const noexcept
+    {
+        return inputDropouts_.load(std::memory_order_relaxed);
+    }
+    /// Recorded frames lost because they were not taken in time.
+    [[nodiscard]] std::uint64_t recordedAudioLost() const noexcept
+    {
+        return recordLost_.load(std::memory_order_relaxed);
     }
     /// True while a preview (previewSample()) is sounding, its fade included.
     [[nodiscard]] bool isPreviewPlaying() const noexcept
@@ -198,6 +271,9 @@ private:
             SetMasterPitch,
             SetLoop,
             SetStopAt,
+            SetInputMonitor,
+            SetAudioRecording,
+            SetAudioRecordLatency,
             SetRecording,
             SetRecordLatency
         };
@@ -211,6 +287,12 @@ private:
     /// the block, the transport standing at spanStart; renders that span.
     void playSpan(int spanStart, int spanFrames) noexcept;
     void applyCommands() noexcept;
+    /// Takes this block's input from the ring into input_.
+    void readInput(int numFrames) noexcept;
+    /// Adds the input into the monitored insert's bus.
+    void monitorInput(int numFrames) noexcept;
+    /// Writes this block's input to the recording, if it records.
+    void recordInput(int numFrames) noexcept;
     /// Plays the live MIDI that waits, and records it.
     void playLiveMidi() noexcept;
     void publishStatus() noexcept;
@@ -295,6 +377,33 @@ private:
     std::array<float, 8> channelGain_{1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
     float smoothedLoad_ = 0.0f; ///< audio thread
 
+    // Audio input (ADR 0016).
+    SpscRing inputRing_{2 * kInputRingFrames}; ///< interleaved stereo, input thread -> audio thread
+    std::vector<float> pushScratch_; ///< input thread: one block interleaved
+    std::atomic<bool> inputComing_{false}; ///< the input thread has pushed something
+    std::array<float*, 2> input_{}; ///< audio thread: this block's input, kMaxBlockFrames each
+    float* inputInterleaved_ = nullptr; ///< audio thread: 2 * kMaxBlockFrames
+    int inputWaiting_ = 0; ///< audio thread: frames left in the ring after this block's
+    int monitorInsert_ = -1; ///< audio thread
+    int monitorActive_ = -1; ///< audio thread: the insert the input went into last block
+    float monitorGain_ = 1.0f; ///< audio thread: the target
+    float monitorApplied_ = 0.0f; ///< audio thread: where the last block's ramp ended
+    SpscRing recordRing_{2 * kRecordRingFrames}; ///< interleaved stereo, audio thread -> control thread
+    SpscQueue<AudioRecordMark, 1024> audioMarks_;
+    bool audioRecording_ = false; ///< audio thread
+    bool audioTake_ = false; ///< audio thread: a take is under way (the song plays and it records)
+    bool audioResync_ = false; ///< audio thread: frames were lost, mark where the next ones are
+    bool audioStartPending_ = false; ///< audio thread: a take started; no block of it written yet
+    int audioRecordLatency_ = 0; ///< audio thread: frames
+    std::int64_t recordedFrames_ = 0; ///< audio thread: frames in the recorded stream so far
+    std::int32_t audioPass_ = 0; ///< audio thread: loop passes in this take
+    double audioExpected_ = 0.0; ///< audio thread: where the position should be at the next block
+    double audioBlockTicks_ = 0.0; ///< audio thread: the position at this block's start
+    double audioTicksPerFrame_ = 0.0; ///< audio thread: the tempo the last mark was made at
+    bool audioBlockRolling_ = false; ///< audio thread: the song played at this block's start
+    std::atomic<bool> audioRecordingStatus_{false};
+    std::atomic<std::uint64_t> inputDropouts_{0};
+    std::atomic<std::uint64_t> recordLost_{0};
     struct LiveMidi {
         int channel = 0;
         MidiMessage message;
