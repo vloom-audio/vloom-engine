@@ -365,6 +365,13 @@ void StepSequencer::playNote(const ChannelState& channel, const Note& note, std:
 
 void StepSequencer::playLive(int index, const MidiEvent& event) noexcept
 {
+    const bool allOff
+        = event.kind == MidiEvent::Kind::Controller && (event.number == 123 || event.number == 120);
+    if (current_ != nullptr && index == -1 && allOff) {
+        for (std::size_t c = 0; c < current_->channels.size(); ++c)
+            playLive(static_cast<int>(c), event);
+        return;
+    }
     if (current_ == nullptr || index < 0 || static_cast<std::size_t>(index) >= current_->channels.size()
         || event.kind == MidiEvent::Kind::None)
         return;
@@ -378,9 +385,23 @@ void StepSequencer::playLive(int index, const MidiEvent& event) noexcept
         return;
     const int midiChannel = std::clamp(event.channel, 0, 15);
     const auto velocity = std::clamp(event.value, 0.0f, 1.0f);
+    if (allOff) {
+        // The built-ins' live notes on this MIDI channel, whichever plays now.
+        const std::int64_t first = Sampler::kLiveFirst + static_cast<std::int64_t>(midiChannel) * 128;
+        voices->synth.releaseBetween(first, first + 127);
+        voices->sampler.releaseBetween(first, first + 127);
+    }
     if (channel.instrument == Instrument::Plugin) {
         if (channel.plugin == nullptr)
             return;
+        // All notes off: a note-off for each key the plugin holds on the
+        // channel too, for a plugin that ignores the controller.
+        if (allOff)
+            for (int key = 0; key < 128; ++key)
+                if (((voices->madeHeld[static_cast<std::size_t>(key)] >> midiChannel) & 1u) != 0
+                    && voices->liveCount < voices->live.size())
+                    voices->live[voices->liveCount++] = NoteEvent{0, NoteEvent::Type::Off,
+                        static_cast<std::int16_t>(key), 0.0f, static_cast<std::int16_t>(midiChannel)};
         if (on || off) {
             if (voices->liveCount < voices->live.size())
                 voices->live[voices->liveCount++] = NoteEvent{0,

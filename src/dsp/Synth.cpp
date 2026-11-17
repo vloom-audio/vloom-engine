@@ -254,10 +254,13 @@ void Synth::releaseHeld() noexcept
         }
 }
 
-void Synth::releaseExactly(std::int64_t at) noexcept
+void Synth::releaseExactly(std::int64_t at) noexcept { releaseBetween(at, at); }
+
+void Synth::releaseBetween(std::int64_t first, std::int64_t last) noexcept
 {
     for (Voice& v : voices_)
-        if (v.stage != Stage::Off && v.stage != Stage::Release && !v.fading && v.releaseAt == at) {
+        if (v.stage != Stage::Off && v.stage != Stage::Release && !v.fading && v.releaseAt >= first
+            && v.releaseAt <= last) {
             v.stage = Stage::Release;
             v.releaseStep = 0.0f;
         }

@@ -48,6 +48,12 @@ Three things are needed:
      effects; pitch bend, controllers and pressure go with the song's
      controls, before them.
    - A muted channel plays them too: the player hears what they play.
+   - **All notes off** (controller 123, and all sound off, 120) ends every
+     live note on its MIDI channel, whatever the instrument; an instrument
+     plugin also gets a note-off for each key it holds there.
+     `Engine::releaseLiveNotes()` sends it on every MIDI channel to every
+     channel of the rack, and a `MidiInput` that is stopped or closed
+     passes it to its callback last, so no key is left sounding.
 3. **Recording happens on the audio thread, putting the take together
    on the control thread.** While `setRecording(true)` is on and the song
    plays, each live message goes into a second queue with the song

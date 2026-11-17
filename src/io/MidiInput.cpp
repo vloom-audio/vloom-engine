@@ -94,6 +94,15 @@ void MidiInput::stop()
 {
     {
         const std::lock_guard lock(impl_->mutex);
+        if (impl_->running && impl_->callback) {
+            // Keys still down would otherwise sound on: let go of them all.
+            for (int channel = 0; channel < 16; ++channel) {
+                try {
+                    impl_->callback(MidiMessage{static_cast<std::uint8_t>(0xB0 | channel), 123, 0});
+                } catch (...) {
+                }
+            }
+        }
         impl_->running = false;
     }
     if (impl_->backend != nullptr)

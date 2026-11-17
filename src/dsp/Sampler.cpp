@@ -72,10 +72,12 @@ void Sampler::release(std::int64_t upTo) noexcept
 
 void Sampler::releaseHeld() noexcept { release(kLiveFirst - 1); }
 
-void Sampler::releaseExactly(std::int64_t at) noexcept
+void Sampler::releaseExactly(std::int64_t at) noexcept { releaseBetween(at, at); }
+
+void Sampler::releaseBetween(std::int64_t first, std::int64_t last) noexcept
 {
     for (Voice& v : voices_)
-        if (v.sample != nullptr && !v.fading && v.releaseAt == at)
+        if (v.sample != nullptr && !v.fading && v.releaseAt >= first && v.releaseAt <= last)
             startFade(v, kReleaseFrames);
 }
 

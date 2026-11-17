@@ -124,6 +124,16 @@ bool Engine::playMidi(int channel, const MidiMessage& message)
     return liveMidi_.push(LiveMidi{channel, message});
 }
 
+bool Engine::releaseLiveNotes()
+{
+    const std::lock_guard lock(liveMutex_);
+    bool all = true;
+    for (int midiChannel = 0; midiChannel < 16; ++midiChannel)
+        all = liveMidi_.push(LiveMidi{-1, MidiMessage{static_cast<std::uint8_t>(0xB0 | midiChannel), 123, 0}})
+            && all;
+    return all;
+}
+
 bool Engine::setRecording(bool enabled)
 {
     if (!send(Command::Type::SetRecording, enabled ? 1.0 : 0.0))
@@ -168,7 +178,7 @@ void Engine::playLiveMidi() noexcept
     LiveMidi live{};
     while (liveMidi_.pop(live)) {
         sequencer_.playLive(live.channel, decodeMidi(live.message));
-        if (record)
+        if (record && live.channel >= 0)
             recordedMidi_.push(RecordedMidi{heard, pass, live.channel, live.message});
     }
 }

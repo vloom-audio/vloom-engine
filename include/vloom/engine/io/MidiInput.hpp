@@ -21,9 +21,13 @@ struct MidiInputInfo {
 ///
 /// Open one MidiInput per port. The callback runs on a thread of the OS's
 /// (Windows, macOS) or of the input's own (Linux), one message at a time;
-/// keep it short (Engine::playMidi() is made for it). After stop() or close()
-/// returns it is not called again. System exclusive messages are not
-/// passed on, nor clock and other real-time bytes.
+/// keep it short (Engine::playMidi() is made for it). When a running input
+/// is stopped or closed, the callback gets all notes off (controller 123) on
+/// each MIDI channel last, so whatever it played lets go; after stop() or
+/// close() returns it is not called again. System exclusive messages are
+/// not passed on, nor clock and other real-time bytes. An input that goes
+/// away (unplugged) without being stopped sends nothing:
+/// Engine::releaseLiveNotes() is for that.
 ///
 /// Opening a port makes no sound and claims nothing another program needs,
 /// except on Windows, where WinMM gives a port to one program at a time.

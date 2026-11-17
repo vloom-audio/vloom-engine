@@ -94,6 +94,9 @@ public:
     void releaseHeld() noexcept;
     /// Releases the held notes whose releaseAt is exactly `at` (a live note's key let go).
     void releaseExactly(std::int64_t at) noexcept;
+    /// Releases the held notes whose releaseAt is in [first, last] (every
+    /// live note of one MIDI channel: all notes off).
+    void releaseBetween(std::int64_t first, std::int64_t last) noexcept;
 
     /// Adds every voice into `out[ch][startFrame .. startFrame + numFrames)`.
     /// Mono samples go to both of the first two channels; channels after the

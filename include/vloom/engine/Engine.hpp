@@ -128,6 +128,10 @@ public:
     /// lock among themselves, never one the audio thread waits for. False if
     /// too many wait.
     bool playMidi(int channel, const MidiMessage& message);
+    /// Ends every note played live, on every channel (all notes off on each
+    /// MIDI channel): when a keyboard is closed or goes away with keys down.
+    /// Any thread, like playMidi(). False if the queue is full.
+    bool releaseLiveNotes();
     /// While on and the song plays, what playMidi() plays is recorded, for
     /// takeRecordedMidi(). Switching it on counts the loop's passes from 0.
     bool setRecording(bool enabled);

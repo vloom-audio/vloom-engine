@@ -949,3 +949,20 @@ TEST_CASE("Playing and recording live MIDI does not allocate", "[plugin][sequenc
     CHECK(onAudioThread == 0);
     CHECK(taken == 800);
 }
+
+TEST_CASE("All notes off reaches an instrument plugin as note-offs too", "[plugin][sequencer][routing][midi]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    auto poly = make<Poly>(); // ignores controllers: only note-offs end its notes
+    auto state = std::make_unique<vloom::SequencerState>();
+    state->channels.push_back(channel(poly, 0));
+    engine.setSequencerState(std::move(state));
+    REQUIRE(engine.playMidi(0, {0x93, 64, 127}));
+    REQUIRE(engine.playMidi(0, {0x95, 65, 127}));
+    CHECK(render(engine, 0.05)[1000 * 2] == Approx(0.2f));
+    REQUIRE(engine.playMidi(0, {0xB3, 123, 0})); // channel 3 only
+    CHECK(render(engine, 0.05)[1000 * 2] == Approx(0.1f));
+    REQUIRE(engine.releaseLiveNotes());
+    CHECK(render(engine, 0.05)[1000 * 2] == 0.0f);
+}

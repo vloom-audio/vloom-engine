@@ -117,7 +117,9 @@ public:
     /// sampler (its sample at the key, from rootKey), or the instrument
     /// plugin with its MIDI channel, through the channel's note effects.
     /// Pitch bend, controllers and pressure go to an instrument plugin only.
-    /// Out of range: nothing.
+    /// All notes off and all sound off (controllers 123 and 120) end every
+    /// note played live on that MIDI channel, whatever the instrument; with
+    /// `channel` -1 on every channel of the rack. Out of range: nothing.
     void playLive(int channel, const MidiEvent& event) noexcept;
 
 private:

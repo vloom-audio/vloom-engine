@@ -334,3 +334,36 @@ TEST_CASE("A take ends held notes, splits a key played twice, and goes into a pa
     CHECK(take.notes().empty());
     CHECK(take.controls().empty());
 }
+
+TEST_CASE("All notes off, and releaseLiveNotes(), end the notes played live", "[sequencer][midi]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    auto sample = std::make_shared<vloom::SampleBuffer>(1, 96000, kRate);
+    for (int i = 0; i < 96000; ++i)
+        sample->channel(0)[i] = 0.5f;
+    auto state = synthRack();
+    vloom::ChannelState sampler;
+    sampler.sample = sample;
+    sampler.voices = std::make_shared<vloom::ChannelVoices>();
+    state->channels.push_back(sampler);
+    engine.setSequencerState(std::move(state));
+
+    // All notes off on MIDI channel 2 ends what is down there, not on channel 0.
+    REQUIRE(engine.playMidi(0, on(60, 127, 2)));
+    REQUIRE(engine.playMidi(0, on(64, 127, 0)));
+    render(engine, 0.1);
+    REQUIRE(engine.playMidi(0, {0xB2, 123, 0}));
+    REQUIRE(engine.playMidi(0, off(64, 0)));
+    REQUIRE(engine.playMidi(0, on(64, 127, 0)));
+    render(engine, 0.5);
+    REQUIRE(engine.playMidi(0, {0xB0, 120, 0})); // all sound off, on channel 0
+    CHECK(loudest(render(engine, 0.5), 20000) == 0.0f);
+
+    // A keyboard gone with keys down on both channels: the engine lets go.
+    REQUIRE(engine.playMidi(0, on(67)));
+    REQUIRE(engine.playMidi(1, on(60, 127, 9)));
+    CHECK(loudest(render(engine, 0.1)) > 0.05f);
+    REQUIRE(engine.releaseLiveNotes());
+    CHECK(loudest(render(engine, 0.5), 20000) == 0.0f);
+}

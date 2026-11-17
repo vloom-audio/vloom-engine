@@ -14,7 +14,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
   - `Engine::playMidi()` plays a message live on any channel, from any
     thread: the synth, the sampler (its sample at the key) and instrument
     plugins (with the MIDI channel, through the note effects). A note is
-    held until its note-off, whatever the song does meanwhile.
+    held until its note-off, whatever the song does meanwhile; all notes
+    off (controller 123 or 120), `Engine::releaseLiveNotes()` and a
+    `MidiInput` being stopped or closed end it.
   - `Engine::setRecording()` records what is played while the song plays,
     at the position the player heard it (`setRecordLatency()` and the
     plugins' latency taken off; loop passes counted).
