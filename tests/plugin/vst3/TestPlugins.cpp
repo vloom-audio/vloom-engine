@@ -14,6 +14,7 @@
 //   "Drums"  "Keys" with 40 stereo outputs, like a drum machine with one
 //            bus per pad; it refuses a block that does not carry them all.
 //            Its right channel is the time signature's beats per bar / 100.
+//   "Wide"   effect for 5.1 only (it refuses stereo): see the class.
 // Like a plugin shell, the factory lists and creates the controller class
 // only once the host has given it a context (IPluginFactory3).
 #include "pluginterfaces/base/ibstream.h"
@@ -45,6 +46,7 @@ const TUID kLevelId = INLINE_UID(0x564C4F4F, 0x4D544553, 0x544C4556, 0x454C0001)
 const TUID kKeysId = INLINE_UID(0x564C4F4F, 0x4D544553, 0x544B4559, 0x53000002);
 const TUID kKeysControllerId = INLINE_UID(0x564C4F4F, 0x4D544553, 0x544B4559, 0x53430003);
 const TUID kDrumsId = INLINE_UID(0x564C4F4F, 0x4D544553, 0x5444524D, 0x53000004);
+const TUID kWideId = INLINE_UID(0x564C4F4F, 0x4D544553, 0x54574944, 0x45000005);
 
 void copyName(String128 out, const char* name)
 {
@@ -94,7 +96,7 @@ public:
         bus = {};
         bus.mediaType = type;
         bus.direction = dir;
-        bus.channelCount = type == kAudio ? 2 : 16;
+        bus.channelCount = type == kAudio ? (wide_ ? 6 : 2) : 16;
         bus.busType = index == 0 ? kMain : kAux;
         bus.flags = index == 0 ? BusInfo::kDefaultActive : 0;
         copyName(bus.name, type == kAudio ? "Main" : "Notes");
@@ -119,16 +121,16 @@ public:
         if (setUp_ || numIns != audioInputs_ || numOuts != audioOutputs_)
             return kResultFalse; // arrangements come before setupProcessing
         for (int32 i = 0; i < numIns; ++i)
-            if (inputs[i] != SpeakerArr::kStereo)
+            if (inputs[i] != (wide_ ? SpeakerArr::k51 : SpeakerArr::kStereo))
                 return kResultFalse;
-        arranged_ = outputs[0] == SpeakerArr::kStereo;
+        arranged_ = outputs[0] == (wide_ ? SpeakerArr::k51 : SpeakerArr::kStereo);
         return arranged_ ? kResultOk : kResultFalse;
     }
     tresult PLUGIN_API getBusArrangement(BusDirection dir, int32 index, SpeakerArrangement& arr) override
     {
         if (index < 0 || index >= getBusCount(kAudio, dir))
             return kInvalidArgument;
-        arr = SpeakerArr::kStereo;
+        arr = wide_ ? SpeakerArr::k51 : SpeakerArr::kStereo;
         return kResultOk;
     }
     tresult PLUGIN_API canProcessSampleSize(int32 size) override
@@ -147,6 +149,7 @@ protected:
     int32 audioInputs_;
     int32 eventInputs_;
     int32 audioOutputs_;
+    bool wide_ = false; ///< its buses are 5.1, and nothing else
     bool arranged_ = false;
     bool setUp_ = false;
 };
@@ -504,6 +507,59 @@ private:
     ~KeysController() = default;
 };
 
+/// "Wide": an effect that works in 5.1 and refuses any other layout. It
+/// passes its left and right on, puts 0.2 on the centre, 0.9 on the bass
+/// channel and 0.1 on the left surround, and on the right surround whatever
+/// the host put into its inputs other than left and right (nothing, if the
+/// host is right).
+class Wide final : public ProcessorBase {
+public:
+    Wide()
+        : ProcessorBase(1, 0)
+    {
+        wide_ = true;
+    }
+    tresult PLUGIN_API queryInterface(const TUID wanted, void** obj) override
+    {
+        if (same(wanted, FUnknown::iid) || same(wanted, IComponent::iid) || same(wanted, IPluginBase::iid))
+            *obj = static_cast<IComponent*>(this);
+        else if (same(wanted, IAudioProcessor::iid))
+            *obj = static_cast<IAudioProcessor*>(this);
+        else {
+            *obj = nullptr;
+            return kNoInterface;
+        }
+        addRef();
+        return kResultOk;
+    }
+    TEST_REFCOUNT
+
+    tresult PLUGIN_API getControllerClassId(TUID) override { return kResultFalse; }
+    tresult PLUGIN_API setState(IBStream*) override { return kResultOk; }
+    tresult PLUGIN_API getState(IBStream*) override { return kResultOk; }
+    uint32 PLUGIN_API getLatencySamples() override { return 0; }
+    tresult PLUGIN_API process(ProcessData& data) override
+    {
+        if (data.numInputs < 1 || data.numOutputs < 1 || data.inputs[0].numChannels != 6
+            || data.outputs[0].numChannels != 6)
+            return kResultFalse;
+        float** in = data.inputs[0].channelBuffers32;
+        float** out = data.outputs[0].channelBuffers32;
+        for (int32 i = 0; i < data.numSamples; ++i) {
+            out[0][i] = in[0][i];
+            out[1][i] = in[1][i];
+            out[2][i] = 0.2f;
+            out[3][i] = 0.9f;
+            out[4][i] = 0.1f;
+            out[5][i] = in[2][i] + in[3][i] + in[4][i] + in[5][i];
+        }
+        return kResultOk;
+    }
+
+private:
+    ~Wide() override = default;
+};
+
 class Factory final : public IPluginFactory3 {
 public:
     tresult PLUGIN_API queryInterface(const TUID wanted, void** obj) override
@@ -527,7 +583,7 @@ public:
         info->flags = PFactoryInfo::kNoFlags;
         return kResultOk;
     }
-    int32 PLUGIN_API countClasses() override { return hostKnown_ ? 4 : 3; }
+    int32 PLUGIN_API countClasses() override { return hostKnown_ ? 5 : 4; }
     tresult PLUGIN_API getClassInfo(int32 index, PClassInfo* info) override
     {
         PClassInfo2 full{};
@@ -566,6 +622,12 @@ public:
             std::strcpy(info->subCategories, "Instrument|Drum");
             return kResultOk;
         case 3:
+            std::memcpy(info->cid, kWideId, sizeof(TUID));
+            std::strcpy(info->category, kVstAudioEffectClass);
+            std::strcpy(info->name, "Wide");
+            std::strcpy(info->subCategories, "Fx|Surround");
+            return kResultOk;
+        case 4:
             if (!hostKnown_)
                 return kInvalidArgument;
             std::memcpy(info->cid, kKeysControllerId, sizeof(TUID));
@@ -598,6 +660,8 @@ public:
             made = static_cast<IComponent*>(new Keys);
         else if (std::memcmp(cid, kDrumsId, sizeof(TUID)) == 0)
             made = static_cast<IComponent*>(new Keys(40));
+        else if (std::memcmp(cid, kWideId, sizeof(TUID)) == 0)
+            made = static_cast<IComponent*>(new Wide);
         else if (hostKnown_ && std::memcmp(cid, kKeysControllerId, sizeof(TUID)) == 0)
             made = static_cast<IEditController*>(new KeysController);
         if (made == nullptr) {

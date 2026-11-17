@@ -17,4 +17,5 @@
   - [0011 A bridge process for plugins the host cannot load](adr/0011-plugin-bridge.md)
   - [0012 More than a plugin's main sound](adr/0012-plugin-inputs-and-outputs.md)
   - [0013 MIDI channels on notes and controls, for MPE](adr/0013-midi-channels-for-mpe.md)
+  - [0014 Surround plugins in a stereo mixer](adr/0014-surround-plugins-in-a-stereo-mixer.md)
   - [0016 Audio input, monitoring and recording it](adr/0016-audio-input-and-recording.md)

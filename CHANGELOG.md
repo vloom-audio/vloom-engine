@@ -20,6 +20,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
     of the file plays where in the song (`AudioTakeSegment`), each loop
     pass and each take apart.
   - `SpscRing`, a lock-free ring of floats.
+- Surround plugins in the stereo mixer (ADR 0014): a VST 3 or CLAP plugin
+  whose main bus is wider than stereo runs in its own layout. The host's
+  left and right go to its left and right speakers, and its speakers are
+  folded down to stereo by the usual shares (the centre to both at -3 dB,
+  the bass channel left out). Before, only its first two channels were
+  used. The mixer itself stays stereo.
 - MPE (ADR 0013): `NoteEvent`, `ControlEvent` and `ControlPoint` carry a
   MIDI channel, and `PluginInstance::playNote()`, `stopNote()` and
   `sendControl()` take one. CLAP, VST 3 and VST 2 plugins (bridged ones
