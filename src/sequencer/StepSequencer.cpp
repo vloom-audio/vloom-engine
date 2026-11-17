@@ -396,13 +396,18 @@ void StepSequencer::playLive(int index, const MidiEvent& event) noexcept
             return;
         // All notes off: a note-off for each key the plugin holds on the
         // channel too, for a plugin that ignores the controller.
-        if (allOff)
+        if (allOff) {
+            for (std::uint16_t& down : voices->liveDown)
+                down = static_cast<std::uint16_t>(down & ~(1u << midiChannel));
             for (int key = 0; key < 128; ++key)
                 if (((voices->madeHeld[static_cast<std::size_t>(key)] >> midiChannel) & 1u) != 0
                     && voices->liveCount < voices->live.size())
                     voices->live[voices->liveCount++] = NoteEvent{0, NoteEvent::Type::Off,
                         static_cast<std::int16_t>(key), 0.0f, static_cast<std::int16_t>(midiChannel)};
+        }
         if (on || off) {
+            std::uint16_t& down = voices->liveDown[static_cast<std::size_t>(event.key)];
+            down = static_cast<std::uint16_t>(on ? down | (1u << midiChannel) : down & ~(1u << midiChannel));
             if (voices->liveCount < voices->live.size())
                 voices->live[voices->liveCount++] = NoteEvent{0,
                     on ? NoteEvent::Type::On : NoteEvent::Type::Off, static_cast<std::int16_t>(event.key),

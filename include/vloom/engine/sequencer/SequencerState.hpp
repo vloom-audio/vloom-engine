@@ -66,7 +66,11 @@ public:
         sampler.stopAll(keepLive);
         synth.stopAll(keepLive);
         plugin.releaseHeld(frame); // the plugin fades its own notes
-        endMade = true; // and what a note effect made of them ends too
+        // And what a note effect made of them ends too, unless keys played
+        // live are still down: they go on through the effect.
+        if (!keepLive
+            || std::none_of(liveDown.begin(), liveDown.end(), [](std::uint16_t down) { return down != 0; }))
+            endMade = true;
         centreBend = bent != 0;
     }
 
@@ -99,6 +103,7 @@ public:
     /// the block being rendered, at its first frame; further ones are dropped.
     std::array<NoteEvent, 128> live{};
     std::size_t liveCount = 0;
+    std::array<std::uint16_t, 128> liveDown{}; ///< per key: the MIDI channels it is down on live
     bool centreBend = false; ///< stopAll() ran while it was: put the pitch back
     StereoGain applied{}; ///< gain at the end of the last block: the next ramp starts there
 };

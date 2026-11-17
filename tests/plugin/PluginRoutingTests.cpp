@@ -966,3 +966,26 @@ TEST_CASE("All notes off reaches an instrument plugin as note-offs too", "[plugi
     REQUIRE(engine.releaseLiveNotes());
     CHECK(render(engine, 0.05)[1000 * 2] == 0.0f);
 }
+
+TEST_CASE("A key held live through a note effect goes on sounding when the song stops",
+    "[plugin][sequencer][routing][midi]")
+{
+    vloom::Engine engine;
+    prepare(engine);
+    auto poly = make<Poly>();
+    auto state = std::make_unique<vloom::SequencerState>();
+    state->channels.push_back(channel(poly, 0));
+    state->channels[0].noteEffect = make<Octaver>();
+    engine.setSequencerState(std::move(state));
+    REQUIRE(engine.playMidi(0, {0x90, 60, 100}));
+    engine.play();
+    CHECK(render(engine, 0.05)[1000 * 2] == Approx(0.2f)); // the key and its octave
+    engine.stop();
+    CHECK(render(engine, 0.05)[1000 * 2] == Approx(0.2f)); // still down
+    REQUIRE(engine.playMidi(0, {0x80, 60, 0}));
+    CHECK(render(engine, 0.05)[1000 * 2] == 0.0f);
+    // Without a key down, a stop ends what the effect made, as before.
+    engine.play();
+    engine.stop();
+    CHECK(render(engine, 0.05)[1000 * 2] == 0.0f);
+}
