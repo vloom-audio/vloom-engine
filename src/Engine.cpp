@@ -117,6 +117,71 @@ bool Engine::setStopAt(double ticks)
 }
 
 bool Engine::play() { return send(Command::Type::Play); }
+
+bool Engine::playMidi(int channel, const MidiMessage& message)
+{
+    const std::lock_guard lock(liveMutex_);
+    return liveMidi_.push(LiveMidi{channel, message});
+}
+
+bool Engine::releaseLiveNotes()
+{
+    const std::lock_guard lock(liveMutex_);
+    bool all = true;
+    for (int midiChannel = 0; midiChannel < 16; ++midiChannel)
+        all = liveMidi_.push(LiveMidi{-1, MidiMessage{static_cast<std::uint8_t>(0xB0 | midiChannel), 123, 0}})
+            && all;
+    return all;
+}
+
+bool Engine::setRecording(bool enabled)
+{
+    if (!send(Command::Type::SetRecording, enabled ? 1.0 : 0.0))
+        return false;
+    recordingStatus_.store(enabled, std::memory_order_relaxed);
+    return true;
+}
+
+bool Engine::setRecordLatency(int frames)
+{
+    return send(
+        Command::Type::SetRecordLatency, static_cast<double>(std::clamp(frames, 0, kMaxRecordLatency)));
+}
+
+std::size_t Engine::takeRecordedMidi(std::span<RecordedMidi> out) noexcept
+{
+    std::size_t taken = 0;
+    while (taken < out.size() && recordedMidi_.pop(out[taken]))
+        ++taken;
+    return taken;
+}
+
+void Engine::playLiveMidi() noexcept
+{
+    // Where the player is in the song as they hear it: the position less what
+    // lies between rendering and hearing (the device, the plugins' latency).
+    const bool record = recording_ && transport_.isPlaying() && std::isfinite(transport_.positionTicks());
+    double heard = 0.0;
+    std::int32_t pass = loopPass_;
+    if (record) {
+        const double position = transport_.positionTicks();
+        const int behind = latency_.load(std::memory_order_relaxed) + recordLatency_;
+        heard = position - static_cast<double>(behind) * transport_.ticksPerSample();
+        // Just past the loop's start, the player still hears the end of the last pass.
+        if (loopEnd_ > loopStart_ && position >= loopStart_ && position < loopEnd_ && heard < loopStart_
+            && pass > 0) {
+            heard += loopEnd_ - loopStart_;
+            --pass;
+        }
+        heard = std::max(heard, 0.0);
+    }
+    LiveMidi live{};
+    while (liveMidi_.pop(live)) {
+        sequencer_.playLive(live.channel, decodeMidi(live.message));
+        if (record && live.channel >= 0)
+            recordedMidi_.push(RecordedMidi{heard, pass, live.channel, live.message});
+    }
+}
 bool Engine::stop() { return send(Command::Type::Stop); }
 bool Engine::locate(double ticks)
 {
@@ -251,6 +316,8 @@ void Engine::applyCommands() noexcept
     while (commands_.pop(cmd)) {
         switch (cmd.type) {
         case Command::Type::Play:
+            if (!transport_.isPlaying())
+                loopPass_ = 0;
             transport_.play();
             break;
         case Command::Type::Stop:
@@ -281,6 +348,14 @@ void Engine::applyCommands() noexcept
             break;
         case Command::Type::SetStopAt:
             stopAt_ = cmd.value;
+            break;
+        case Command::Type::SetRecording:
+            if (cmd.value != 0.0 && !recording_)
+                loopPass_ = 0;
+            recording_ = cmd.value != 0.0;
+            break;
+        case Command::Type::SetRecordLatency:
+            recordLatency_ = static_cast<int>(cmd.value);
             break;
         }
     }
@@ -744,6 +819,7 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
     sequencer_.beginBlock();
     if (stopVoices_)
         sequencer_.stopAll();
+    playLiveMidi();
 
     for (int ch = 0; ch < numChannels; ++ch)
         std::memset(out[ch], 0, sizeof(float) * static_cast<std::size_t>(numFrames));
@@ -807,6 +883,7 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
             // expectedTicks_ is the loop end, the position now the loop start:
             // the next span sees a jump.
             transport_.locate(loopStart_);
+            ++loopPass_;
         }
     }
 

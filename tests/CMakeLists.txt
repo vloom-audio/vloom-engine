@@ -17,6 +17,7 @@ add_executable(vloom_engine_tests
     dsp/SamplerTests.cpp
     dsp/SynthTests.cpp
     io/AudioDeviceTests.cpp
+    io/MidiInputTests.cpp
     mixer/MixerTests.cpp
     mixer/RoutingTests.cpp
     plugin/BuiltinProcessorsTests.cpp
@@ -31,6 +32,7 @@ add_executable(vloom_engine_tests
     sample/ResamplerTests.cpp
     sample/SampleLoaderTests.cpp
     sample/WavReaderTests.cpp
+    sequencer/MidiRecordingTests.cpp
     sequencer/NoteTests.cpp
     sequencer/PluginNotesTests.cpp
     sequencer/SongModeTests.cpp
