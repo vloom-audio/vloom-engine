@@ -16,6 +16,7 @@
 #include "vloom/engine/io/AudioDevice.hpp"
 #include "vloom/engine/mixer/MixerGraph.hpp"
 #include "vloom/engine/mixer/MixerState.hpp"
+#include "vloom/engine/render/Bounce.hpp"
 #include "vloom/engine/render/OfflineRenderer.hpp"
 #include "vloom/engine/render/SongExport.hpp"
 #include "vloom/engine/render/WavWriter.hpp"

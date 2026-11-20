@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Vloom Audio contributors
 #include "vloom/engine/render/SongExport.hpp"
 
+#include "render/SongRender.hpp"
 #include "vloom/engine/Engine.hpp"
 #include "vloom/engine/sample/SampleBuffer.hpp"
 #include "vloom/engine/sequencer/StepSequencer.hpp"
@@ -87,8 +88,10 @@ std::unique_ptr<SequencerState> copyWithOwnVoices(const SequencerState& state)
     return copy;
 }
 
-SongExportResult exportSong(const std::string& path, const SequencerState& song, const MixerState* mixer,
-    double sampleRate, const SongExportOptions& options, const SongExportProgress& progress)
+namespace detail {
+
+SongExportResult renderSong(const SequencerState& song, const MixerState* mixer, double sampleRate,
+    const SongExportOptions& options, const SongRenderOutput& output, const SongExportProgress& progress)
 {
     SongExportResult result;
     const auto fail = [&result](std::string message) {
@@ -148,13 +151,7 @@ SongExportResult exportSong(const std::string& path, const SequencerState& song,
     engine->locate(static_cast<double>(start));
     engine->play();
 
-    WavFileWriter writer;
-    WavFileWriter::Spec spec;
-    spec.channels = options.channels;
-    spec.sampleRate = static_cast<int>(std::lround(sampleRate));
-    spec.format = options.format;
-    spec.dither = options.dither;
-    if (!writer.open(path, spec, &result.error))
+    if (output.begin && !output.begin(static_cast<std::uint64_t>(bodyFrames), &result.error))
         return result;
 
     const auto width = static_cast<std::size_t>(options.channels);
@@ -183,14 +180,15 @@ SongExportResult exportSong(const std::string& path, const SequencerState& song,
                 peak = std::max(peak, std::abs(s));
             }
         written += static_cast<std::int64_t>(count);
-        return writer.write(std::span<const float>(interleaved.data(), count * width), &result.error);
+        result.frames += count;
+        return output.write(std::span<const float>(interleaved.data(), count * width), &result.error);
     };
     const auto keepGoing = [&](double done) {
         if (!progress || progress(std::clamp(done, 0.0, 1.0)))
             return true;
         result.cancelled = true;
         result.error = "Export cancelled";
-        return false; // the writer's destructor removes the unfinished file
+        return false; // the output is dropped (an unfinished file removed)
     };
 
     // The song itself.
@@ -215,12 +213,36 @@ SongExportResult exportSong(const std::string& path, const SequencerState& song,
             return result;
     }
 
-    if (!writer.finish(&result.error))
+    if (output.finish && !output.finish(&result.error))
         return result;
     if (progress)
         progress(1.0);
     result.ok = true;
-    result.frames = writer.framesWritten();
+    return result;
+}
+
+} // namespace detail
+
+SongExportResult exportSong(const std::string& path, const SequencerState& song, const MixerState* mixer,
+    double sampleRate, const SongExportOptions& options, const SongExportProgress& progress)
+{
+    WavFileWriter writer;
+    detail::SongRenderOutput output;
+    output.begin = [&](std::uint64_t, std::string* error) {
+        WavFileWriter::Spec spec;
+        spec.channels = options.channels;
+        spec.sampleRate = static_cast<int>(std::lround(sampleRate));
+        spec.format = options.format;
+        spec.dither = options.dither;
+        return writer.open(path, spec, error);
+    };
+    output.write
+        = [&](std::span<const float> block, std::string* error) { return writer.write(block, error); };
+    output.finish = [&](std::string* error) { return writer.finish(error); };
+    // On failure or cancelling, the writer's destructor removes the unfinished file.
+    SongExportResult result = detail::renderSong(song, mixer, sampleRate, options, output, progress);
+    if (result.ok)
+        result.frames = writer.framesWritten();
     return result;
 }
 

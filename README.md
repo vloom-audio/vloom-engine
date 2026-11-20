@@ -3,7 +3,7 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![C++ Standard](https://img.shields.io/badge/C%2B%2B-20-brightgreen.svg)](#requirements)
 [![Platforms](https://img.shields.io/badge/Platforms-macOS%20|%20Linux%20|%20Windows-lightgrey.svg)](#quick-start)
-[![Status: M5](https://img.shields.io/badge/Status-M5%20(Mixer%20%26%20Plugins)-orange.svg)](#roadmap)
+[![Status: v1.0](https://img.shields.io/badge/Status-v1.0%20(Recording%20%26%20Bounce)-orange.svg)](#roadmap)
 
 The real-time audio engine behind [VloomDAW](https://github.com/vloom-audio/VloomDAW).
 A plain **C++20** library with no UI dependency, so it can be tested headless and
@@ -17,7 +17,9 @@ reused by other Vloom Audio tools.
 > songs to float / 16 / 24-bit WAV, and ships the `vloom-cli` developer tool.
 > Hosts CLAP, VST 3 and VST 2 plugins: effects on mixer inserts, instruments on
 > channels (ADR 0006). Inserts route into each other with sends, and plugin
-> latency is compensated (ADR 0007). Next: built-in effects.
+> latency is compensated (ADR 0007). Records audio and MIDI with a count-in
+> and a punch range (ADR 0017), and bounces a pattern to audio (ADR 0018).
+> Next: the built-in compressor, reverb, delay and limiter.
 
 ---
 
@@ -40,7 +42,12 @@ reused by other Vloom Audio tools.
   through an insert and recorded with its latency taken off
   ([ADR 0016](docs/adr/0016-audio-input-and-recording.md)). MIDI input too:
   WinMM, CoreMIDI and the ALSA sequencer, played live on any channel and
-  recorded ([ADR 0015](docs/adr/0015-midi-input-and-recording.md)).
+  recorded ([ADR 0015](docs/adr/0015-midi-input-and-recording.md)), with a
+  count-in and a punch range
+  ([ADR 0017](docs/adr/0017-count-in-and-punch-recording.md)).
+- **Bouncing** a pattern, or part of the song, to audio through the export's
+  offline path: dry, through the inserts or the whole mixer
+  ([ADR 0018](docs/adr/0018-bouncing-patterns-to-audio.md)).
 - **Offline rendering** to 32-bit float WAV, used by the tests and by
   `vloom-cli render`.
 - **Channel rack (M1)**: a step sequencer that plays WAV samples (our own
@@ -159,8 +166,9 @@ vloom-engine/
 | **M2** | MIDI notes, pitched sampler, first built-in synth, master pitch | *Done* |
 | **M3** | Arrangement (patterns on a timeline), song mode, loop region, WAV export | *Done* |
 | **M4** | Plugin host interface, CLAP hosting (effects and instruments) | *Done* |
-| **M5** | VST3 hosting, built-in effects, sends, delay compensation | *Next* |
+| **M5** | VST3 hosting, built-in effects, sends, delay compensation | *Done, except the built-in compressor, reverb, delay and limiter* |
 | **M6** | Audio input and recording, MIDI input | *Done* |
+| **v1.0** | Count-in, punch-in / punch-out, bouncing a pattern to audio | *Done (engine side)* |
 
 Details: [docs/architecture.md#roadmap](docs/architecture.md#roadmap); the
 whole plan, engine and app, is in VloomDAW's

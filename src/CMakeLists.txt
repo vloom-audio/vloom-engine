@@ -60,6 +60,7 @@ target_sources(vloom_engine PRIVATE
     record/AudioTake.cpp
 
     # render — offline (faster than real time) rendering
+    render/Bounce.cpp
     render/OfflineRenderer.cpp
     render/SongExport.cpp
     render/WavWriter.cpp)

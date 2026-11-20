@@ -79,10 +79,18 @@ std::vector<AudioTakeSegment> AudioTake::segments() const
     for (const AudioRecordMark& mark : marks_) {
         // Frames lost restart the count where they were: a mark earlier than
         // the last ones overrides them.
-        const std::int64_t at = mark.kind == AudioRecordMark::Kind::Start ? mark.frame : mark.frame + shift;
-        while (!bounds.empty() && bounds.back().frame >= at)
+        // A punch mark is where the player heard that very frame: not moved.
+        const std::int64_t at = mark.kind == AudioRecordMark::Kind::Jump ? mark.frame + shift : mark.frame;
+        bool takeStarts = false;
+        while (!bounds.empty() && bounds.back().frame >= at) {
+            takeStarts = takeStarts || bounds.back().newTake;
             bounds.pop_back();
-        if (mark.kind == AudioRecordMark::Kind::Start) {
+        }
+        if (mark.kind == AudioRecordMark::Kind::Punch) {
+            // Punch recording (ADR 0017): it replaces the take's start at the
+            // same frame, and is the take's first stretch then.
+            bounds.push_back(Bound{at, mark.ticks, mark.ticksPerFrame, mark.pass, takeStarts});
+        } else if (mark.kind == AudioRecordMark::Kind::Start) {
             shift = std::max(mark.shiftFrames, 0);
             bounds.push_back(Bound{mark.frame, mark.ticks - static_cast<double>(shift) * mark.ticksPerFrame,
                 mark.ticksPerFrame, mark.pass, true});
