@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <span>
@@ -74,13 +75,43 @@ BounceResult render(const SequencerState& song, std::int64_t startTicks, std::in
     WavFileWriter writer;
     detail::SongRenderOutput output;
     if (options.path.empty()) {
-        output.begin = [&](std::uint64_t bodyFrames, std::string*) {
+        // In memory: at most kMaxInMemoryBounceSeconds, tail included, so a
+        // long range can't ask for gigabytes; running out of memory anyway
+        // is an error in the result, never an exception out of the API.
+        const auto maxFrames = static_cast<std::uint64_t>(kMaxInMemoryBounceSeconds * sampleRate);
+        // The longest tail counts up front, so a range that would only cross
+        // the cap in its tail fails at once instead of after rendering it all.
+        const auto maxTailFrames
+            = static_cast<std::uint64_t>(std::ceil(std::max(options.maxTailSeconds, 0.0) * sampleRate));
+        output.begin = [&, maxFrames, maxTailFrames](std::uint64_t bodyFrames, std::string* error) {
             result.bodyFrames = bodyFrames;
-            result.audio.reserve(static_cast<std::size_t>(2 * bodyFrames));
+            if (bodyFrames > maxFrames || maxTailFrames > maxFrames - bodyFrames) {
+                if (error != nullptr)
+                    *error = "Too long to bounce into memory; bounce to a file instead";
+                return false;
+            }
+            try {
+                result.audio.reserve(static_cast<std::size_t>(2 * bodyFrames));
+            } catch (const std::exception&) {
+                if (error != nullptr)
+                    *error = "Not enough memory for the bounce";
+                return false;
+            }
             return true;
         };
-        output.write = [&](std::span<const float> block, std::string*) {
-            result.audio.insert(result.audio.end(), block.begin(), block.end());
+        output.write = [&, maxFrames](std::span<const float> block, std::string* error) {
+            if (result.audio.size() / 2 + block.size() / 2 > maxFrames) {
+                if (error != nullptr)
+                    *error = "Too long to bounce into memory; bounce to a file instead";
+                return false;
+            }
+            try {
+                result.audio.insert(result.audio.end(), block.begin(), block.end());
+            } catch (const std::exception&) {
+                if (error != nullptr)
+                    *error = "Not enough memory for the bounce";
+                return false;
+            }
             return true;
         };
     } else {

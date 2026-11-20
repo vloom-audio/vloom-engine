@@ -16,7 +16,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
     UI. `setBeatsPerBar()` sets the time signature's beats (metronome
     accent, count-in bars, plugins' transport).
   - `Engine::setPunch()`: audio and MIDI are recorded only where the player
-    heard the punch range, to the sample (mid-block too), in every loop pass,
+    heard the punch range, in every loop pass (audio to the sample, mid-block
+    too; live MIDI to the block it arrived in, as its position is),
     the latency taken off at both edges. Audio takes get a `Punch` mark per
     stretch (`AudioRecordMark::Kind::Punch`, read by `AudioTake`);
     `MidiTake::setPunch()` leaves out notes begun outside the range and ends

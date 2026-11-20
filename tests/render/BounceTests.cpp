@@ -305,3 +305,32 @@ TEST_CASE("A bounce leaves the live engine's playback alone", "[render][bounce]"
     const auto b = vloom::renderInterleaved(reference, render);
     CHECK(a == b);
 }
+
+TEST_CASE("A bounce too long for memory fails with an error, not an exception", "[render][bounce]")
+{
+    const auto state = twoChannels();
+    vloom::BounceOptions options;
+    options.maxTailSeconds = 0.0;
+    // 120 BPM: two beats a second, so 31 minutes is 3720 beats, past the cap.
+    const auto longer = static_cast<std::int64_t>(31.0 * 60.0 * 2.0) * vloom::kPpq;
+    vloom::BounceResult result;
+    REQUIRE_NOTHROW(result = vloom::bounceRange(state, 0, longer, nullptr, kRate, options));
+    CHECK_FALSE(result.ok);
+    CHECK_FALSE(result.error.empty());
+    CHECK(result.audio.empty());
+
+    // Under the cap, but not with its longest tail: refused before rendering.
+    const auto almost = static_cast<std::int64_t>(29.0 * 60.0 * 2.0) * vloom::kPpq; // 29 min
+    options.maxTailSeconds = 120.0;
+    REQUIRE_NOTHROW(result = vloom::bounceRange(state, 0, almost, nullptr, kRate, options));
+    CHECK_FALSE(result.ok);
+    CHECK_FALSE(result.error.empty());
+    CHECK(result.frames == 0); // nothing was rendered
+    options.maxTailSeconds = 0.0;
+
+    // A short range still bounces into memory.
+    const auto shorter = static_cast<std::int64_t>(2.0 * 2.0) * vloom::kPpq; // 2 s
+    result = vloom::bounceRange(state, 0, shorter, nullptr, kRate, options);
+    REQUIRE(result.ok);
+    CHECK(result.frames == static_cast<std::uint64_t>(2.0 * kRate));
+}
