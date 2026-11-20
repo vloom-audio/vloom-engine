@@ -7,6 +7,16 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- The tuner (`vloom.tuner`) and the spectrum analyzer (`vloom.analyzer`)
+  built-ins, under the new category "Analysis" (vloom-dsp ADR 0005). The
+  analyzer passes audio through; a host draws its spectrum from the
+  instance's scope.
+- vloom-dsp's readouts (`HasReadouts`) reach `AudioProcessor::readouts()`
+  (ADR 0019): the tuner's frequency_hz, note, cents, has_pitch, confidence
+  and level_db, and the analyzer's peak_db. The dynamics' gain reduction
+  and the gate's open state come from vloom-dsp too, under the same ids
+  as before ("gainReduction", "gateOpen"); the gate now lists "gateOpen"
+  first, so look readouts up by id.
 - Data for editors that a host draws itself (ADR 0019):
   - Per-instance level meters for every plugin, CLAP, VST 3, VST 2 or
     built-in: `PluginInstance::setMetersEnabled()` and `readLevels()`. Each

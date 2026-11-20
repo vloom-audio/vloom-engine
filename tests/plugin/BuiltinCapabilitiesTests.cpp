@@ -170,20 +170,50 @@ std::vector<float> render(vloom::Engine& engine, double seconds)
     return vloom::renderInterleaved(engine, options);
 }
 
+/// The index of readout `id` of `processor`; fails the test if there is none.
+int readoutIndex(const vloom::AudioProcessor& processor, const std::string& id)
+{
+    const std::vector<vloom::ReadoutInfo> list = processor.readouts();
+    for (std::size_t i = 0; i < list.size(); ++i)
+        if (list[i].id == id)
+            return static_cast<int>(i);
+    FAIL("no readout " << id);
+    return -1;
+}
+
+/// Runs `seconds` of a sine at `hz` (amplitude `level`, both channels)
+/// through `instance` in 512-frame blocks; returns the last block's left.
+std::vector<float> playSine(vloom::PluginInstance& instance, double hz, float level, double seconds)
+{
+    std::vector<float> left(512);
+    std::vector<float> right(512);
+    const auto blocks = static_cast<std::size_t>(seconds * kRate / 512.0);
+    std::size_t at = 0;
+    for (std::size_t block = 0; block < blocks; ++block) {
+        for (std::size_t i = 0; i < left.size(); ++i, ++at) {
+            const double phase = 2.0 * std::numbers::pi * hz * static_cast<double>(at) / kRate;
+            left[i] = level * static_cast<float>(std::sin(phase));
+            right[i] = left[i];
+        }
+        instance.process(left.data(), right.data(), 512, vloom::TransportInfo{});
+    }
+    return left;
+}
+
 } // namespace
 
-TEST_CASE("The engine lists all twenty built-ins with a category", "[plugin][builtin]")
+TEST_CASE("The engine lists all twenty-two built-ins with a category", "[plugin][builtin]")
 {
     const std::set<std::string> effects{"vloom.gain", "vloom.eq", "vloom.compressor", "vloom.limiter",
         "vloom.gate", "vloom.delay", "vloom.reverb", "vloom.saturator", "vloom.utility", "vloom.filter",
         "vloom.chorus", "vloom.flanger", "vloom.phaser", "vloom.tremolo", "vloom.deesser", "vloom.transient",
-        "vloom.bitcrusher"};
+        "vloom.bitcrusher", "vloom.tuner", "vloom.analyzer"};
     const std::set<std::string> instruments{"vloom.synth", "vloom.sampler", "vloom.drums"};
     const std::set<std::string> categories{"Dynamics", "EQ/Filter", "Delay/Reverb", "Modulation",
-        "Distortion", "Utility", "Synth", "Sampler", "Drums"};
+        "Distortion", "Utility", "Analysis", "Synth", "Sampler", "Drums"};
 
     const auto list = vloom::builtinProcessors();
-    CHECK(list.size() == 20);
+    CHECK(list.size() == 22);
     std::set<std::string> listed;
     for (const vloom::PluginInfo& info : list) {
         INFO(info.id);
@@ -204,6 +234,8 @@ TEST_CASE("The engine lists all twenty built-ins with a category", "[plugin][bui
     CHECK(vloom::createBuiltinProcessor("vloom.compressor")->info().category == "Dynamics");
     CHECK(vloom::createBuiltinProcessor("vloom.reverb")->info().category == "Delay/Reverb");
     CHECK(vloom::createBuiltinProcessor("vloom.drums")->info().category == "Drums");
+    CHECK(vloom::createBuiltinProcessor("vloom.tuner")->info().category == "Analysis");
+    CHECK(vloom::createBuiltinProcessor("vloom.analyzer")->info().category == "Analysis");
 }
 
 TEST_CASE("Only the compressor and the gate have a sidechain", "[plugin][builtin]")
@@ -389,6 +421,16 @@ TEST_CASE("Stepped choices of the built-ins have labels", "[plugin][builtin]")
     CHECK(root.valueLabels[36] == "C1");
     const auto drums = vloom::createBuiltinProcessor("vloom.drums")->parameters();
     CHECK(parameterNamed(drums, "Pad 2 Choke Group").valueLabels.front() == "Off");
+    const auto tuner = vloom::createBuiltinProcessor("vloom.tuner")->parameters();
+    CHECK(parameterNamed(tuner, "Input").valueLabels
+        == std::vector<std::string>{"Left + right", "Left", "Right"});
+    CHECK(parameterNamed(tuner, "Mute").valueLabels.empty()); // a switch
+    const auto analyzer = vloom::createBuiltinProcessor("vloom.analyzer")->parameters();
+    CHECK(
+        parameterNamed(analyzer, "Speed").valueLabels == std::vector<std::string>{"Slow", "Medium", "Fast"});
+    CHECK(parameterNamed(analyzer, "Resolution").valueLabels
+        == std::vector<std::string>{"1024", "2048", "4096", "8192", "16384"});
+    CHECK(parameterNamed(analyzer, "Channel").valueLabels.size() == 3);
 
     // Every label list names each whole value, nothing more.
     for (const vloom::PluginInfo& info : vloom::builtinProcessors())
@@ -425,11 +467,14 @@ TEST_CASE("Built-ins list their readouts, and the gate's open state follows the 
         INFO(id);
         const auto processor = vloom::createBuiltinProcessor(id);
         const std::vector<vloom::ReadoutInfo> list = processor->readouts();
-        REQUIRE_FALSE(list.empty());
-        CHECK(list[0].id == "gainReduction");
-        CHECK(list[0].name == "Gain Reduction");
-        CHECK(list[0].unit == "dB");
-        CHECK_FALSE(list[0].toggle);
+        const auto& gain = list[static_cast<std::size_t>(readoutIndex(*processor, "gainReduction"))];
+        CHECK(gain.name == "Gain Reduction");
+        CHECK(gain.unit == "dB");
+        CHECK_FALSE(gain.toggle);
+        // No id twice, though vloom-dsp publishes the same values (ADR 0019).
+        for (std::size_t i = 0; i < list.size(); ++i)
+            for (std::size_t j = i + 1; j < list.size(); ++j)
+                CHECK(list[i].id != list[j].id);
         CHECK(processor->readouts().size() == list.size()); // the same every call
     }
     CHECK(vloom::createBuiltinProcessor("vloom.gain")->readouts().empty());
@@ -439,10 +484,13 @@ TEST_CASE("Built-ins list their readouts, and the gate's open state follows the 
     vloom::AudioProcessor& processor = gate->processor();
     const std::vector<vloom::ReadoutInfo> list = processor.readouts();
     REQUIRE(list.size() == 2);
-    CHECK(list[1].id == "gateOpen");
-    CHECK(list[1].name == "Gate Open");
-    CHECK(list[1].unit.empty());
-    CHECK(list[1].toggle);
+    // By id: vloom-dsp's readouts may list them in another order (ADR 0019).
+    const int reduction = readoutIndex(processor, "gainReduction");
+    const int open = readoutIndex(processor, "gateOpen");
+    const vloom::ReadoutInfo& openInfo = list[static_cast<std::size_t>(open)];
+    CHECK(openInfo.name == "Gate Open");
+    CHECK(openInfo.unit.empty());
+    CHECK(openInfo.toggle);
     CHECK(processor.readoutValue(-1) == 0.0f); // bad indexes
     CHECK(processor.readoutValue(2) == 0.0f);
 
@@ -457,17 +505,17 @@ TEST_CASE("Built-ins list their readouts, and the gate's open state follows the 
     };
     // Silence: closed (the threshold is -40 dB), turning the sound down.
     run(0.0f, 20);
-    CHECK(processor.readoutValue(1) == 0.0f);
+    CHECK(processor.readoutValue(open) == 0.0f);
     // Loud: open, nothing turned down.
     run(0.5f, 20);
-    CHECK(processor.readoutValue(1) == 1.0f);
-    CHECK(processor.readoutValue(0) == Approx(0.0f).margin(0.01));
-    CHECK(processor.readoutValue(0) == processor.gainReductionDb().value_or(-1.0f));
+    CHECK(processor.readoutValue(open) == 1.0f);
+    CHECK(processor.readoutValue(reduction) == Approx(0.0f).margin(0.01));
+    CHECK(processor.readoutValue(reduction) == processor.gainReductionDb().value_or(-1.0f));
     // Quiet again, past the hold (50 ms) and release (100 ms): closed.
     run(0.001f, 40);
-    CHECK(processor.readoutValue(1) == 0.0f);
-    CHECK(processor.readoutValue(0) > 20.0f);
-    CHECK(processor.readoutValue(0) == processor.gainReductionDb().value_or(-1.0f));
+    CHECK(processor.readoutValue(open) == 0.0f);
+    CHECK(processor.readoutValue(reduction) > 20.0f);
+    CHECK(processor.readoutValue(reduction) == processor.gainReductionDb().value_or(-1.0f));
 }
 
 TEST_CASE(
@@ -553,6 +601,91 @@ TEST_CASE(
     auto gain = vloom::createBuiltinProcessor("vloom.gain");
     CHECK(gain->sampleAudio(0) == nullptr);
     CHECK(gain->sampleSlotsVersion() == 0);
+}
+
+TEST_CASE("Built-ins list the readouts of vloom-dsp after the table's", "[plugin][builtin][readout]")
+{
+    const auto tuner = vloom::createBuiltinProcessor("vloom.tuner");
+    const std::vector<vloom::ReadoutInfo> list = tuner->readouts();
+    REQUIRE(list.size() == 6);
+    CHECK(list[0].id == "frequency_hz");
+    CHECK(list[0].unit == "Hz");
+    CHECK(list[2].id == "cents");
+    CHECK(list[2].unit == "ct");
+    CHECK(list[3].id == "has_pitch");
+    CHECK(list[3].toggle);
+    CHECK_FALSE(list[0].toggle);
+    CHECK(list[5].id == "level_db");
+    // Not active yet: every readout is 0, and bad indices are 0 too.
+    for (int i = -1; i <= 6; ++i)
+        CHECK(tuner->readoutValue(i) == 0.0f);
+
+    const auto analyzer = vloom::createBuiltinProcessor("vloom.analyzer");
+    REQUIRE(analyzer->readouts().size() == 1);
+    CHECK(analyzer->readouts()[0].id == "peak_db");
+    CHECK(analyzer->readouts()[0].unit == "dB");
+
+    // Without the capability: none.
+    CHECK(vloom::createBuiltinProcessor("vloom.gain")->readouts().empty());
+    CHECK(vloom::createBuiltinProcessor("vloom.gain")->readoutValue(0) == 0.0f);
+    CHECK(vloom::createBuiltinProcessor("vloom.synth")->readouts().empty());
+}
+
+TEST_CASE("The built-in tuner finds the pitch of a sine and mutes by default", "[plugin][builtin][readout]")
+{
+    auto tuner = activeInstance("vloom.tuner");
+    const vloom::AudioProcessor& processor = tuner->processor();
+    const int frequency = readoutIndex(processor, "frequency_hz");
+    const int note = readoutIndex(processor, "note");
+    const int cents = readoutIndex(processor, "cents");
+    const int hasPitch = readoutIndex(processor, "has_pitch");
+    const int level = readoutIndex(processor, "level_db");
+    // Active, before any audio: resting values (no pitch, the level's floor).
+    CHECK(processor.readoutValue(hasPitch) == 0.0f);
+    CHECK(processor.readoutValue(level) == Approx(-120.0));
+
+    // A3 (MIDI 57) at 440 Hz reference, 10 cents sharp.
+    const double hz = 220.0 * std::pow(2.0, 10.0 / 1200.0);
+    const std::vector<float> out = playSine(*tuner, hz, 0.5f, 0.5);
+    CHECK(processor.readoutValue(hasPitch) == 1.0f);
+    CHECK(processor.readoutValue(frequency) == Approx(hz).epsilon(0.001));
+    CHECK(processor.readoutValue(note) == Approx(57.1).margin(0.02));
+    CHECK(processor.readoutValue(cents) == Approx(10.0).margin(2.0));
+    CHECK(processor.readoutValue(level) == Approx(20.0 * std::log10(0.5 / std::sqrt(2.0))).margin(0.5));
+    CHECK(*std::max_element(out.begin(), out.end()) == 0.0f); // Mute is on by default
+
+    // Mute off: the sound passes through.
+    tuner->setParameter(idOf(processor, "Mute"), 0.0);
+    const std::vector<float> through = playSine(*tuner, hz, 0.5f, 0.1);
+    CHECK(*std::max_element(through.begin(), through.end()) > 0.4f);
+
+    // Silence: no pitch.
+    playSine(*tuner, hz, 0.0f, 0.3);
+    CHECK(processor.readoutValue(hasPitch) == 0.0f);
+    CHECK(processor.readoutValue(frequency) == 0.0f);
+}
+
+TEST_CASE("The built-in analyzer passes audio through and reads its peak", "[plugin][builtin][readout]")
+{
+    auto analyzer = activeInstance("vloom.analyzer");
+    const vloom::AudioProcessor& processor = analyzer->processor();
+    const int peak = readoutIndex(processor, "peak_db");
+    CHECK(processor.readoutValue(peak) == Approx(-120.0));
+    CHECK(analyzer->latencyFrames() == 0);
+
+    std::vector<float> left(512);
+    std::vector<float> right(512);
+    for (std::size_t i = 0; i < left.size(); ++i) {
+        left[i] = 0.5f * static_cast<float>(std::sin(static_cast<double>(i) * 0.05));
+        right[i] = 0.25f * left[i];
+    }
+    const std::vector<float> leftIn = left;
+    const std::vector<float> rightIn = right;
+    analyzer->process(left.data(), right.data(), 512, vloom::TransportInfo{});
+    CHECK(left == leftIn); // bit for bit
+    CHECK(right == rightIn);
+    const float most = *std::max_element(leftIn.begin(), leftIn.end());
+    CHECK(processor.readoutValue(peak) == Approx(20.0 * std::log10(static_cast<double>(most))).margin(0.01));
 }
 
 TEST_CASE(

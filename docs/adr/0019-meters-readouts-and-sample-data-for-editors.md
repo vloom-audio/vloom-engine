@@ -104,20 +104,23 @@ not allocate, lock or wait (ADR 0006), and the UI must not block it.
      `sampleAudio()` only when it changes. It reads the counter first, so a
      change made between the two calls shows up on the next poll.
 
-## Plugging in vloom-dsp's readouts later
+## Plugging in vloom-dsp's readouts
 
-vloom-dsp is adding a `HasReadouts` concept (`readoutSpecs()` and
-`readout(i)`), which is not merged yet. To support it, the engine will:
+vloom-dsp's `HasReadouts` concept (`readoutSpecs()` and `readout(i)`,
+vloom-dsp ADR 0005) is hooked up in the adapter:
 
-1. Bump the vloom-dsp pin.
-2. In `readoutTable()`'s place, list the table's entries first and then
-   the effect's `readoutSpecs()`. `readoutValue(i)` reads
-   `effect_.readout(i - kReadoutCount)` past the table.
-3. Drop a table line for an effect that reports the same value through
-   `HasReadouts`, using a `!HasReadouts<E>` condition or a match on the
-   id, so no id is listed twice. Ids from vloom-dsp are passed through
-   unchanged. "gainReduction" and "gateOpen" should keep those ids in
-   vloom-dsp, so a UI does not notice the move.
+1. `readouts()` lists the table's entries first, then the effect's
+   `readoutSpecs()` (`dspReadoutInfo()`); `readoutValue(i)` reads
+   `effect_.readout(i - kReadoutCount)` past the table. `readout()` is
+   backed by vloom-dsp's `SharedValue` (relaxed atomics): lock-free and
+   wait-free from any thread while audio runs.
+2. A table line is dropped for an effect with `HasReadouts`
+   (`kTableGainReduction`, `kTableOpenState`), so no id is listed twice.
+3. vloom-dsp's ids pass through unchanged, except "gain_reduction_db" and
+   "open", which keep the ids the table gave ("gainReduction", "gateOpen"),
+   so a UI does not notice the move. Their order may change (the gate's
+   dsp lists "open" first): look a readout up by id. A stepped 0 .. 1
+   readout is a `toggle`.
 
 The public API (`ReadoutInfo`, `readouts()`, `readoutValue()`) does not
 change.

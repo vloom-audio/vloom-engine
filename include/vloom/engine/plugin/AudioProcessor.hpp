@@ -23,7 +23,8 @@ struct PluginInfo {
     Kind kind = Kind::Effect;
     /// What it does, for a host's lists. The built-ins give one of
     /// "Dynamics", "EQ/Filter", "Delay/Reverb", "Modulation", "Distortion",
-    /// "Utility" (effects) or "Synth", "Sampler", "Drums" (instruments).
+    /// "Utility", "Analysis" (effects) or "Synth", "Sampler", "Drums"
+    /// (instruments).
     /// Empty: not known (hosted plugins; a host reads their features).
     std::string category{};
 };
