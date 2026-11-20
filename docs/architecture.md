@@ -83,10 +83,12 @@ sample-exact results across many block sizes. Rendering must be deterministic.
 6. **M4** plugin host interface, CLAP hosting ✅ (ADR 0006: `AudioProcessor`,
    insert effect chains, CLAP effects and instruments)
 7. **M5** VST3 hosting, built-in effects, sends, delay compensation ✅
-   except the built-in compressor, reverb, delay and limiter (from
-   vloom-dsp, ADR 0008) ← *next*. Done: VST 3 (and VST 2, ADR 0010)
-   hosting, sends and sidechains, delay compensation (ADR 0007), the
-   built-in gain and EQ
+   VST 3 (and VST 2, ADR 0010) hosting, sends and sidechains, delay
+   compensation (ADR 0007), and the 20 built-in processors from vloom-dsp
+   (ADR 0008): 17 effects (compressor, limiter, gate, de-esser, transient
+   shaper, EQ, filter, delay, reverb, chorus, flanger, phaser, tremolo,
+   saturator, bitcrusher, gain, utility) and the synth, sampler and drum
+   sampler
 8. **M6** audio input and recording, MIDI input ✅ (ADR 0015: MIDI input and
    recording; ADR 0016: audio input, monitoring and recording)
 9. **v1.0** engine work ✅ (engine side; the app's controls are next):
