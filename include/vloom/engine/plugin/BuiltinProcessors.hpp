@@ -15,7 +15,8 @@ namespace vloom {
 ///
 /// Built-in state is "VLB1", a 4-byte count, then per parameter its 4-byte
 /// id and 8-byte value (little endian). Unknown ids are skipped, so state
-/// from a newer version still loads.
+/// from a newer version still loads. The sampler and drum sampler add their
+/// sample paths after that ("SMP1", see ADR 0008).
 [[nodiscard]] std::vector<PluginInfo> builtinProcessors();
 
 /// A new instance of the built-in processor `id` (e.g. "vloom.gain"), or
