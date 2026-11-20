@@ -31,7 +31,9 @@ struct AudioTakeSegment {
 /// Each stretch is moved back by the latency the engine reports, so it
 /// lines up with what the player heard. In a loop, each pass is a stretch
 /// of its own; so is each take, when the song is stopped and started again
-/// while recording.
+/// while recording. With a punch range (Engine::setPunch(), ADR 0017) the
+/// file holds only what was heard inside it, a stretch per pass, each
+/// already placed where it was heard (AudioRecordMark::Kind::Punch).
 class AudioTake {
 public:
     AudioTake() = default;

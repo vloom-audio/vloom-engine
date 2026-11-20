@@ -33,6 +33,11 @@ struct AudioRecordMark {
         /// The song jumped here (a loop going back, a locate, recording
         /// going on after frames were lost), or its tempo changed.
         Jump,
+        /// Punch recording (Engine::setPunch()): a stretch kept inside the
+        /// punch range starts here. Unlike the others, `ticks` is where the
+        /// player heard this very frame: the shift is already taken off, and
+        /// the mark is not moved by it (ADR 0017).
+        Punch,
     };
     Kind kind = Kind::Start;
     std::int64_t frame = 0; ///< in the recorded stream
@@ -113,6 +118,35 @@ public:
     bool setStopAt(double ticks);
     static constexpr double kMinLoopTicks = kPpq / 16.0; ///< a 64th note
 
+    // ---- time signature, count-in and punch recording (ADR 0017)
+    static constexpr int kMaxBeatsPerBar = 32;
+    static constexpr int kMaxCountInBars = 4;
+    /// Beats (quarter notes, kPpq ticks) to a bar, clamped to 1 ..
+    /// kMaxBeatsPerBar: where the metronome accents, how long a count-in bar
+    /// is, and what hosted plugins are told. 4 by default.
+    bool setBeatsPerBar(int beats);
+    /// Bars of count-in, clamped to 0 (off) .. kMaxCountInBars. When play()
+    /// starts the song from stop while a recording is armed (setRecording()
+    /// or setAudioRecording() on), the song first stands still at its
+    /// position for `bars` bars at the current tempo and time signature
+    /// while the metronome counts them, then starts there on the exact
+    /// sample the next bar would begin. Nothing is recorded during it. Stop
+    /// cancels it; a locate meanwhile moves where the song will start.
+    bool setCountIn(int bars);
+    /// True (the default): the count-in clicks even when the metronome is
+    /// off (setMetronomeEnabled(false)). False: it clicks only when the
+    /// metronome is on, and is a silent wait otherwise.
+    bool setCountInClick(bool always);
+    /// Records only inside [startTicks, endTicks) of the song as the player
+    /// hears it (latency taken off): audio and MIDI played outside it is
+    /// still heard (monitored, played live) but not recorded. Independent of
+    /// the loop; in a loop each pass records its part of the range. Shorter
+    /// than kMinLoopTicks, or non-finite values: punch off (record
+    /// everything). Range changes apply at once; switching punch on or off
+    /// applies to the audio take from its next start.
+    bool setPunch(double startTicks, double endTicks);
+    bool clearPunch() { return setPunch(0.0, 0.0); }
+
     static constexpr float kMaxMasterGain = 2.0f;
     static constexpr double kMaxMasterPitchCents = 1200.0;
 
@@ -158,7 +192,9 @@ public:
     /// like a channel's sound, so it is as late as the plugins there make it.
     bool setInputMonitor(int insert, float gain = 1.0f);
     /// While on and the song plays, the input is recorded, for
-    /// takeRecordedAudio() and takeAudioMarks() (AudioTake does both).
+    /// takeRecordedAudio() and takeAudioMarks() (AudioTake does both): only
+    /// inside the punch range if one is set (setPunch()), and not during a
+    /// count-in (setCountIn()).
     bool setAudioRecording(bool enabled);
     /// The device's round trip in frames: from rendering a moment to its
     /// sound, played along with, coming back as input (the output's latency
@@ -206,7 +242,25 @@ public:
     std::size_t takeRecordedMidi(std::span<RecordedMidi> out) noexcept;
 
     // ---- status (any thread)
+    /// True while the song plays; false during a count-in (isCountingIn()).
     [[nodiscard]] bool isPlaying() const noexcept { return playing_.load(std::memory_order_relaxed); }
+    /// True while a count-in (setCountIn()) counts: the song starts after it.
+    [[nodiscard]] bool isCountingIn() const noexcept
+    {
+        return countInBeatsLeft_.load(std::memory_order_relaxed) > 0;
+    }
+    /// Beats of the count-in still to come, the one sounding included (e.g.
+    /// 8 .. 1 for two bars of 4/4); 0 when not counting in.
+    [[nodiscard]] int countInBeatsLeft() const noexcept
+    {
+        return countInBeatsLeft_.load(std::memory_order_relaxed);
+    }
+    /// Bars of the count-in still to come, the one sounding included; 0
+    /// when not counting in.
+    [[nodiscard]] int countInBarsLeft() const noexcept
+    {
+        return countInBarsLeft_.load(std::memory_order_relaxed);
+    }
     /// True while setRecording() is on (whether or not the song plays).
     [[nodiscard]] bool isRecording() const noexcept
     {
@@ -275,7 +329,11 @@ private:
             SetAudioRecording,
             SetAudioRecordLatency,
             SetRecording,
-            SetRecordLatency
+            SetRecordLatency,
+            SetBeatsPerBar,
+            SetCountIn,
+            SetCountInClick,
+            SetPunch
         };
         Type type;
         double value;
@@ -291,8 +349,19 @@ private:
     void readInput(int numFrames) noexcept;
     /// Adds the input into the monitored insert's bus.
     void monitorInput(int numFrames) noexcept;
-    /// Writes this block's input to the recording, if it records.
+    /// Writes this block's input to the recording, if it records, along the
+    /// spans the block was played in (spans_).
     void recordInput(int numFrames) noexcept;
+    /// Writes frames [from, to) of the block's input to the recording ring;
+    /// false (and counted lost) if they do not fit.
+    bool writeRecorded(int from, int to) noexcept;
+    /// Punch recording: keeps the frames [from, to) of `span` that the
+    /// player heard inside the punch range.
+    struct Span;
+    void recordPunched(const Span& span, int from, int to) noexcept;
+    /// Plays up to maxFrames of a count-in from spanStart (clicks on its
+    /// beats); starts the song if it ends within them. Returns the frames played.
+    int playCountIn(int spanStart, int maxFrames) noexcept;
     /// Plays the live MIDI that waits, and records it.
     void playLiveMidi() noexcept;
     void publishStatus() noexcept;
@@ -398,9 +467,33 @@ private:
     std::int64_t recordedFrames_ = 0; ///< audio thread: frames in the recorded stream so far
     std::int32_t audioPass_ = 0; ///< audio thread: loop passes in this take
     double audioExpected_ = 0.0; ///< audio thread: where the position should be at the next block
-    double audioBlockTicks_ = 0.0; ///< audio thread: the position at this block's start
     double audioTicksPerFrame_ = 0.0; ///< audio thread: the tempo the last mark was made at
     bool audioBlockRolling_ = false; ///< audio thread: the song played at this block's start
+    // What the block was played in, for recordInput(): stretches where the
+    // position moves linearly, split where the loop jumps back, the song
+    // stops or a count-in ends.
+    struct Span {
+        int from = 0; ///< frame in the block
+        int frames = 0;
+        double ticks = 0.0; ///< the position at `from`
+        double ticksPerFrame = 0.0;
+        bool rolling = false; ///< the song played (not stopped, not counting in)
+        bool loopsBack = false; ///< the loop jumps back after it
+    };
+    static constexpr std::size_t kMaxSpans = 1024;
+    std::vector<Span> spans_; ///< audio thread: kMaxSpans, allocated with the engine (not on its stack)
+    std::size_t spanCount_ = 0; ///< audio thread
+    bool spansLost_ = false; ///< audio thread: more spans than fit: the rest of the block is not recorded
+    bool audioLoopCarry_ = false; ///< audio thread: the take's last span looped back
+    bool audioPunch_ = false; ///< audio thread: the take records only the punch range (set at its start)
+    int audioShift_ = 0; ///< audio thread: the take's shift (see AudioRecordMark), set at its start
+    int audioSkip_ = 0; ///< audio thread: frames of the take still to leave out (heard during a count-in)
+    bool captureOpen_ = false; ///< audio thread: punch: the last frame was kept, a mark is not needed
+    std::int64_t captureNext_
+        = 0; ///< audio thread: punch: the frame (blockFrame_ count) after the last kept one
+    double captureHeard_ = 0.0; ///< audio thread: punch: where the next kept frame was heard if it follows on
+    std::int32_t capturePass_ = 0; ///< audio thread: punch: the pass of the last kept frame
+    std::int64_t blockFrame_ = 0; ///< audio thread: frames rendered before this block
     std::atomic<bool> audioRecordingStatus_{false};
     std::atomic<std::uint64_t> inputDropouts_{0};
     std::atomic<std::uint64_t> recordLost_{0};
@@ -414,6 +507,23 @@ private:
     bool recording_ = false; ///< audio thread
     int recordLatency_ = 0; ///< audio thread: frames
     std::int32_t loopPass_ = 0; ///< audio thread: loop passes since the song started
+
+    // Count-in and punch (ADR 0017), audio thread.
+    Transport countClock_; ///< counts the count-in's ticks from 0; the song's transport stands still
+    bool playPending_ = false; ///< a Play came with this block's commands
+    bool countingIn_ = false;
+    int countInBars_ = 0;
+    bool countInClick_ = true;
+    int countInBeats_ = 0; ///< the running count-in's length in beats
+    int countInBeatsPerBar_ = 4;
+    std::int64_t nextCountBeat_ = 0;
+    int countInEnd_ = -1; ///< the frame in this block the song started at after a count-in; -1: none
+    bool afterCountIn_ = false; ///< the song started from a count-in and has not moved since
+    double recordFloor_ = 0.0; ///< where it started: MIDI heard before that goes there
+    double punchStart_ = 0.0;
+    double punchEnd_ = 0.0; ///< punch off when <= punchStart_
+    std::atomic<int> countInBeatsLeft_{0};
+    std::atomic<int> countInBarsLeft_{0};
 
     std::atomic<bool> playing_{false};
     std::atomic<bool> recordingStatus_{false};

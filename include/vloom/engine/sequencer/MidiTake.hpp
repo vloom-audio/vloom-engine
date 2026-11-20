@@ -50,16 +50,24 @@ struct RecordedControl {
 /// A key played twice without being let go ends its first note where the
 /// second starts. Within a loop, a note held over the loop's end ends there.
 /// The notes still held when the recording stops are ended by finish().
+///
+/// With a punch range (setPunch(), as given to Engine::setPunch()), only
+/// what was heard inside it is kept (ADR 0017): a note whose key went down
+/// before the punch-in, or at or after the punch-out, is left out; a note
+/// held over the punch-out ends there; controls outside are left out.
 class MidiTake {
 public:
     /// The loop the take is played in, [startTicks, endTicks); none when
     /// endTicks <= startTicks (the default).
     void setLoop(double startTicks, double endTicks) noexcept;
+    /// The punch range, [startTicks, endTicks); none when endTicks <=
+    /// startTicks (the default). In a loop, it counts in every pass.
+    void setPunch(double startTicks, double endTicks) noexcept;
     void add(const RecordedMidi& event);
     /// Ends the notes still held at `ticks` in loop pass `pass` (where the
     /// song stopped, or the recording was switched off).
     void finish(double ticks, std::int32_t pass = 0);
-    /// Forgets everything (a new take); the loop stays.
+    /// Forgets everything (a new take); the loop and the punch range stay.
     void clear();
 
     /// The finished notes, in the order they were let go.
@@ -78,8 +86,12 @@ private:
     using HeldKey = std::tuple<int, int, int>;
     void end(const HeldKey& key, const Held& held, double ticks, std::int32_t pass);
 
+    [[nodiscard]] bool punched() const noexcept { return punchEnd_ > punchStart_; }
+
     double loopStart_ = 0.0;
     double loopEnd_ = 0.0;
+    double punchStart_ = 0.0;
+    double punchEnd_ = 0.0;
     std::map<HeldKey, Held> held_;
     std::vector<RecordedNote> notes_;
     std::vector<RecordedControl> controls_;

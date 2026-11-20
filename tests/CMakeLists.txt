@@ -28,6 +28,8 @@ add_executable(vloom_engine_tests
     plugin/Vst2HostTests.cpp
     plugin/Vst3HostTests.cpp
     record/AudioRecordingTests.cpp
+    record/CountInPunchTests.cpp
+    render/BounceTests.cpp
     render/SongExportTests.cpp
     render/WavWriterTests.cpp
     sample/ResamplerTests.cpp

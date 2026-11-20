@@ -42,6 +42,7 @@ Engine::Engine()
     input_ = {scratch(7), scratch(8)};
     inputInterleaved_ = scratch(9); // and 10
     pushScratch_.assign(static_cast<std::size_t>(2 * kMaxBlockFrames), 0.0f);
+    spans_.resize(kMaxSpans);
 }
 
 void Engine::prepare(double sampleRate, int /*maxBlockSize*/)
@@ -51,6 +52,7 @@ void Engine::prepare(double sampleRate, int /*maxBlockSize*/)
     // tick (too low) or break its arithmetic (non-finite).
     sampleRate = std::isfinite(sampleRate) ? std::clamp(sampleRate, kMinSampleRate, kMaxSampleRate) : 48000.0;
     transport_.prepare(sampleRate);
+    countClock_.prepare(sampleRate);
     metronome_.prepare(sampleRate);
     sequencer_.setSampleRate(sampleRate);
 
@@ -120,6 +122,29 @@ bool Engine::setStopAt(double ticks)
 }
 
 bool Engine::play() { return send(Command::Type::Play); }
+
+bool Engine::setBeatsPerBar(int beats)
+{
+    return send(Command::Type::SetBeatsPerBar, static_cast<double>(std::clamp(beats, 1, kMaxBeatsPerBar)));
+}
+
+bool Engine::setCountIn(int bars)
+{
+    return send(Command::Type::SetCountIn, static_cast<double>(std::clamp(bars, 0, kMaxCountInBars)));
+}
+
+bool Engine::setCountInClick(bool always) { return send(Command::Type::SetCountInClick, always ? 1.0 : 0.0); }
+
+bool Engine::setPunch(double startTicks, double endTicks)
+{
+    if (!std::isfinite(startTicks) || !std::isfinite(endTicks))
+        return send(Command::Type::SetPunch, 0.0, 0.0); // off
+    const double start = std::clamp(startTicks, 0.0, Transport::kMaxTicks);
+    const double end = std::clamp(endTicks, 0.0, Transport::kMaxTicks);
+    if (end - start < kMinLoopTicks)
+        return send(Command::Type::SetPunch, 0.0, 0.0); // too short: off
+    return send(Command::Type::SetPunch, start, end);
+}
 
 void Engine::pushAudioInput(const float* left, const float* right, int numFrames) noexcept
 {
@@ -266,40 +291,191 @@ void Engine::monitorInput(int numFrames) noexcept
     monitorApplied_ = monitorGain_;
 }
 
-void Engine::recordInput(int numFrames) noexcept
+bool Engine::writeRecorded(int from, int to) noexcept
 {
-    if (!audioBlockRolling_ || !audioRecording_) {
-        audioTake_ = false;
-        audioStartPending_ = false;
-        return;
-    }
-    const auto frames = static_cast<std::size_t>(numFrames);
+    const auto frames = static_cast<std::size_t>(to - from);
     if (recordRing_.space() < 2 * frames) {
-        // The reader is behind: this block is lost; the next one that fits
-        // is marked where it is in the song.
+        // The reader is behind: these frames are lost; the next ones that
+        // fit are marked where they are in the song.
         recordLost_.fetch_add(frames, std::memory_order_relaxed);
         audioResync_ = true;
-        return;
-    }
-    if (audioStartPending_) {
-        // The take's first block that reaches the reader: where it starts.
-        const int shift = latency_.load(std::memory_order_relaxed) + audioRecordLatency_ + inputWaiting_;
-        audioMarks_.push(AudioRecordMark{AudioRecordMark::Kind::Start, recordedFrames_, audioBlockTicks_,
-            transport_.ticksPerSample(), audioPass_, shift});
-        audioTicksPerFrame_ = transport_.ticksPerSample();
-        audioStartPending_ = false;
-        audioResync_ = false;
-    } else if (audioResync_) {
-        audioMarks_.push(AudioRecordMark{AudioRecordMark::Kind::Jump, recordedFrames_, audioBlockTicks_,
-            transport_.ticksPerSample(), audioPass_, 0});
-        audioResync_ = false;
+        captureOpen_ = false;
+        return false;
     }
     for (std::size_t i = 0; i < frames; ++i) {
-        inputInterleaved_[2 * i] = input_[0][i];
-        inputInterleaved_[2 * i + 1] = input_[1][i];
+        inputInterleaved_[2 * i] = input_[0][static_cast<std::size_t>(from) + i];
+        inputInterleaved_[2 * i + 1] = input_[1][static_cast<std::size_t>(from) + i];
     }
     recordRing_.write(inputInterleaved_, 2 * frames);
-    recordedFrames_ += numFrames;
+    recordedFrames_ += static_cast<std::int64_t>(frames);
+    return true;
+}
+
+void Engine::recordInput(int numFrames) noexcept
+{
+    // The frames of this block the song played in: all of it if it played
+    // at the block's start (to its end, a stop included, as before), else
+    // from where a count-in ended.
+    const int from = audioBlockRolling_ ? 0 : countInEnd_;
+    if (from < 0 || !audioRecording_) {
+        audioTake_ = false;
+        audioStartPending_ = false;
+        audioLoopCarry_ = false;
+        return;
+    }
+    const bool takeGoesOn = audioTake_;
+    if (!audioTake_) {
+        // A take starts. Its shift: from rendering a moment to its sound,
+        // played along with, coming back in (AudioRecordMark::shiftFrames).
+        audioTake_ = true;
+        audioPass_ = 0;
+        audioResync_ = false;
+        audioStartPending_ = true; // marked with its first frames that are written
+        audioLoopCarry_ = false;
+        audioShift_ = latency_.load(std::memory_order_relaxed) + audioRecordLatency_ + inputWaiting_;
+        // After a count-in, the first `shift` frames came in while the player
+        // still heard it: left out, so the take starts on the song's first frame.
+        audioSkip_ = audioBlockRolling_ ? 0 : audioShift_;
+        audioPunch_ = punchEnd_ > punchStart_;
+        captureOpen_ = false;
+    }
+    bool firstSpan = true;
+    for (std::size_t i = 0; i < spanCount_; ++i) {
+        const Span& span = spans_[i];
+        const int end = span.from + span.frames;
+        if (end <= from)
+            continue; // before the song started (a count-in)
+        int at = std::max(span.from, from);
+        if (audioLoopCarry_) {
+            // The loop jumped back before this span: the next pass.
+            audioLoopCarry_ = false;
+            ++audioPass_;
+            if (!audioPunch_ && !audioResync_ && !audioStartPending_)
+                audioMarks_.push(AudioRecordMark{AudioRecordMark::Kind::Jump, recordedFrames_, span.ticks,
+                    span.ticksPerFrame, audioPass_, 0});
+        }
+        if (firstSpan && takeGoesOn && span.rolling && !audioPunch_ && !audioResync_ && !audioStartPending_
+            && (std::abs(span.ticks - audioExpected_) > 1e-6 || span.ticksPerFrame != audioTicksPerFrame_)) {
+            // A locate, or a new tempo: from here on frames are other ticks.
+            audioMarks_.push(AudioRecordMark{
+                AudioRecordMark::Kind::Jump, recordedFrames_, span.ticks, span.ticksPerFrame, audioPass_, 0});
+            audioTicksPerFrame_ = span.ticksPerFrame;
+        }
+        firstSpan = false;
+        if (span.loopsBack)
+            audioLoopCarry_ = true;
+        const int skip = std::min(audioSkip_, end - at);
+        audioSkip_ -= skip;
+        at += skip;
+        if (at >= end)
+            continue;
+        if (audioPunch_) {
+            if (span.rolling)
+                recordPunched(span, at, end);
+            else
+                captureOpen_ = false; // stopped: where it was heard is not known
+            continue;
+        }
+        const double ticks = span.ticks + static_cast<double>(at - span.from) * span.ticksPerFrame;
+        if (recordRing_.space() >= 2 * static_cast<std::size_t>(end - at)) {
+            if (audioStartPending_) {
+                // The take's first frames that reach the reader: where it starts.
+                audioMarks_.push(AudioRecordMark{AudioRecordMark::Kind::Start, recordedFrames_, ticks,
+                    span.ticksPerFrame, audioPass_, audioShift_});
+                audioTicksPerFrame_ = span.ticksPerFrame;
+                audioStartPending_ = false;
+                audioResync_ = false;
+            } else if (audioResync_) {
+                audioMarks_.push(AudioRecordMark{
+                    AudioRecordMark::Kind::Jump, recordedFrames_, ticks, span.ticksPerFrame, audioPass_, 0});
+                audioResync_ = false;
+            }
+        }
+        writeRecorded(at, end);
+    }
+    if (spansLost_ && spanCount_ > 0) {
+        const Span& last = spans_[spanCount_ - 1];
+        const int end = last.from + last.frames;
+        if (end < numFrames) {
+            recordLost_.fetch_add(static_cast<std::uint64_t>(numFrames - end), std::memory_order_relaxed);
+            audioResync_ = true;
+            captureOpen_ = false;
+        }
+    }
+}
+
+void Engine::recordPunched(const Span& span, int from, int to) noexcept
+{
+    // The input at a frame was heard `shift` frames before the engine
+    // rendered it: at the position then, less the shift. Just after the loop
+    // went back that is the end of the pass before (as for MIDI,
+    // playLiveMidi()). Within one span that wraps at most once.
+    constexpr double kEpsilon = 1e-6;
+    const double tpf = span.ticksPerFrame;
+    if (!(tpf > 0.0))
+        return;
+    const double shift = static_cast<double>(audioShift_) * tpf;
+    const double loopLength = loopEnd_ - loopStart_;
+    const auto positionAt
+        = [&](int frame) { return span.ticks + static_cast<double>(frame - span.from) * tpf; };
+    // Passes back the frame was heard in.
+    const auto wrapsAt = [&](int frame) {
+        const double position = positionAt(frame);
+        if (!(loopLength > 0.0) || position < loopStart_ || position >= loopEnd_)
+            return 0;
+        const double heard = position - shift;
+        if (heard >= loopStart_)
+            return 0;
+        const auto wraps = static_cast<std::int64_t>(std::ceil((loopStart_ - heard) / loopLength - kEpsilon));
+        return static_cast<int>(std::clamp<std::int64_t>(wraps, 0, audioPass_));
+    };
+    for (int piece = from; piece < to;) {
+        const int wraps = wrapsAt(piece);
+        int pieceEnd = to;
+        if (wraps > 0) {
+            // Heard one pass back fewer from where position - shift + (wraps - 1) loops reaches the loop
+            // start.
+            const double turn = loopStart_ + shift - static_cast<double>(wraps - 1) * loopLength;
+            const double frame
+                = static_cast<double>(span.from) + std::ceil((turn - span.ticks) / tpf - kEpsilon);
+            pieceEnd = static_cast<int>(
+                std::clamp(frame, static_cast<double>(piece + 1), static_cast<double>(to)));
+        }
+        // Heard linearly over the piece: heardFrom at span.from.
+        const double heardFrom = span.ticks - shift + static_cast<double>(wraps) * loopLength;
+        const std::int32_t pass = audioPass_ - wraps;
+        const double in = std::ceil((punchStart_ - heardFrom) / tpf - kEpsilon) + span.from;
+        const double out = std::ceil((punchEnd_ - heardFrom) / tpf - kEpsilon) + span.from;
+        const int x
+            = static_cast<int>(std::clamp(in, static_cast<double>(piece), static_cast<double>(pieceEnd)));
+        const int y
+            = static_cast<int>(std::clamp(out, static_cast<double>(piece), static_cast<double>(pieceEnd)));
+        if (y > x) {
+            const double heard = heardFrom + static_cast<double>(x - span.from) * tpf;
+            const bool follows = captureOpen_ && captureNext_ == blockFrame_ + x && pass == capturePass_
+                && std::abs(heard - captureHeard_) < 0.5 * tpf;
+            if (recordRing_.space() >= 2 * static_cast<std::size_t>(y - x) && !follows) {
+                if (audioStartPending_) {
+                    audioMarks_.push(AudioRecordMark{AudioRecordMark::Kind::Start, recordedFrames_,
+                        positionAt(x), tpf, audioPass_, audioShift_});
+                    audioTicksPerFrame_ = tpf;
+                    audioStartPending_ = false;
+                }
+                audioMarks_.push(
+                    AudioRecordMark{AudioRecordMark::Kind::Punch, recordedFrames_, heard, tpf, pass, 0});
+                audioResync_ = false;
+            }
+            if (writeRecorded(x, y)) {
+                captureOpen_ = true;
+                captureNext_ = blockFrame_ + y;
+                captureHeard_ = heardFrom + static_cast<double>(y - span.from) * tpf;
+                capturePass_ = pass;
+            }
+        }
+        // A gap (outside the range) breaks the run: captureNext_ no longer
+        // matches, so the next stretch kept is marked.
+        piece = pieceEnd;
+    }
 }
 
 void Engine::playLiveMidi() noexcept
@@ -319,14 +495,59 @@ void Engine::playLiveMidi() noexcept
             heard += loopEnd_ - loopStart_;
             --pass;
         }
+        // After a count-in, what was heard during it counts as played on
+        // the song's first beat: a downbeat played a hair early is kept.
+        if (afterCountIn_ && pass == 0)
+            heard = std::max(heard, recordFloor_);
         heard = std::max(heard, 0.0);
     }
+    // Punch: only what was heard inside the range is recorded. Note-offs
+    // always are, so a note begun inside can end (MidiTake ends it at the
+    // punch-out at the latest); one without its note-on is ignored there.
+    const bool punched = punchEnd_ > punchStart_;
+    const bool inside = !punched || (heard >= punchStart_ && heard < punchEnd_);
     LiveMidi live{};
     while (liveMidi_.pop(live)) {
-        sequencer_.playLive(live.channel, decodeMidi(live.message));
-        if (record && live.channel >= 0)
+        const MidiEvent event = decodeMidi(live.message);
+        sequencer_.playLive(live.channel, event);
+        if (record && live.channel >= 0 && (inside || event.kind == MidiEvent::Kind::NoteOff))
             recordedMidi_.push(RecordedMidi{heard, pass, live.channel, live.message});
     }
+}
+
+int Engine::playCountIn(int spanStart, int maxFrames) noexcept
+{
+    // The scheduler's rule (playSpan()): an event fires on the first sample
+    // at or after its exact time.
+    constexpr double kEpsilon = 1e-6;
+    const double length = static_cast<double>(countInBeats_) * kPpq;
+    const double end = std::ceil(countClock_.framesUntil(length) - kEpsilon);
+    const int frames = static_cast<int>(std::clamp(end, 0.0, static_cast<double>(maxFrames)));
+    int cursor = 0;
+    while (nextCountBeat_ < countInBeats_) {
+        const double at = std::max(
+            std::ceil(countClock_.framesUntil(static_cast<double>(nextCountBeat_) * kPpq) - kEpsilon), 0.0);
+        if (at >= static_cast<double>(frames))
+            break; // a later block
+        const int offset = static_cast<int>(at);
+        renderSegment(spanStart + cursor, offset - cursor);
+        cursor = offset;
+        if (countInClick_ || metronomeEnabled_)
+            metronome_.trigger(nextCountBeat_ % countInBeatsPerBar_ == 0);
+        ++nextCountBeat_;
+    }
+    renderSegment(spanStart + cursor, frames - cursor);
+    countClock_.advance(frames);
+    if (end <= static_cast<double>(maxFrames)) {
+        // Done: the song starts on this sample, a fresh start for the scheduler.
+        countingIn_ = false;
+        transport_.play();
+        wasRolling_ = false;
+        afterCountIn_ = true;
+        recordFloor_ = transport_.positionTicks();
+        countInEnd_ = spanStart + frames;
+    }
+    return frames;
 }
 bool Engine::stop() { return send(Command::Type::Stop); }
 bool Engine::locate(double ticks)
@@ -462,19 +683,39 @@ void Engine::applyCommands() noexcept
     while (commands_.pop(cmd)) {
         switch (cmd.type) {
         case Command::Type::Play:
-            if (!transport_.isPlaying())
-                loopPass_ = 0;
-            transport_.play();
+            // Started once the commands are read: whether it counts in
+            // depends on the recording armed with it.
+            if (!transport_.isPlaying() && !countingIn_)
+                playPending_ = true;
             break;
         case Command::Type::Stop:
             transport_.stop();
             stopVoices_ = true;
+            playPending_ = false;
+            countingIn_ = false;
+            afterCountIn_ = false;
             break;
         case Command::Type::Locate:
             transport_.locate(cmd.value);
+            afterCountIn_ = false;
             break;
         case Command::Type::SetTempo:
             transport_.setTempo(cmd.value);
+            countClock_.setTempo(cmd.value);
+            break;
+        case Command::Type::SetBeatsPerBar:
+            transport_.setBeatsPerBar(static_cast<int>(cmd.value));
+            beatsPerBarStatus_.store(transport_.beatsPerBar(), std::memory_order_relaxed);
+            break;
+        case Command::Type::SetCountIn:
+            countInBars_ = static_cast<int>(cmd.value);
+            break;
+        case Command::Type::SetCountInClick:
+            countInClick_ = cmd.value != 0.0;
+            break;
+        case Command::Type::SetPunch:
+            punchStart_ = cmd.value;
+            punchEnd_ = cmd.value2;
             break;
         case Command::Type::SetMetronome:
             metronomeEnabled_ = cmd.value != 0.0;
@@ -516,10 +757,37 @@ void Engine::applyCommands() noexcept
             break;
         }
     }
+    if (playPending_) {
+        playPending_ = false;
+        loopPass_ = 0;
+        afterCountIn_ = false;
+        if (countInBars_ > 0 && (recording_ || audioRecording_)) {
+            // The song stands still meanwhile; a clock of its own counts the
+            // bars at the song's tempo (ADR 0017).
+            countInBeatsPerBar_ = transport_.beatsPerBar();
+            countInBeats_ = countInBars_ * countInBeatsPerBar_;
+            countClock_.locate(0.0);
+            countClock_.play();
+            nextCountBeat_ = 0;
+            countingIn_ = true;
+        } else {
+            transport_.play();
+        }
+    }
 }
 
 void Engine::publishStatus() noexcept
 {
+    int beatsLeft = 0;
+    int barsLeft = 0;
+    if (countingIn_) {
+        // The beat sounding counts: a count-in at its very start has all of them left.
+        const auto beat = static_cast<int>(std::floor(countClock_.positionTicks() / kPpq));
+        beatsLeft = std::max(countInBeats_ - beat, 1);
+        barsLeft = (beatsLeft + countInBeatsPerBar_ - 1) / countInBeatsPerBar_;
+    }
+    countInBeatsLeft_.store(beatsLeft, std::memory_order_relaxed);
+    countInBarsLeft_.store(barsLeft, std::memory_order_relaxed);
     playing_.store(transport_.isPlaying(), std::memory_order_relaxed);
     position_.store(transport_.positionTicks(), std::memory_order_relaxed);
     tempo_.store(transport_.tempo(), std::memory_order_relaxed);
@@ -978,25 +1246,11 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
         sequencer_.stopAll();
     readInput(numFrames);
 
-    // Recording: a take starts when the song plays and it records; a jump
-    // of the position meanwhile (a locate) is marked.
+    // Recording follows the spans the block is played in (recordInput()).
     audioBlockRolling_ = transport_.isPlaying() && std::isfinite(transport_.positionTicks());
-    audioBlockTicks_ = audioBlockRolling_ ? transport_.positionTicks() : 0.0;
-    if (audioBlockRolling_ && audioRecording_) {
-        if (!audioTake_) {
-            audioTake_ = true;
-            audioPass_ = 0;
-            audioResync_ = false;
-            audioStartPending_ = true; // marked with the first block that is written
-        } else if ((std::abs(audioBlockTicks_ - audioExpected_) > 1e-6
-                       || transport_.ticksPerSample() != audioTicksPerFrame_)
-            && !audioResync_ && !audioStartPending_) {
-            // A locate, or a new tempo: from here on frames are other ticks.
-            audioMarks_.push(AudioRecordMark{AudioRecordMark::Kind::Jump, recordedFrames_, audioBlockTicks_,
-                transport_.ticksPerSample(), audioPass_, 0});
-            audioTicksPerFrame_ = transport_.ticksPerSample();
-        }
-    }
+    spanCount_ = 0;
+    spansLost_ = false;
+    countInEnd_ = -1;
     playLiveMidi();
 
     for (int ch = 0; ch < numChannels; ++ch)
@@ -1009,6 +1263,7 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
     blockTransport.tempo = transport_.tempo();
     blockTransport.positionTicks
         = std::isfinite(transport_.positionTicks()) ? transport_.positionTicks() : 0.0;
+    blockTransport.beatsPerBar = transport_.beatsPerBar();
     if (loopEnd_ > loopStart_) {
         blockTransport.loopStartTicks = loopStart_;
         blockTransport.loopEndTicks = loopEnd_;
@@ -1019,7 +1274,24 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
     // locate to the scheduler (the next span is "jumped"): streams start
     // afresh at the loop start, audio clips resume part-way, held notes end.
     constexpr double kEpsilon = 1e-6; // as in playSpan()
+    const auto logSpan = [this](int from, int frames, bool loopsBack) {
+        if (spanCount_ == kMaxSpans) {
+            spansLost_ = true; // more than ever happens in practice: the rest is not recorded
+            return;
+        }
+        // Stopped (or counting in), the position is where the song stands.
+        const bool finite = std::isfinite(transport_.positionTicks());
+        spans_[spanCount_++] = Span{from, frames, finite ? transport_.positionTicks() : 0.0,
+            transport_.ticksPerSample(), transport_.isPlaying() && finite, loopsBack};
+    };
     for (int done = 0; done < numFrames;) {
+        if (countingIn_) {
+            const int frames = playCountIn(done, numFrames - done);
+            if (frames > 0)
+                logSpan(done, frames, false);
+            done += frames;
+            continue;
+        }
         int span = numFrames - done;
         bool loopBack = false;
         bool stopHere = false;
@@ -1045,6 +1317,7 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
             }
         }
 
+        logSpan(done, span, loopBack);
         playSpan(done, span);
         transport_.advance(span);
         wasRolling_ = transport_.isPlaying();
@@ -1061,13 +1334,6 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
             // expectedTicks_ is the loop end, the position now the loop start:
             // the next span sees a jump.
             transport_.locate(loopStart_);
-            if (audioBlockRolling_ && audioRecording_ && audioTake_ && !audioResync_ && !audioStartPending_) {
-                ++audioPass_;
-                audioMarks_.push(AudioRecordMark{AudioRecordMark::Kind::Jump, recordedFrames_ + done,
-                    loopStart_, transport_.ticksPerSample(), audioPass_, 0});
-            } else if (audioTake_) {
-                ++audioPass_;
-            }
             ++loopPass_;
         }
     }
@@ -1077,6 +1343,7 @@ void Engine::processBlock(float* const* out, int numChannels, int numFrames) noe
     mixBuses(out, numChannels, numFrames, blockTransport);
     recordInput(numFrames);
     audioExpected_ = transport_.positionTicks();
+    blockFrame_ += numFrames;
     sequencer_.endBlock();
     applyMasterGain(out, numChannels, numFrames);
     sanitizeOutput(out, numChannels, numFrames);

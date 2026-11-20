@@ -31,11 +31,21 @@ void MidiTake::setLoop(double startTicks, double endTicks) noexcept
     loopEnd_ = loop ? endTicks : 0.0;
 }
 
+void MidiTake::setPunch(double startTicks, double endTicks) noexcept
+{
+    const bool punch = std::isfinite(startTicks) && std::isfinite(endTicks) && endTicks > startTicks;
+    punchStart_ = punch ? startTicks : 0.0;
+    punchEnd_ = punch ? endTicks : 0.0;
+}
+
 void MidiTake::end(const HeldKey& key, const Held& held, double ticks, std::int32_t pass)
 {
     // Let go in a later pass of the loop: it was held over the loop's end.
     if (loopEnd_ > loopStart_ && pass > held.pass)
         ticks = loopEnd_;
+    // Held over the punch-out (in its pass or into a later one): ends there.
+    if (punched() && (pass > held.pass || ticks > punchEnd_))
+        ticks = std::min(ticks, punchEnd_);
     RecordedNote note;
     note.channel = std::get<0>(key);
     note.midiChannel = std::get<1>(key);
@@ -49,6 +59,7 @@ void MidiTake::end(const HeldKey& key, const Held& held, double ticks, std::int3
 void MidiTake::add(const RecordedMidi& event)
 {
     const MidiEvent midi = decodeMidi(event.message);
+    const bool inside = !punched() || (event.ticks >= punchStart_ && event.ticks < punchEnd_);
     switch (midi.kind) {
     case MidiEvent::Kind::NoteOn:
     case MidiEvent::Kind::NoteOff: {
@@ -58,13 +69,15 @@ void MidiTake::add(const RecordedMidi& event)
             end(key, it->second, event.ticks, event.pass);
             held_.erase(it);
         }
-        if (midi.kind == MidiEvent::Kind::NoteOn)
+        if (midi.kind == MidiEvent::Kind::NoteOn && inside)
             held_[key] = Held{event.ticks, event.pass, midi.value};
         break;
     }
     case MidiEvent::Kind::PitchBend:
     case MidiEvent::Kind::Controller:
     case MidiEvent::Kind::Pressure: {
+        if (!inside)
+            break;
         RecordedControl control;
         control.channel = event.channel;
         control.point.start = tickOf(event.ticks);
