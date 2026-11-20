@@ -107,6 +107,7 @@ void PluginInstance::process(float* left, float* right, int numFrames, const Tra
             bypassLine_.clear();
         }
         bypassedLast_ = true;
+        meter(0, left, right, numFrames);
         // The dry sound, as late as the processed one would be.
         float* dry[2] = {left, right};
         bypassLine_.process(
@@ -115,6 +116,7 @@ void PluginInstance::process(float* left, float* right, int numFrames, const Tra
         return;
     }
     bypassedLast_ = false;
+    meter(0, left, right, numFrames); // the input, before the processor changes it in place
     float* channels[2] = {left, right};
     if (notes.size() > kMaxNotes)
         notes = notes.first(kMaxNotes);
@@ -257,7 +259,7 @@ void PluginInstance::setScopeEnabled(bool enabled)
         return;
     if (enabled) {
         if (scope_ == nullptr)
-            scope_ = std::make_unique<std::atomic<float>[]>(kScopeFrames); // zeroed
+            scope_ = std::make_unique<std::atomic<float>[]>(2 * kScopeFrames); // zeroed
         // Start empty: what an earlier run left is not this one's sound. (A
         // block still being written from that run may undo this; the scope
         // then shows a moment of the older sound, nothing worse.)
@@ -268,11 +270,15 @@ void PluginInstance::setScopeEnabled(bool enabled)
 
 void PluginInstance::capture(const float* left, const float* right, int numFrames) noexcept
 {
+    meter(2, left, right, numFrames);
     if (!scopeOn_.load(std::memory_order_acquire))
         return;
     std::uint64_t written = scopeWritten_.load(std::memory_order_relaxed);
-    for (int i = 0; i < numFrames; ++i, ++written)
-        scope_[written % kScopeFrames].store(0.5f * (left[i] + right[i]), std::memory_order_relaxed);
+    for (int i = 0; i < numFrames; ++i, ++written) {
+        const std::size_t at = 2 * static_cast<std::size_t>(written % kScopeFrames);
+        scope_[at].store(left[i], std::memory_order_relaxed);
+        scope_[at + 1].store(right[i], std::memory_order_relaxed);
+    }
     scopeWritten_.store(written, std::memory_order_release);
 }
 
@@ -284,9 +290,79 @@ std::size_t PluginInstance::readScope(std::span<float> out) const noexcept
     const std::size_t count
         = static_cast<std::size_t>(std::min<std::uint64_t>({written, out.size(), kScopeFrames}));
     const std::uint64_t first = written - count;
-    for (std::size_t i = 0; i < count; ++i)
-        out[i] = scope_[(first + i) % kScopeFrames].load(std::memory_order_relaxed);
+    for (std::size_t i = 0; i < count; ++i) {
+        const std::size_t at = 2 * static_cast<std::size_t>((first + i) % kScopeFrames);
+        out[i] = 0.5f
+            * (scope_[at].load(std::memory_order_relaxed) + scope_[at + 1].load(std::memory_order_relaxed));
+    }
     return count;
+}
+
+std::size_t PluginInstance::readScopeStereo(std::span<float> left, std::span<float> right) const noexcept
+{
+    if (!scopeOn_.load(std::memory_order_acquire))
+        return 0;
+    const std::uint64_t written = scopeWritten_.load(std::memory_order_acquire);
+    const std::size_t count = static_cast<std::size_t>(
+        std::min<std::uint64_t>({written, left.size(), right.size(), kScopeFrames}));
+    const std::uint64_t first = written - count;
+    for (std::size_t i = 0; i < count; ++i) {
+        const std::size_t at = 2 * static_cast<std::size_t>((first + i) % kScopeFrames);
+        left[i] = scope_[at].load(std::memory_order_relaxed);
+        right[i] = scope_[at + 1].load(std::memory_order_relaxed);
+    }
+    return count;
+}
+
+namespace {
+
+/// The largest absolute sample of `samples` (NaN skipped), at least `peak`.
+float peakOf(const float* samples, int numFrames, float peak) noexcept
+{
+    for (int i = 0; i < numFrames; ++i) {
+        const float magnitude = std::abs(samples[i]);
+        if (magnitude > peak) // false for NaN
+            peak = magnitude;
+    }
+    return peak;
+}
+
+/// Raises `peak` to `value` unless it is higher already. Lock-free: it
+/// only retries while the reader swaps the peak out between the two steps.
+void raisePeak(std::atomic<float>& peak, float value) noexcept
+{
+    float seen = peak.load(std::memory_order_relaxed);
+    while (value > seen && !peak.compare_exchange_weak(seen, value, std::memory_order_relaxed)) { }
+}
+
+} // namespace
+
+void PluginInstance::meter(std::size_t first, const float* left, const float* right, int numFrames) noexcept
+{
+    if (!metersOn_.load(std::memory_order_relaxed))
+        return;
+    raisePeak(peaks_[first], peakOf(left, numFrames, 0.0f));
+    raisePeak(peaks_[first + 1], peakOf(right, numFrames, 0.0f));
+}
+
+void PluginInstance::setMetersEnabled(bool enabled) noexcept
+{
+    if (enabled && !metersOn_.load(std::memory_order_relaxed))
+        for (std::atomic<float>& peak : peaks_)
+            peak.store(0.0f, std::memory_order_relaxed);
+    metersOn_.store(enabled, std::memory_order_relaxed);
+}
+
+PluginInstance::Levels PluginInstance::readLevels() noexcept
+{
+    Levels levels;
+    if (!metersOn_.load(std::memory_order_relaxed))
+        return levels;
+    levels.input[0] = peaks_[0].exchange(0.0f, std::memory_order_relaxed);
+    levels.input[1] = peaks_[1].exchange(0.0f, std::memory_order_relaxed);
+    levels.output[0] = peaks_[2].exchange(0.0f, std::memory_order_relaxed);
+    levels.output[1] = peaks_[3].exchange(0.0f, std::memory_order_relaxed);
+    return levels;
 }
 
 void PluginInstance::reset() noexcept

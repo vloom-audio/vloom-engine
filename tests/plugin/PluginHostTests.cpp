@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -252,6 +253,153 @@ TEST_CASE("The scope keeps the newest output while it is on", "[plugin]")
     CHECK(probe.readScope(seen) == 0);
 }
 
+TEST_CASE("The stereo scope keeps left and right apart", "[plugin][scope]")
+{
+    ProbeProcessor::Log log;
+    vloom::PluginInstance probe(std::make_unique<ProbeProcessor>(log, 0.25f));
+    REQUIRE(probe.activate(kRate, 256));
+    std::array<float, 32> left{};
+    std::array<float, 32> right{};
+    CHECK(probe.readScopeStereo(left, right) == 0); // off
+
+    probe.setScopeEnabled(true);
+    std::vector<float> inLeft(24);
+    std::vector<float> inRight(24);
+    for (std::size_t i = 0; i < inLeft.size(); ++i) {
+        inLeft[i] = 0.01f * static_cast<float>(i);
+        inRight[i] = -0.5f;
+    }
+    probe.process(inLeft.data(), inRight.data(), 24, vloom::TransportInfo{});
+    REQUIRE(probe.readScopeStereo(left, right) == 24);
+    for (std::size_t i = 0; i < 24; ++i) {
+        INFO(i);
+        CHECK(left[i] == Approx(0.01f * static_cast<float>(i) + 0.25f));
+        CHECK(right[i] == Approx(-0.25f));
+    }
+    // The mono read still averages the two.
+    std::array<float, 24> mono{};
+    REQUIRE(probe.readScope(mono) == 24);
+    CHECK(mono[0] == Approx(0.0f).margin(1e-6));
+    CHECK(mono[23] == Approx(0.5f * (0.23f + 0.25f - 0.25f)));
+    // The shorter side decides how many frames come back: the newest ones.
+    REQUIRE(probe.readScopeStereo(std::span<float>(left).first(4), right) == 4);
+    CHECK(left[0] == Approx(0.20f + 0.25f));
+    CHECK(left[3] == Approx(0.23f + 0.25f));
+    CHECK(right[3] == Approx(-0.25f));
+}
+
+TEST_CASE("Level meters see the peaks before and after the processor", "[plugin][meters]")
+{
+    ProbeProcessor::Log log;
+    vloom::PluginInstance probe(std::make_unique<ProbeProcessor>(log, 0.25f));
+    REQUIRE(probe.activate(kRate, 64)); // blocks of 256 are processed in 4 chunks
+
+    std::vector<float> left(256, 0.1f);
+    std::vector<float> right(256, -0.1f);
+    const auto run = [&](float leftPeak, float rightPeak, std::size_t at) {
+        std::fill(left.begin(), left.end(), 0.1f);
+        std::fill(right.begin(), right.end(), -0.1f);
+        left[at] = leftPeak;
+        right[at] = rightPeak;
+        probe.process(left.data(), right.data(), 256, vloom::TransportInfo{});
+    };
+
+    // Off: nothing is measured.
+    CHECK_FALSE(probe.areMetersEnabled());
+    run(0.9f, -0.9f, 100);
+    vloom::PluginInstance::Levels levels = probe.readLevels();
+    CHECK(levels.input == std::array<float, 2>{0.0f, 0.0f});
+    CHECK(levels.output == std::array<float, 2>{0.0f, 0.0f});
+
+    probe.setMetersEnabled(true);
+    CHECK(probe.areMetersEnabled());
+    levels = probe.readLevels();
+    CHECK(levels.input[0] == 0.0f); // nothing processed since
+
+    // One sample's peak, in the middle of a chunk; the channels apart.
+    run(0.5f, -0.8f, 133);
+    levels = probe.readLevels();
+    CHECK(levels.input[0] == Approx(0.5f));
+    CHECK(levels.input[1] == Approx(0.8f));
+    CHECK(levels.output[0] == Approx(0.75f)); // + 0.25
+    CHECK(levels.output[1] == Approx(0.55f)); // |-0.8 + 0.25|
+    // Read: they start again from silence.
+    levels = probe.readLevels();
+    CHECK(levels.input[0] == 0.0f);
+    CHECK(levels.output[1] == 0.0f);
+
+    // Several blocks between two reads: the largest of them all.
+    run(0.3f, 0.2f, 0);
+    run(0.6f, 0.2f, 255);
+    run(0.4f, 0.7f, 10);
+    levels = probe.readLevels();
+    CHECK(levels.input[0] == Approx(0.6f));
+    CHECK(levels.input[1] == Approx(0.7f));
+    CHECK(levels.output[0] == Approx(0.85f));
+    CHECK(levels.output[1] == Approx(0.95f));
+
+    // NaN does not stick.
+    run(std::numeric_limits<float>::quiet_NaN(), 0.2f, 5);
+    levels = probe.readLevels();
+    CHECK(levels.input[0] == Approx(0.1f));
+    CHECK(std::isfinite(levels.output[0]));
+
+    // Bypassed: the dry sound in and out.
+    probe.setBypassed(true);
+    run(0.5f, -0.5f, 7);
+    levels = probe.readLevels();
+    CHECK(levels.input[0] == Approx(0.5f));
+    CHECK(levels.output[0] == Approx(0.5f));
+    CHECK(levels.output[1] == Approx(0.5f));
+    probe.setBypassed(false);
+
+    // Off again: zeros, and nothing kept for later.
+    probe.setMetersEnabled(false);
+    run(0.9f, 0.9f, 3);
+    levels = probe.readLevels();
+    CHECK(levels.input[0] == 0.0f);
+    probe.setMetersEnabled(true);
+    CHECK(probe.readLevels().output[0] == 0.0f);
+}
+
+TEST_CASE("Level meters see every peak while a reader polls during processing", "[plugin][meters]")
+{
+    ProbeProcessor::Log log;
+    vloom::PluginInstance probe(std::make_unique<ProbeProcessor>(log, 0.0f));
+    REQUIRE(probe.activate(kRate, 256));
+    probe.setMetersEnabled(true);
+    std::atomic<bool> done{false};
+    std::atomic<int> peaksSeen{0};
+    std::thread reader([&] {
+        while (!done.load()) {
+            if (probe.readLevels().input[0] >= 1.0f)
+                ++peaksSeen;
+            std::this_thread::yield();
+        }
+        if (probe.readLevels().input[0] >= 1.0f)
+            ++peaksSeen;
+    });
+    // Every 50th block has one full-scale sample; the rest are quiet.
+    std::vector<float> left(256);
+    std::vector<float> right(256);
+    constexpr int kBlocks = 2000;
+    for (int block = 0; block < kBlocks; ++block) {
+        std::fill(left.begin(), left.end(), 0.01f);
+        std::fill(right.begin(), right.end(), 0.01f);
+        if (block % 50 == 0)
+            left[static_cast<std::size_t>(block % 256)] = 1.0f;
+        probe.process(left.data(), right.data(), 256, vloom::TransportInfo{});
+        if (block % 50 == 0) // give the reader a chance to take each one apart
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    done = true;
+    reader.join();
+    // Peaks never get lost: at least one read saw a full-scale peak, at most
+    // one per peak (reads take them away).
+    CHECK(peaksSeen.load() >= 1);
+    CHECK(peaksSeen.load() <= kBlocks / 50);
+}
+
 TEST_CASE("Parameter changes for an inactive processor are kept, and the queue never fills", "[plugin]")
 {
     ProbeProcessor::Log log;
@@ -355,6 +503,7 @@ TEST_CASE("Effects do not allocate on the audio thread", "[plugin]")
     engine.setSequencerState(rackInto(1));
     auto gain = instance(makeGain());
     gain->setScopeEnabled(true); // allocates here, on the control thread
+    gain->setMetersEnabled(true);
     engine.setMixerState(withEffects(1, {gain, nullptr, instance(makeGain())}));
     engine.play();
     std::vector<float> l(256), r(256);
@@ -366,6 +515,15 @@ TEST_CASE("Effects do not allocate on the audio thread", "[plugin]")
         const vloom::test::AllocationCounter counter;
         engine.process(out.data(), 2, 256);
         onAudioThread += counter.count();
+        if (block % 10 == 0) { // a UI timer: reading does not allocate either
+            const vloom::test::AllocationCounter reading;
+            (void)gain->readLevels();
+            std::array<float, 64> scopeLeft{};
+            std::array<float, 64> scopeRight{};
+            (void)gain->readScopeStereo(scopeLeft, scopeRight);
+            onAudioThread += reading.count();
+        }
     }
     CHECK(onAudioThread == 0);
+    CHECK(gain->readLevels().output[0] > 0.0f); // the meters ran
 }
