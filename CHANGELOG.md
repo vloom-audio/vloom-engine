@@ -7,6 +7,26 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Count-in and punch recording (ADR 0017):
+  - `Engine::setCountIn()` (0 .. 4 bars): playing from stop with a
+    recording armed first counts the bars with the metronome, the song
+    standing still, then starts it on the exact sample; nothing is recorded
+    meanwhile. `setCountInClick()` clicks it with the metronome off;
+    `isCountingIn()`, `countInBarsLeft()` and `countInBeatsLeft()` tell the
+    UI. `setBeatsPerBar()` sets the time signature's beats (metronome
+    accent, count-in bars, plugins' transport).
+  - `Engine::setPunch()`: audio and MIDI are recorded only where the player
+    heard the punch range, to the sample (mid-block too), in every loop pass,
+    the latency taken off at both edges. Audio takes get a `Punch` mark per
+    stretch (`AudioRecordMark::Kind::Punch`, read by `AudioTake`);
+    `MidiTake::setPunch()` leaves out notes begun outside the range and ends
+    notes held over the punch-out there.
+- Bouncing to audio (ADR 0018): `bouncePattern()` renders one pass of a
+  pattern (or the channel rack's own, `kChannelRackPattern`) and
+  `bounceRange()` part of the song, into memory or a WAV file, with a choice
+  of channels and of mix (`BounceMix::Dry`, `Inserts`, `Master`), tail
+  included; `patternLengthTicks()`. Same offline path as `exportSong()`, so
+  it sounds exactly like the pattern played.
 - Audio input, monitoring and recording it (ADR 0016), the second half of M6:
   - `AudioInput` captures from a microphone or an audio interface: WASAPI
     on Windows, CoreAudio on macOS, ALSA on Linux.

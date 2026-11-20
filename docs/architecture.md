@@ -13,8 +13,8 @@
 | plugin | `plugin/` | Hosted processors behind one interface (ADR 0006): CLAP, VST 3 and VST 2 (ADR 0010) hosts, built-in processors from vloom-dsp (ADR 0008) | core, time |
 | sample | `sample/` | Decoded audio in memory: WAV reading, resampling | core |
 | sequencer | `sequencer/` | Channel rack state and step playback (built-in and plugin instruments) | core, dsp, plugin, sample, time |
-| record | `record/` | Recordings put together on the control thread: `AudioTake` writes the engine's recorded input to a file and places it in the song (ADR 0016) | engine, render |
-| render | `render/` | Offline rendering, file export | engine |
+| record | `record/` | Recordings put together on the control thread: `AudioTake` writes the engine's recorded input to a file and places it in the song (ADR 0016), punch stretches included (ADR 0017) | engine, render |
+| render | `render/` | Offline rendering, file export, bouncing a pattern to audio (ADR 0018) | engine |
 
 Rules:
 
@@ -82,6 +82,13 @@ sample-exact results across many block sizes. Rendering must be deterministic.
    (engine side; the app's export dialog and loop markers are next)
 6. **M4** plugin host interface, CLAP hosting ✅ (ADR 0006: `AudioProcessor`,
    insert effect chains, CLAP effects and instruments)
-7. **M5** VST3 hosting, built-in effects, sends, delay compensation ← *next*
+7. **M5** VST3 hosting, built-in effects, sends, delay compensation ✅
+   except the built-in compressor, reverb, delay and limiter (from
+   vloom-dsp, ADR 0008) ← *next*. Done: VST 3 (and VST 2, ADR 0010)
+   hosting, sends and sidechains, delay compensation (ADR 0007), the
+   built-in gain and EQ
 8. **M6** audio input and recording, MIDI input ✅ (ADR 0015: MIDI input and
    recording; ADR 0016: audio input, monitoring and recording)
+9. **v1.0** engine work ✅ (engine side; the app's controls are next):
+   count-in and punch-in / punch-out for audio and MIDI takes (ADR 0017),
+   bouncing a pattern or part of the song to audio (ADR 0018)

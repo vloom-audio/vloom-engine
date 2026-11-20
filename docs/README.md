@@ -20,3 +20,5 @@
   - [0014 Surround plugins in a stereo mixer](adr/0014-surround-plugins-in-a-stereo-mixer.md)
   - [0015 MIDI input, live playing and recording it](adr/0015-midi-input-and-recording.md)
   - [0016 Audio input, monitoring and recording it](adr/0016-audio-input-and-recording.md)
+  - [0017 Count-in and punch recording](adr/0017-count-in-and-punch-recording.md)
+  - [0018 Bouncing a pattern to audio](adr/0018-bouncing-patterns-to-audio.md)
