@@ -346,11 +346,15 @@ public:
             if (buffer == nullptr)
                 return false;
             try {
+                // The path is copied first and stored only once the sample
+                // is in: if anything throws, the slot keeps both what it
+                // played and the path it saves.
+                std::string newPath = path;
                 const std::lock_guard lock(slotsMutex_);
-                SlotFile& file = files_[static_cast<std::size_t>(slot)];
-                file.path = path;
-                file.error.clear();
                 effect_.setSample(slot, std::move(buffer));
+                SlotFile& file = files_[static_cast<std::size_t>(slot)];
+                file.path = std::move(newPath);
+                file.error = std::string{};
             } catch (const std::exception&) {
                 if (error != nullptr)
                     *error = "Not enough memory to load the sample";
@@ -368,12 +372,12 @@ public:
             if (!validSlot(slot))
                 return false;
             const std::lock_guard lock(slotsMutex_);
-            files_[static_cast<std::size_t>(slot)] = SlotFile{};
             try {
                 effect_.setSample(slot, nullptr);
             } catch (const std::exception&) {
-                return false; // could not retire the old one: it keeps playing
+                return false; // could not retire the old one: it keeps playing, and its path stays
             }
+            files_[static_cast<std::size_t>(slot)] = SlotFile{};
             return true;
         } else {
             (void)slot;

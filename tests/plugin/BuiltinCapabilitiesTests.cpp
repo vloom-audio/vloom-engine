@@ -373,7 +373,7 @@ TEST_CASE("Stepped choices of the built-ins have labels", "[plugin][builtin]")
     CHECK(parameterNamed(delay, "Sync").valueLabels.empty()); // a switch
 
     const auto chorus = vloom::createBuiltinProcessor("vloom.chorus")->parameters();
-    const auto& note = parameterNamed(chorus, "Note");
+    const auto note = parameterNamed(chorus, "Note"); // a copy: GCC flags a reference here
     REQUIRE(note.valueLabels.size() == 20);
     CHECK(note.valueLabels[9] == "1/4");
     CHECK(note.valueLabels[10] == "1/8 D");
@@ -383,7 +383,7 @@ TEST_CASE("Stepped choices of the built-ins have labels", "[plugin][builtin]")
     const auto filter = vloom::createBuiltinProcessor("vloom.filter")->parameters();
     CHECK(parameterNamed(filter, "Type").valueLabels.size() == 4);
     const auto sampler = vloom::createBuiltinProcessor("vloom.sampler")->parameters();
-    const auto& root = parameterNamed(sampler, "Root Key");
+    const auto root = parameterNamed(sampler, "Root Key");
     REQUIRE(root.valueLabels.size() == 128);
     CHECK(root.valueLabels[60] == "C3");
     CHECK(root.valueLabels[36] == "C1");
@@ -555,6 +555,8 @@ TEST_CASE("Sample files can be read through a resolver", "[plugin][builtin][samp
     std::string error;
     CHECK_FALSE(sampler->loadSample(0, "other.ogg", &error));
     CHECK(error == "cannot decode other.ogg");
+    CHECK(sampler->sampleSlot(0).path == "song.mp3"); // a failed load keeps the path it saves
+    CHECK(sampler->sampleSlot(0).loaded());
 
     // Restoring goes through it too.
     const auto state = sampler->saveState();
