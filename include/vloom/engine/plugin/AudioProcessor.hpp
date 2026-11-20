@@ -2,8 +2,10 @@
 // Copyright (C) 2026 Vloom Audio contributors
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -62,6 +64,30 @@ struct SampleSlotInfo {
     std::string error{};
 
     [[nodiscard]] bool loaded() const noexcept { return frames > 0; }
+};
+
+/// A sample slot's audio as it plays, read-only, for a UI to draw (a
+/// waveform): what AudioProcessor::sampleAudio() returns. It shares the
+/// processor's own copy, so holding it costs no memory beyond keeping that
+/// copy alive after the slot moves on to another sample; it never changes.
+struct SampleAudio {
+    static constexpr int kMaxChannels = 2;
+    int numChannels = 0; ///< 1 or 2
+    std::int64_t frames = 0;
+    double sampleRate = 0.0; ///< the file's own rate (the processor resamples as it plays)
+    /// Channel c's `frames` samples for c < numChannels; empty after.
+    std::array<std::span<const float>, kMaxChannels> channels{};
+};
+
+/// A value a processor shows besides its parameters (ADR 0019), as
+/// AudioProcessor::readouts() lists them, e.g. "Gain Reduction" in dB or
+/// whether a gate is open.
+struct ReadoutInfo {
+    std::string id; ///< stable across versions, e.g. "gainReduction", "gateOpen"
+    std::string name; ///< e.g. "Gain Reduction"
+    std::string unit; ///< e.g. "dB"; empty: none
+    /// A state rather than an amount: the value is 0 (off) or 1 (on).
+    bool toggle = false;
 };
 
 /// Where a sample slot reads `path` from: a WAV file the engine can decode
@@ -207,6 +233,21 @@ public:
     /// and de-esser. nullopt: it reports none. Any thread.
     [[nodiscard]] virtual std::optional<float> gainReductionDb() const { return std::nullopt; }
 
+    /// What it shows besides its parameters, for a host that draws its own
+    /// editor (ADR 0019): the built-in dynamics give their gain reduction
+    /// (as gainReductionDb()), the gate whether it is open. Fixed for a
+    /// processor: the same list every call. Empty: none. Control thread.
+    [[nodiscard]] virtual std::vector<ReadoutInfo> readouts() const { return {}; }
+    /// The value of readout `index` (into readouts()) now, as of the last
+    /// block processed; 0 for a bad index. Any thread: it never locks,
+    /// allocates or waits, so a UI timer may poll it while the audio thread
+    /// processes.
+    [[nodiscard]] virtual float readoutValue(int index) const noexcept
+    {
+        (void)index;
+        return 0.0f;
+    }
+
     /// Sample slots (the built-in sampler: 1, the drum sampler: one per
     /// pad). Not real-time: from the control thread or a worker thread, one
     /// call at a time per processor (it serializes them with activate()),
@@ -240,6 +281,23 @@ public:
         (void)slot;
         return false;
     }
+    /// The audio `slot` plays, for a waveform (ADR 0019); null when it
+    /// plays nothing or the slot does not exist. The data stays valid and
+    /// unchanged for as long as the caller holds it, also after a load
+    /// replaces the slot's sample, and is released on the thread that
+    /// drops it last. Not real-time (it may lock briefly against a load):
+    /// any thread but the audio thread. Never throws.
+    [[nodiscard]] virtual std::shared_ptr<const SampleAudio> sampleAudio(int slot) const
+    {
+        (void)slot;
+        return nullptr;
+    }
+    /// A counter that changes whenever any slot's sample, path or error
+    /// may have changed (loadSample(), clearSample(), loadState()), so a UI
+    /// polls this instead of comparing paths or reading files again. Read
+    /// it before sampleSlot() / sampleAudio(): a change made after is seen
+    /// on the next poll. 0 without slots. Any thread, lock-free.
+    [[nodiscard]] virtual std::uint64_t sampleSlotsVersion() const noexcept { return 0; }
     /// Sets where sample files are read from (see SampleFileResolver), for
     /// loadSample() and loadState(). Set it before loading a state.
     virtual void setSampleFileResolver(SampleFileResolver resolver) { (void)resolver; }

@@ -36,6 +36,50 @@ concept GainReductionMeter = requires(const T processor) {
     { processor.gainReductionDb() } noexcept -> std::convertible_to<float>;
 };
 
+/// A processor that reports whether it is open (vloom-dsp's Gate; any
+/// thread).
+template <typename T>
+concept OpenStateMeter = requires(const T processor) {
+    { processor.isOpen() } noexcept -> std::convertible_to<bool>;
+};
+
+/// A value a built-in shows (ADR 0019): how a host lists it, and how to
+/// read it from the effect on any thread.
+template <typename Effect> struct Readout {
+    const char* id = "";
+    const char* name = "";
+    const char* unit = "";
+    bool toggle = false;
+    float (*value)(const Effect& effect) noexcept = nullptr;
+};
+
+template <typename Effect>
+inline constexpr std::size_t kReadoutCount
+    = (GainReductionMeter<Effect> ? 1U : 0U) + (OpenStateMeter<Effect> ? 1U : 0U);
+
+/// The one place where vloom-dsp capabilities become readouts (ADR 0019).
+/// Every one must be readable from any thread without locking.
+///
+/// vloom-dsp's coming HasReadouts concept (readoutSpecs() and readout(i))
+/// plugs in here: the adapter lists its readouts after these, under the ids
+/// it gives, and an effect that reports its gain reduction or open state
+/// through it drops out of the matching line below, so no id is listed
+/// twice.
+template <typename Effect>
+[[nodiscard]] constexpr std::array<Readout<Effect>, kReadoutCount<Effect>> readoutTable() noexcept
+{
+    std::array<Readout<Effect>, kReadoutCount<Effect>> table{};
+    std::size_t next = 0;
+    if constexpr (GainReductionMeter<Effect>)
+        table[next++] = Readout<Effect>{"gainReduction", "Gain Reduction", "dB", false,
+            [](const Effect& effect) noexcept { return static_cast<float>(effect.gainReductionDb()); }};
+    if constexpr (OpenStateMeter<Effect>)
+        table[next++] = Readout<Effect>{"gateOpen", "Gate Open", "", true,
+            [](const Effect& effect) noexcept { return effect.isOpen() ? 1.0f : 0.0f; }};
+    (void)next;
+    return table;
+}
+
 /// What the registry knows about a built-in besides its vloom-dsp spec.
 struct Extras {
     const char* category = ""; ///< PluginInfo::category
@@ -67,6 +111,9 @@ struct Extras {
 ///   paths in the state (BuiltinSamples.hpp); idle() releases replaced
 ///   samples.
 /// - gainReductionDb() for a meter.
+/// - Readouts (ADR 0019): the capabilities above that are values to show
+///   (gain reduction, a gate's open state), mapped in one place,
+///   readoutTable().
 template <dsp::Effect Effect> class BuiltinEffect final : public AudioProcessor {
 public:
     explicit BuiltinEffect(Extras extras = {})
@@ -118,6 +165,27 @@ public:
             return static_cast<float>(effect_.gainReductionDb());
         else
             return std::nullopt;
+    }
+
+    [[nodiscard]] std::vector<ReadoutInfo> readouts() const override
+    {
+        std::vector<ReadoutInfo> list;
+        list.reserve(kReadouts.size());
+        for (const Readout<Effect>& readout : kReadouts)
+            list.push_back(ReadoutInfo{readout.id, readout.name, readout.unit, readout.toggle});
+        return list;
+    }
+
+    [[nodiscard]] float readoutValue(int index) const noexcept override
+    {
+        if constexpr (kReadoutCount<Effect> == 0) {
+            (void)index;
+            return 0.0f;
+        } else {
+            if (index < 0 || static_cast<std::size_t>(index) >= kReadouts.size())
+                return 0.0f;
+            return kReadouts[static_cast<std::size_t>(index)].value(effect_);
+        }
     }
 
     bool activate(double sampleRate, int maxBlockFrames) override
@@ -355,6 +423,7 @@ public:
                 SlotFile& file = files_[static_cast<std::size_t>(slot)];
                 file.path = std::move(newPath);
                 file.error = std::string{};
+                slotsVersion_.fetch_add(1, std::memory_order_release);
             } catch (const std::exception&) {
                 if (error != nullptr)
                     *error = "Not enough memory to load the sample";
@@ -378,11 +447,35 @@ public:
                 return false; // could not retire the old one: it keeps playing, and its path stays
             }
             files_[static_cast<std::size_t>(slot)] = SlotFile{};
+            slotsVersion_.fetch_add(1, std::memory_order_release);
             return true;
         } else {
             (void)slot;
             return false;
         }
+    }
+
+    [[nodiscard]] std::shared_ptr<const SampleAudio> sampleAudio(int slot) const override
+    {
+        if constexpr (kSamples) {
+            if (!validSlot(slot))
+                return nullptr;
+            std::shared_ptr<const dsp::SampleBuffer> buffer;
+            {
+                // sample() is host side: serialized with setSample().
+                const std::lock_guard lock(slotsMutex_);
+                buffer = effect_.sample(slot);
+            }
+            return sampleAudioOf(std::move(buffer));
+        } else {
+            (void)slot;
+            return nullptr;
+        }
+    }
+
+    [[nodiscard]] std::uint64_t sampleSlotsVersion() const noexcept override
+    {
+        return slotsVersion_.load(std::memory_order_acquire);
     }
 
     void setSampleFileResolver(SampleFileResolver resolver) override
@@ -402,6 +495,8 @@ private:
         std::string error;
     };
 
+    static constexpr auto kReadouts = readoutTable<Effect>();
+
     [[nodiscard]] bool validSlot(int slot) const noexcept
     {
         return slot >= 0 && static_cast<std::size_t>(slot) < files_.size();
@@ -418,6 +513,7 @@ private:
                 effect_.setSample(slot, nullptr);
             } catch (const std::exception&) {
             }
+            slotsVersion_.fetch_add(1, std::memory_order_release);
         } else {
             (void)slot;
             (void)path;
@@ -515,6 +611,7 @@ private:
     mutable std::mutex slotsMutex_;
     std::vector<SlotFile> files_; ///< one per slot; sized once
     SampleFileResolver resolver_;
+    std::atomic<std::uint64_t> slotsVersion_{0}; ///< sampleSlotsVersion(): bumped under the mutex
 };
 
 } // namespace vloom::builtin

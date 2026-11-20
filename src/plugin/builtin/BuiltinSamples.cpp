@@ -8,7 +8,9 @@
 #include <array>
 #include <exception>
 #include <limits>
+#include <memory>
 #include <new>
+#include <utility>
 
 namespace vloom::builtin {
 
@@ -92,6 +94,31 @@ std::shared_ptr<const dsp::SampleBuffer> read(
 }
 
 } // namespace
+
+std::shared_ptr<const SampleAudio> sampleAudioOf(std::shared_ptr<const dsp::SampleBuffer> buffer)
+{
+    if (buffer == nullptr)
+        return nullptr;
+    // The view and the buffer it reads in one allocation; the aliasing
+    // pointer hands out the view and keeps both alive.
+    struct Held {
+        SampleAudio audio;
+        std::shared_ptr<const dsp::SampleBuffer> buffer;
+    };
+    try {
+        auto held = std::make_shared<Held>();
+        SampleAudio& audio = held->audio;
+        audio.numChannels = std::clamp(buffer->numChannels(), 0, SampleAudio::kMaxChannels);
+        audio.frames = buffer->frames();
+        audio.sampleRate = buffer->sampleRate();
+        for (int ch = 0; ch < audio.numChannels; ++ch)
+            audio.channels[static_cast<std::size_t>(ch)] = buffer->channel(ch);
+        held->buffer = std::move(buffer);
+        return std::shared_ptr<const SampleAudio>(held, &held->audio);
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
 
 std::shared_ptr<const dsp::SampleBuffer> readSampleFile(
     const std::string& path, const SampleFileResolver& resolver, std::string* error)

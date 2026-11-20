@@ -304,6 +304,7 @@ TEST_CASE("No built-in allocates on the audio thread", "[plugin][builtin]")
         context.numChannels = 2;
         context.numFrames = 512;
 
+        const auto readoutCount = static_cast<int>(processor->readouts().size());
         long long allocations = 0;
         for (int block = 0; block < 60; ++block) {
             if (block % 10 == 5) { // control thread: outside the count
@@ -325,6 +326,9 @@ TEST_CASE("No built-in allocates on the audio thread", "[plugin][builtin]")
             processor->process(context); // block splits, values taken from the host, glides
             (void)processor->latencyFrames();
             (void)processor->gainReductionDb();
+            for (int readout = 0; readout < readoutCount; ++readout)
+                (void)processor->readoutValue(readout); // a UI timer may poll these meanwhile
+            (void)processor->sampleSlotsVersion();
             if (block % 20 == 19)
                 processor->reset();
             allocations += counter.count();
