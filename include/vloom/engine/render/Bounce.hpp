@@ -49,8 +49,9 @@ struct BounceOptions {
     int blockSize = 512;
     /// A stereo WAV file to write (UTF-8), in `format`; written only on
     /// success. Empty: the audio goes into BounceResult::audio instead, at
-    /// most kMaxInMemoryBounceSeconds of it (tail included); longer fails
-    /// with an error, like running out of memory does.
+    /// most kMaxInMemoryBounceSeconds of it: the body plus maxTailSeconds
+    /// must fit, checked before rendering; longer fails with an error, like
+    /// running out of memory does.
     std::string path{};
     WavFormat format = WavFormat::Float32;
     bool dither = true; ///< integer formats: TPDF dither

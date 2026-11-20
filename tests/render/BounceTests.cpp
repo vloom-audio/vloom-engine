@@ -319,6 +319,15 @@ TEST_CASE("A bounce too long for memory fails with an error, not an exception", 
     CHECK_FALSE(result.error.empty());
     CHECK(result.audio.empty());
 
+    // Under the cap, but not with its longest tail: refused before rendering.
+    const auto almost = static_cast<std::int64_t>(29.0 * 60.0 * 2.0) * vloom::kPpq; // 29 min
+    options.maxTailSeconds = 120.0;
+    REQUIRE_NOTHROW(result = vloom::bounceRange(state, 0, almost, nullptr, kRate, options));
+    CHECK_FALSE(result.ok);
+    CHECK_FALSE(result.error.empty());
+    CHECK(result.frames == 0); // nothing was rendered
+    options.maxTailSeconds = 0.0;
+
     // A short range still bounces into memory.
     const auto shorter = static_cast<std::int64_t>(2.0 * 2.0) * vloom::kPpq; // 2 s
     result = vloom::bounceRange(state, 0, shorter, nullptr, kRate, options);

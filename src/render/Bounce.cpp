@@ -79,9 +79,13 @@ BounceResult render(const SequencerState& song, std::int64_t startTicks, std::in
         // long range can't ask for gigabytes; running out of memory anyway
         // is an error in the result, never an exception out of the API.
         const auto maxFrames = static_cast<std::uint64_t>(kMaxInMemoryBounceSeconds * sampleRate);
-        output.begin = [&, maxFrames](std::uint64_t bodyFrames, std::string* error) {
+        // The longest tail counts up front, so a range that would only cross
+        // the cap in its tail fails at once instead of after rendering it all.
+        const auto maxTailFrames
+            = static_cast<std::uint64_t>(std::ceil(std::max(options.maxTailSeconds, 0.0) * sampleRate));
+        output.begin = [&, maxFrames, maxTailFrames](std::uint64_t bodyFrames, std::string* error) {
             result.bodyFrames = bodyFrames;
-            if (bodyFrames > maxFrames) {
+            if (bodyFrames > maxFrames || maxTailFrames > maxFrames - bodyFrames) {
                 if (error != nullptr)
                     *error = "Too long to bounce into memory; bounce to a file instead";
                 return false;
