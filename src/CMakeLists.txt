@@ -48,6 +48,7 @@ target_sources(vloom_engine PRIVATE
     plugin/Vst2Host.cpp
     plugin/Vst3Host.cpp
     plugin/builtin/BuiltinProcessors.cpp
+    plugin/builtin/BuiltinSamples.cpp
 
     # mixer — inserts, routes and delay compensation (ADR 0007)
     mixer/MixerGraph.cpp

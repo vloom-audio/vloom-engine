@@ -2,25 +2,47 @@
 // Copyright (C) 2026 Vloom Audio contributors
 #pragma once
 
+#include "plugin/builtin/BuiltinSamples.hpp"
 #include "vloom/engine/plugin/AudioProcessor.hpp"
 
 #include <vloom/dsp/Processor.hpp>
+#include <vloom/dsp/Sample.hpp>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <concepts>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace vloom::builtin {
 
 inline constexpr std::array<char, 4> kStateMagic{'V', 'L', 'B', '1'};
+
+/// A processor that reports how much it turns the sound down (vloom-dsp's
+/// meter convention: dB, >= 0, any thread).
+template <typename T>
+concept GainReductionMeter = requires(const T processor) {
+    { processor.gainReductionDb() } noexcept -> std::convertible_to<float>;
+};
+
+/// What the registry knows about a built-in besides its vloom-dsp spec.
+struct Extras {
+    const char* category = ""; ///< PluginInfo::category
+    /// The names of a stepped choice parameter's values (ParameterInfo::
+    /// valueLabels); empty for others. Null: none at all.
+    std::vector<std::string> (*labels)(std::uint32_t id) = nullptr;
+};
 
 /// Wraps a vloom-dsp effect or instrument as an AudioProcessor (ADR 0008).
 /// An instrument (dsp::Instrument: it has noteOn() and noteOff()) is listed
@@ -32,45 +54,89 @@ inline constexpr std::array<char, 4> kStateMagic{'V', 'L', 'B', '1'};
 /// - The latest value of each parameter is kept in an atomic, so saveState()
 ///   on the control thread sees what the audio thread applied.
 /// - loadState() hands the values to the audio thread for its next block.
+///
+/// Optional vloom-dsp capabilities, found at compile time:
+/// - dsp::SidechainEffect: hasSidechain(); processWithSidechain() while the
+///   host sends a key (ProcessContext::sidechain), process() otherwise.
+/// - dsp::TempoAware: setTempo() with the transport's tempo before the first
+///   block after activate() and whenever it changes.
+/// - Latency that changes with a parameter (limiter, saturator): read again
+///   on the audio thread after every change, for latencyFrames() and so
+///   PluginInstance::updateLatency().
+/// - dsp::SampleSlots: the sample slot API of AudioProcessor, with the
+///   paths in the state (BuiltinSamples.hpp); idle() releases replaced
+///   samples.
+/// - gainReductionDb() for a meter.
 template <dsp::Effect Effect> class BuiltinEffect final : public AudioProcessor {
 public:
-    BuiltinEffect()
-        : values_(std::make_unique<std::atomic<double>[]>(specs().size()))
+    explicit BuiltinEffect(Extras extras = {})
+        : extras_(extras)
+        , values_(std::make_unique<std::atomic<double>[]>(specs().size()))
     {
         for (std::size_t i = 0; i < specs().size(); ++i)
             values_[i].store(specs()[i].defaultValue, std::memory_order_relaxed);
+        if constexpr (kSamples)
+            files_.resize(static_cast<std::size_t>(std::max(effect_.sampleSlotCount(), 0)));
     }
 
-    [[nodiscard]] PluginInfo info() const override
+    /// What info() gives, without making one.
+    [[nodiscard]] static PluginInfo describe(const Extras& extras = {})
     {
         const dsp::ProcessorSpec spec = Effect::spec();
-        return PluginInfo{spec.id, spec.name, "Vloom Audio", spec.version,
+        PluginInfo info{spec.id, spec.name, "Vloom Audio", spec.version,
             kInstrument ? PluginInfo::Kind::Instrument : PluginInfo::Kind::Effect};
+        info.category = extras.category;
+        return info;
     }
+
+    [[nodiscard]] PluginInfo info() const override { return describe(extras_); }
 
     [[nodiscard]] std::vector<ParameterInfo> parameters() const override
     {
         std::vector<ParameterInfo> list;
         list.reserve(specs().size());
-        for (const dsp::ParameterSpec& p : specs())
-            list.push_back(ParameterInfo{
-                p.id, p.name, p.unit, p.minValue, p.maxValue, p.defaultValue, p.stepped, p.group});
+        for (const dsp::ParameterSpec& p : specs()) {
+            ParameterInfo info{
+                p.id, p.name, p.unit, p.minValue, p.maxValue, p.defaultValue, p.stepped, p.group};
+            if (p.stepped && extras_.labels != nullptr) {
+                info.valueLabels = extras_.labels(p.id);
+                // One per whole value, or none: a partial list would misname them.
+                const double values = p.maxValue - p.minValue + 1.0;
+                if (static_cast<double>(info.valueLabels.size()) != values)
+                    info.valueLabels.clear();
+            }
+            list.push_back(std::move(info));
+        }
         return list;
+    }
+
+    [[nodiscard]] bool hasSidechain() const override { return dsp::SidechainEffect<Effect>; }
+
+    [[nodiscard]] std::optional<float> gainReductionDb() const override
+    {
+        if constexpr (GainReductionMeter<Effect>)
+            return static_cast<float>(effect_.gainReductionDb());
+        else
+            return std::nullopt;
     }
 
     bool activate(double sampleRate, int maxBlockFrames) override
     {
         if (!(sampleRate > 0.0) || !std::isfinite(sampleRate) || maxBlockFrames <= 0)
             return false;
-        // Not processing now (ADR 0006): the effect is ours to set up.
+        // Not processing now (ADR 0006): the effect is ours to set up. The
+        // sample slots must not change while it prepares.
+        const std::lock_guard lock(slotsMutex_);
         pending_.store(false, std::memory_order_relaxed);
         applyValues();
         effect_.prepare(sampleRate, maxBlockFrames); // starts at the values, no glide
-        latency_ = std::max(effect_.latencyFrames(), 0);
+        tempo_ = 0.0; // the first block sets it
+        latency_.store(std::max(effect_.latencyFrames(), 0), std::memory_order_relaxed);
         return true;
     }
 
-    [[nodiscard]] int latencyFrames() const override { return latency_; }
+    /// As of activation or the last parameter change the audio thread applied.
+    [[nodiscard]] int latencyFrames() const override { return latency_.load(std::memory_order_relaxed); }
 
     [[nodiscard]] std::vector<std::uint8_t> saveState() const override
     {
@@ -86,6 +152,16 @@ public:
             std::memcpy(&bits, &value, sizeof bits);
             putLe(state, bits);
         }
+        if constexpr (kSamples) {
+            std::vector<std::string> paths;
+            {
+                const std::lock_guard lock(slotsMutex_);
+                paths.reserve(files_.size());
+                for (const SlotFile& file : files_)
+                    paths.push_back(file.path);
+            }
+            appendSamplePaths(state, paths);
+        }
         return state;
     }
 
@@ -96,8 +172,18 @@ public:
             return false;
         const auto count = getLe<std::uint32_t>(state.subspan(kStateMagic.size()));
         const std::span<const std::uint8_t> entries = state.subspan(kStateMagic.size() + 4);
-        if (entries.size() != static_cast<std::size_t>(count) * 12)
+        const std::size_t entryBytes = static_cast<std::size_t>(count) * 12;
+        // The parameters, then (built-ins with sample slots) their paths.
+        if (entries.size() < entryBytes || (!kSamples && entries.size() != entryBytes))
             return false;
+        std::vector<std::string> paths;
+        if constexpr (kSamples) {
+            const std::span<const std::uint8_t> rest = entries.subspan(entryBytes);
+            const int slots = static_cast<int>(files_.size());
+            if (!rest.empty() && !readSamplePaths(rest, slots, paths))
+                return false;
+            paths.resize(files_.size()); // none listed: every slot empty
+        }
         for (std::uint32_t e = 0; e < count; ++e) {
             const auto entry = entries.subspan(static_cast<std::size_t>(e) * 12, 12);
             const auto id = getLe<std::uint32_t>(entry);
@@ -110,20 +196,44 @@ public:
                     clampTo(specs()[static_cast<std::size_t>(index)], value), std::memory_order_relaxed);
         }
         pending_.store(true, std::memory_order_release); // the audio thread applies them
+        if constexpr (kSamples) {
+            // A file that cannot be read keeps its path and says why; the
+            // rest of the state still loads.
+            for (std::size_t slot = 0; slot < paths.size(); ++slot) {
+                if (paths[slot].empty()) {
+                    (void)clearSample(static_cast<int>(slot));
+                    continue;
+                }
+                std::string error;
+                if (!loadSample(static_cast<int>(slot), paths[slot], &error))
+                    forget(static_cast<int>(slot), paths[slot], error);
+            }
+        }
         return true;
     }
 
     void process(const ProcessContext& context) noexcept override
     {
-        if (pending_.exchange(false, std::memory_order_acquire))
+        if (pending_.exchange(false, std::memory_order_acquire)) {
             applyValues();
+            updateLatency();
+        }
+        if constexpr (dsp::TempoAware<Effect>) {
+            const double tempo = context.transport.tempo;
+            if (tempo != tempo_ && std::isfinite(tempo) && tempo > 0.0) {
+                tempo_ = tempo;
+                effect_.setTempo(tempo);
+            }
+        }
         const int numChannels = std::clamp(context.numChannels, 0, kMaxChannels);
         const int numFrames = std::max(context.numFrames, 0);
         const std::span<const ParameterEvent> changes = context.parameters;
         const std::span<const NoteEvent> notes = kInstrument ? context.notes : std::span<const NoteEvent>();
+        const float* const* key = dsp::SidechainEffect<Effect> ? context.sidechain : nullptr;
         int position = 0;
         std::size_t change = 0;
         std::size_t note = 0;
+        bool changed = false;
         // Both lists are in frame order: take whichever comes first.
         while (change < changes.size() || note < notes.size()) {
             constexpr int kNever = std::numeric_limits<int>::max();
@@ -132,7 +242,7 @@ public:
             const int noteFrame
                 = note < notes.size() ? std::clamp(notes[note].frame, position, numFrames) : kNever;
             const int frame = std::min(changeFrame, noteFrame);
-            run(context.channels, numChannels, position, frame - position);
+            run(context.channels, key, numChannels, position, frame - position);
             position = frame;
             if (changeFrame <= noteFrame) {
                 const ParameterEvent& event = changes[change++];
@@ -142,14 +252,26 @@ public:
                 const double value = clampTo(specs()[static_cast<std::size_t>(index)], event.value);
                 values_[static_cast<std::size_t>(index)].store(value, std::memory_order_relaxed);
                 effect_.setParameter(event.id, value);
+                changed = true;
             } else {
                 play(notes[note++]);
             }
         }
-        run(context.channels, numChannels, position, numFrames - position);
+        run(context.channels, key, numChannels, position, numFrames - position);
+        if (changed)
+            updateLatency();
     }
 
     void reset() noexcept override { effect_.reset(); }
+
+    /// Releases the samples replaced earlier that the audio thread let go of.
+    void idle() override
+    {
+        if constexpr (kSamples) {
+            const std::lock_guard lock(slotsMutex_);
+            effect_.collectGarbage();
+        }
+    }
 
     [[nodiscard]] std::optional<double> parameterValue(std::uint32_t id) const override
     {
@@ -181,9 +303,127 @@ public:
         return index < 0 ? 0.0 : values_[static_cast<std::size_t>(index)].load(std::memory_order_relaxed);
     }
 
+    // ---- sample slots (dsp::SampleSlots): host side, see AudioProcessor
+
+    [[nodiscard]] int sampleSlotCount() const override { return static_cast<int>(files_.size()); }
+
+    [[nodiscard]] SampleSlotInfo sampleSlot(int slot) const override
+    {
+        SampleSlotInfo info;
+        if constexpr (kSamples) {
+            if (!validSlot(slot))
+                return info;
+            info.name = files_.size() == 1 ? std::string("Sample") : "Pad " + std::to_string(slot + 1);
+            const std::lock_guard lock(slotsMutex_);
+            const SlotFile& file = files_[static_cast<std::size_t>(slot)];
+            info.path = file.path;
+            info.error = file.error;
+            const dsp::SampleInfo playing = effect_.sampleInfo(slot);
+            info.numChannels = playing.numChannels;
+            info.frames = playing.frames;
+            info.sampleRate = playing.sampleRate;
+        } else {
+            (void)slot;
+        }
+        return info;
+    }
+
+    bool loadSample(int slot, const std::string& path, std::string* error = nullptr) override
+    {
+        if constexpr (kSamples) {
+            if (!validSlot(slot)) {
+                if (error != nullptr)
+                    *error = "no sample slot " + std::to_string(slot + 1);
+                return false;
+            }
+            SampleFileResolver resolver;
+            {
+                const std::lock_guard lock(slotsMutex_);
+                resolver = resolver_;
+            }
+            // Decoded outside the lock: a long file must not hold up idle().
+            std::shared_ptr<const dsp::SampleBuffer> buffer = readSampleFile(path, resolver, error);
+            if (buffer == nullptr)
+                return false;
+            try {
+                // The path is copied first and stored only once the sample
+                // is in: if anything throws, the slot keeps both what it
+                // played and the path it saves.
+                std::string newPath = path;
+                const std::lock_guard lock(slotsMutex_);
+                effect_.setSample(slot, std::move(buffer));
+                SlotFile& file = files_[static_cast<std::size_t>(slot)];
+                file.path = std::move(newPath);
+                file.error = std::string{};
+            } catch (const std::exception&) {
+                if (error != nullptr)
+                    *error = "Not enough memory to load the sample";
+                return false;
+            }
+            return true;
+        } else {
+            return AudioProcessor::loadSample(slot, path, error);
+        }
+    }
+
+    bool clearSample(int slot) override
+    {
+        if constexpr (kSamples) {
+            if (!validSlot(slot))
+                return false;
+            const std::lock_guard lock(slotsMutex_);
+            try {
+                effect_.setSample(slot, nullptr);
+            } catch (const std::exception&) {
+                return false; // could not retire the old one: it keeps playing, and its path stays
+            }
+            files_[static_cast<std::size_t>(slot)] = SlotFile{};
+            return true;
+        } else {
+            (void)slot;
+            return false;
+        }
+    }
+
+    void setSampleFileResolver(SampleFileResolver resolver) override
+    {
+        const std::lock_guard lock(slotsMutex_);
+        resolver_ = std::move(resolver);
+    }
+
 private:
     static constexpr int kMaxChannels = 8;
+    static constexpr int kMaxKeyChannels = 2;
     static constexpr bool kInstrument = dsp::Instrument<Effect>;
+    static constexpr bool kSamples = dsp::SampleSlots<Effect>;
+
+    struct SlotFile {
+        std::string path;
+        std::string error;
+    };
+
+    [[nodiscard]] bool validSlot(int slot) const noexcept
+    {
+        return slot >= 0 && static_cast<std::size_t>(slot) < files_.size();
+    }
+
+    /// The slot plays nothing, but keeps `path` and why it could not be read.
+    void forget(int slot, const std::string& path, const std::string& error)
+    {
+        if constexpr (kSamples) {
+            const std::lock_guard lock(slotsMutex_);
+            files_[static_cast<std::size_t>(slot)]
+                = SlotFile{path, error.empty() ? "Cannot read the file" : error};
+            try {
+                effect_.setSample(slot, nullptr);
+            } catch (const std::exception&) {
+            }
+        } else {
+            (void)slot;
+            (void)path;
+            (void)error;
+        }
+    }
 
     /// Starts or ends a note of an instrument.
     void play(const NoteEvent& note) noexcept
@@ -221,13 +461,30 @@ private:
             effect_.setParameter(specs()[i].id, values_[i].load(std::memory_order_relaxed));
     }
 
-    void run(float* const* channels, int numChannels, int offset, int frames) noexcept
+    /// Audio thread, after parameter changes: the latency some of them change.
+    void updateLatency() noexcept
+    {
+        latency_.store(std::max(effect_.latencyFrames(), 0), std::memory_order_relaxed);
+    }
+
+    void run(
+        float* const* channels, const float* const* key, int numChannels, int offset, int frames) noexcept
     {
         if (frames <= 0 || channels == nullptr)
             return;
         std::array<float*, kMaxChannels> part{};
         for (int ch = 0; ch < numChannels; ++ch)
             part[static_cast<std::size_t>(ch)] = channels[ch] + offset;
+        if constexpr (dsp::SidechainEffect<Effect>) {
+            if (key != nullptr && key[0] != nullptr && key[1] != nullptr) {
+                const std::array<const float*, kMaxKeyChannels> keyPart{key[0] + offset, key[1] + offset};
+                effect_.processWithSidechain(
+                    part.data(), keyPart.data(), numChannels, kMaxKeyChannels, frames);
+                return;
+            }
+        } else {
+            (void)key;
+        }
         effect_.process(part.data(), numChannels, frames);
     }
 
@@ -245,10 +502,19 @@ private:
         return value;
     }
 
-    Effect effect_; ///< audio thread, once active
+    Extras extras_;
+    Effect effect_; ///< audio thread, once active (constructed in place: some cannot move)
     std::unique_ptr<std::atomic<double>[]> values_; ///< per parameter, in specs() order
     std::atomic<bool> pending_{false}; ///< values set off the audio thread wait for it
-    int latency_ = 0; ///< read at activation
+    std::atomic<int> latency_{0}; ///< audio thread writes after changes, control thread reads
+    double tempo_ = 0.0; ///< audio thread: the tempo last given (0: none yet)
+
+    // Sample slots, host side. The mutex serializes the host side of the
+    // effect's slots (setSample(), collectGarbage(), prepare()) and guards
+    // the files; the audio thread never takes it.
+    mutable std::mutex slotsMutex_;
+    std::vector<SlotFile> files_; ///< one per slot; sized once
+    SampleFileResolver resolver_;
 };
 
 } // namespace vloom::builtin

@@ -20,6 +20,7 @@ add_executable(vloom_engine_tests
     io/MidiInputTests.cpp
     mixer/MixerTests.cpp
     mixer/RoutingTests.cpp
+    plugin/BuiltinCapabilitiesTests.cpp
     plugin/BuiltinProcessorsTests.cpp
     plugin/ClapHostTests.cpp
     plugin/EditorRunLoopTests.cpp

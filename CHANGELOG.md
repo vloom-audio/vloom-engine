@@ -7,6 +7,30 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- All 20 built-in processors of vloom-dsp (ADR 0008, vloom-dsp pinned to
+  b469c4f), which completes M5's built-in effects: compressor, limiter,
+  gate, de-esser, transient shaper, EQ, filter, delay, reverb, chorus,
+  flanger, phaser, tremolo, saturator, bitcrusher, gain and utility, and the
+  synth, sampler and drum sampler instruments.
+  - `PluginInfo::category`: what a built-in is for a host's lists
+    ("Dynamics", "EQ/Filter", "Delay/Reverb", "Modulation", "Distortion",
+    "Utility", "Synth", "Sampler", "Drums").
+  - `ParameterInfo::valueLabels`: the names of a stepped choice's values
+    (modes, curves, filter types, note lengths such as "1/8 D", key names).
+  - The compressor and gate have a sidechain (`hasSidechain()`): a mixer
+    sidechain send keys them, delay-compensated like a plugin's.
+  - The delay, chorus, flanger, phaser and tremolo follow the transport's
+    tempo.
+  - The limiter's and saturator's latency follows their Lookahead, True
+    Peak and Oversampling: `Engine::updatePluginLatency()` picks it up.
+  - `AudioProcessor::gainReductionDb()` for a meter (compressor, gate,
+    limiter, de-esser).
+  - Sample slots for the sampler (1) and the drum sampler (16, one per pad):
+    `AudioProcessor::sampleSlotCount()`, `sampleSlot()` (`SampleSlotInfo`),
+    `loadSample()`, `clearSample()` and `setSampleFileResolver()` (for files
+    a host decodes itself). The state keeps each slot's path and loads the
+    files again; a missing file is reported in `SampleSlotInfo::error`, not a
+    failed state. `idle()` releases replaced samples.
 - Count-in and punch recording (ADR 0017):
   - `Engine::setCountIn()` (0 .. 4 bars): playing from stop with a
     recording armed first counts the bars with the metronome, the song

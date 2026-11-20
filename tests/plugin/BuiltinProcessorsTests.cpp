@@ -4,17 +4,21 @@
 
 #include <vloom/engine/plugin/BuiltinProcessors.hpp>
 #include <vloom/engine/plugin/PluginInstance.hpp>
+#include <vloom/engine/render/WavWriter.hpp>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <memory>
+#include <string>
 #include <vector>
 
 using Catch::Approx;
@@ -251,10 +255,25 @@ TEST_CASE("A built-in reports its values, also those set while no audio runs", "
 
 TEST_CASE("No built-in allocates on the audio thread", "[plugin][builtin]")
 {
+    // A sample for the built-ins with sample slots.
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path folder
+        = std::filesystem::temp_directory_path() / ("vloom_builtin_alloc_" + std::to_string(stamp));
+    std::filesystem::create_directories(folder);
+    const std::string sample = (folder / "tone.wav").string();
+    {
+        std::vector<float> tone(4410 * 2);
+        for (std::size_t i = 0; i < tone.size(); ++i)
+            tone[i] = 0.5f * static_cast<float>(std::sin(0.05 * static_cast<double>(i / 2)));
+        REQUIRE(vloom::writeWavFloat32(sample, tone, 2, 44100));
+    }
+
     for (const vloom::PluginInfo& info : vloom::builtinProcessors()) {
         INFO(info.id);
         auto processor = vloom::createBuiltinProcessor(info.id);
         REQUIRE(processor != nullptr);
+        for (int slot = 0; slot < processor->sampleSlotCount(); ++slot)
+            REQUIRE(processor->loadSample(slot, sample));
         REQUIRE(processor->activate(kRate, 1024));
         const std::vector<vloom::ParameterInfo> parameters = processor->parameters();
         const std::vector<std::uint8_t> defaults = processor->saveState();
@@ -270,6 +289,16 @@ TEST_CASE("No built-in allocates on the audio thread", "[plugin][builtin]")
         std::vector<float> left(512, 0.25f);
         std::vector<float> right(512, -0.25f);
         std::array<float*, 2> channels{left.data(), right.data()};
+        // A key for the dynamics, every other block.
+        std::vector<float> keyLeft(512, 0.8f);
+        std::vector<float> keyRight(512, -0.8f);
+        const std::array<const float*, 2> key{keyLeft.data(), keyRight.data()};
+        // Notes for the instruments: the drum sampler's first pads, a chord.
+        const std::array notes{vloom::NoteEvent{5, vloom::NoteEvent::Type::On, 36, 1.0f},
+            vloom::NoteEvent{40, vloom::NoteEvent::Type::On, 38, 0.7f},
+            vloom::NoteEvent{90, vloom::NoteEvent::Type::On, 60, 0.9f},
+            vloom::NoteEvent{300, vloom::NoteEvent::Type::Off, 60, 0.0f},
+            vloom::NoteEvent{310, vloom::NoteEvent::Type::Off, 36, 0.0f}};
         vloom::ProcessContext context;
         context.channels = channels.data();
         context.numChannels = 2;
@@ -278,23 +307,34 @@ TEST_CASE("No built-in allocates on the audio thread", "[plugin][builtin]")
         long long allocations = 0;
         for (int block = 0; block < 60; ++block) {
             if (block % 10 == 5) { // control thread: outside the count
-                REQUIRE(processor->loadState(defaults));
+                REQUIRE(processor->loadState(defaults)); // the samples are loaded again too
                 if (!parameters.empty())
                     (void)processor->parameterChangedByHost(parameters[0].id, parameters[0].maxValue);
+                for (int slot = 0; slot < processor->sampleSlotCount(); slot += 3)
+                    REQUIRE(processor->loadSample(slot, sample)); // replaced while notes play
+                processor->idle();
             }
             context.parameters = block % 3 == 0 ? std::span<const vloom::ParameterEvent>(up)
                 : block % 3 == 1                ? std::span<const vloom::ParameterEvent>(down)
                                                 : std::span<const vloom::ParameterEvent>();
+            context.sidechain = block % 2 == 0 ? key.data() : nullptr;
+            context.transport.tempo = block % 4 < 2 ? 120.0 : 87.5; // tempo changes
+            context.notes = block % 5 == 0 ? std::span<const vloom::NoteEvent>(notes)
+                                           : std::span<const vloom::NoteEvent>();
             const vloom::test::AllocationCounter counter;
             processor->process(context); // block splits, values taken from the host, glides
+            (void)processor->latencyFrames();
+            (void)processor->gainReductionDb();
             if (block % 20 == 19)
                 processor->reset();
             allocations += counter.count();
         }
         CHECK(allocations == 0);
-        for (const float sample : left)
-            REQUIRE(std::isfinite(sample));
+        for (const float value : left)
+            REQUIRE(std::isfinite(value));
     }
+    std::error_code ignored;
+    std::filesystem::remove_all(folder, ignored);
 }
 
 TEST_CASE("Notes played by hand reach an instrument with its next block", "[plugin][builtin]")

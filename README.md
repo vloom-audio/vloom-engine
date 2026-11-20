@@ -19,7 +19,9 @@ reused by other Vloom Audio tools.
 > channels (ADR 0006). Inserts route into each other with sends, and plugin
 > latency is compensated (ADR 0007). Records audio and MIDI with a count-in
 > and a punch range (ADR 0017), and bounces a pattern to audio (ADR 0018).
-> Next: the built-in compressor, reverb, delay and limiter.
+> Comes with 20 built-in processors from vloom-dsp (ADR 0008): dynamics with
+> sidechain, EQ and filter, delay and reverb, modulation, distortion and
+> utilities, plus a synth, a sampler and a drum sampler.
 
 ---
 
@@ -166,7 +168,7 @@ vloom-engine/
 | **M2** | MIDI notes, pitched sampler, first built-in synth, master pitch | *Done* |
 | **M3** | Arrangement (patterns on a timeline), song mode, loop region, WAV export | *Done* |
 | **M4** | Plugin host interface, CLAP hosting (effects and instruments) | *Done* |
-| **M5** | VST3 hosting, built-in effects, sends, delay compensation | *Done, except the built-in compressor, reverb, delay and limiter* |
+| **M5** | VST3 hosting, built-in effects, sends, delay compensation | *Done* |
 | **M6** | Audio input and recording, MIDI input | *Done* |
 | **v1.0** | Count-in, punch-in / punch-out, bouncing a pattern to audio | *Done (engine side)* |
 

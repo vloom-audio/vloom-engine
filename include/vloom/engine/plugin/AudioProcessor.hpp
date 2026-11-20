@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -18,6 +19,11 @@ struct PluginInfo {
     std::string vendor;
     std::string version;
     Kind kind = Kind::Effect;
+    /// What it does, for a host's lists. The built-ins give one of
+    /// "Dynamics", "EQ/Filter", "Delay/Reverb", "Modulation", "Distortion",
+    /// "Utility" (effects) or "Synth", "Sampler", "Drums" (instruments).
+    /// Empty: not known (hosted plugins; a host reads their features).
+    std::string category{};
 };
 
 /// One parameter a processor exposes. Values are in the parameter's own
@@ -33,7 +39,37 @@ struct ParameterInfo {
     /// What it belongs to, for a host that lays out its own controls, e.g.
     /// "Low Shelf"; parameters of one group follow each other. Empty: none.
     std::string group{};
+    /// A stepped parameter that is a choice: the name of each whole value
+    /// from minValue up (valueLabels[0] names minValue), e.g. "Peak", "RMS"
+    /// or a note length "1/8 D". Empty: its values read as numbers (or as a
+    /// switch when it goes 0 .. 1). Built-ins only, for now.
+    std::vector<std::string> valueLabels{};
 };
+
+/// One place for a sample in a processor that plays samples (the built-in
+/// sampler and drum sampler), as AudioProcessor::sampleSlot() reports it.
+struct SampleSlotInfo {
+    std::string name; ///< e.g. "Sample", "Pad 1"
+    /// The file the slot plays, as given to loadSample() or a loaded state
+    /// (UTF-8); empty: none. Kept when the file could not be read, so
+    /// saving the project again does not lose it.
+    std::string path;
+    int numChannels = 0; ///< what is playing: 0 when nothing
+    std::int64_t frames = 0;
+    double sampleRate = 0.0;
+    /// Why the file in `path` is not playing (missing, unreadable); empty
+    /// when it plays or there is none.
+    std::string error{};
+
+    [[nodiscard]] bool loaded() const noexcept { return frames > 0; }
+};
+
+/// Where a sample slot reads `path` from: a WAV file the engine can decode
+/// (e.g. a decoded copy of an MP3 in a host's cache). Returns the file to
+/// read, or empty with the reason in `*error` (which may be null). Called on
+/// the thread that loads, never the audio thread. Without one, `path` itself
+/// is read, and must be a WAV file.
+using SampleFileResolver = std::function<std::string(const std::string& path, std::string* error)>;
 
 /// A parameter change at a frame of the block.
 struct ParameterEvent {
@@ -165,6 +201,48 @@ public:
     [[nodiscard]] virtual bool hasSidechain() const { return false; }
     /// True if it puts out notes (ProcessContext::notesOut).
     [[nodiscard]] virtual bool makesNotes() const { return false; }
+
+    /// How much it turns the sound down now, in dB (>= 0, the most during
+    /// its last block), for a meter: the built-in compressor, gate, limiter
+    /// and de-esser. nullopt: it reports none. Any thread.
+    [[nodiscard]] virtual std::optional<float> gainReductionDb() const { return std::nullopt; }
+
+    /// Sample slots (the built-in sampler: 1, the drum sampler: one per
+    /// pad). Not real-time: from the control thread or a worker thread, one
+    /// call at a time per processor (it serializes them with activate()),
+    /// never the audio thread; process() may run meanwhile, and a new sample
+    /// is picked up with the next block. Replaced samples are released by
+    /// idle(). saveState() keeps each slot's path, and loadState() loads the
+    /// files again; a file it cannot read is reported in sampleSlot().error,
+    /// it does not fail the state.
+    [[nodiscard]] virtual int sampleSlotCount() const { return 0; }
+    /// What slot `slot` holds; empty for a bad slot.
+    [[nodiscard]] virtual SampleSlotInfo sampleSlot(int slot) const
+    {
+        (void)slot;
+        return {};
+    }
+    /// Reads the audio file `path` (through the resolver, if one is set)
+    /// and plays it in `slot` from the next block. False with the reason in
+    /// `*error` (may be null) if the slot does not exist or the file cannot
+    /// be read; the slot then keeps what it had.
+    virtual bool loadSample(int slot, const std::string& path, std::string* error = nullptr)
+    {
+        (void)slot;
+        (void)path;
+        if (error != nullptr)
+            *error = "this processor has no sample slots";
+        return false;
+    }
+    /// Empties `slot`; false for a bad slot.
+    virtual bool clearSample(int slot)
+    {
+        (void)slot;
+        return false;
+    }
+    /// Sets where sample files are read from (see SampleFileResolver), for
+    /// loadSample() and loadState(). Set it before loading a state.
+    virtual void setSampleFileResolver(SampleFileResolver resolver) { (void)resolver; }
 
     /// The names of the programs (presets) it lists for a host to choose
     /// from; empty if it lists none. Control thread.
