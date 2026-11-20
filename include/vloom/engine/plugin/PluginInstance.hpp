@@ -149,8 +149,8 @@ public:
     /// Frames the scope remembers: the most readScope() can return.
     static constexpr std::size_t kScopeFrames = 8192;
     /// Switches the scope on or off: while on, the instance keeps a copy of
-    /// the sound it puts out (left and right averaged; the dry sound while
-    /// bypassed) for an editor to draw, e.g. as a spectrum. Off (the
+    /// the sound it puts out (left and right; the dry sound while bypassed)
+    /// for an editor to draw, e.g. as a spectrum or a vectorscope. Off (the
     /// default) it costs nothing. Control thread; the first call that
     /// switches it on allocates its memory.
     void setScopeEnabled(bool enabled);
@@ -161,6 +161,32 @@ public:
     /// For drawing only: frames written while this reads may be from either
     /// side of the write. Any thread but the audio thread.
     std::size_t readScope(std::span<float> out) const noexcept;
+    /// As readScope(), with left and right apart (ADR 0019), for a
+    /// vectorscope, a correlation meter or L/R levels: copies the newest
+    /// min(left.size(), right.size()) frames, oldest first, into `left` and
+    /// `right` (frame i of one goes with frame i of the other) and returns
+    /// how many. Any thread but the audio thread.
+    std::size_t readScopeStereo(std::span<float> left, std::span<float> right) const noexcept;
+
+    /// The peaks a level meter shows (ADR 0019): the largest absolute
+    /// sample per channel (linear, 1 = 0 dBFS) since the last
+    /// readLevels(). NaN is skipped.
+    struct Levels {
+        std::array<float, 2> input{}; ///< left, right: what reached the instance, before it
+        std::array<float, 2> output{}; ///< left, right: its main output, after it
+    };
+    /// Switches the level meters on or off. While on, every block processed
+    /// raises the input peaks before the processor and the output peaks
+    /// after it (bypassed: the dry sound in, the delayed dry sound out;
+    /// inactive: nothing). Off (the default) they cost nothing. Switching on
+    /// starts from silence. Any thread but the audio thread; never allocates.
+    void setMetersEnabled(bool enabled) noexcept;
+    [[nodiscard]] bool areMetersEnabled() const noexcept { return metersOn_.load(std::memory_order_relaxed); }
+    /// Takes the peaks since the last call and starts them again from
+    /// silence, so a UI polling at any rate sees every peak once. Zeros while
+    /// the meters are off. Lock-free; one reader (two readers would share the
+    /// peaks between them). Any thread but the audio thread.
+    Levels readLevels() noexcept;
 
 private:
     std::unique_ptr<AudioProcessor> processor_;
@@ -184,13 +210,23 @@ private:
     std::array<ControlEvent, kMaxLiveControls> blockControls_{};
     std::array<ControlEvent, kMaxLiveControls> chunkControls_{}; ///< one chunk's, frames made chunk-relative
 
-    /// Audio thread: adds `numFrames` of output to the scope when it is on.
+    /// Audio thread: adds `numFrames` of output to the scope and the output
+    /// meters when they are on.
     void capture(const float* left, const float* right, int numFrames) noexcept;
-    /// The scope's ring of kScopeFrames samples; allocated when first switched
-    /// on and kept. Atomic samples: the reader may race the writer.
+    /// Audio thread: raises the peaks from `first` (0: input, 2: output) by
+    /// `numFrames` of left and right, when the meters are on.
+    void meter(std::size_t first, const float* left, const float* right, int numFrames) noexcept;
+    /// The scope's ring of kScopeFrames frames, left and right interleaved;
+    /// allocated when first switched on and kept. Atomic samples: the reader
+    /// may race the writer.
     std::unique_ptr<std::atomic<float>[]> scope_;
     std::atomic<bool> scopeOn_{false};
     std::atomic<std::uint64_t> scopeWritten_{0}; ///< frames written since it was switched on
+
+    /// Peaks since the last readLevels(): input left, right, output left,
+    /// right. The audio thread raises them, the reader swaps in 0.
+    std::array<std::atomic<float>, 4> peaks_{};
+    std::atomic<bool> metersOn_{false};
 };
 
 } // namespace vloom

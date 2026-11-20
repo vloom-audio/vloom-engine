@@ -130,5 +130,6 @@ cannot depend on closed code.
   files are found again.
 - A sample loaded while the device runs is picked up with the next block;
   a slot replaced twice before then drops the middle one unheard.
-- Not yet: the transport position for tempo-synced LFOs (they run free), and
-  a host-side waveform view of a slot (`sample()` is not exposed).
+- Not yet: the transport position for tempo-synced LFOs (they run free).
+  A slot's audio for a waveform view is exposed as `sampleAudio()`, and the
+  meters as readouts (ADR 0019).

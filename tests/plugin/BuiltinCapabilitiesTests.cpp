@@ -418,6 +418,143 @@ TEST_CASE("Dynamics built-ins report their gain reduction", "[plugin][builtin]")
     CHECK_FALSE(vloom::createBuiltinProcessor("vloom.gain")->gainReductionDb().has_value());
 }
 
+TEST_CASE("Built-ins list their readouts, and the gate's open state follows the signal", "[plugin][builtin]")
+{
+    // The dynamics give their gain reduction; the gate also whether it is open.
+    for (const char* id : {"vloom.compressor", "vloom.gate", "vloom.limiter", "vloom.deesser"}) {
+        INFO(id);
+        const auto processor = vloom::createBuiltinProcessor(id);
+        const std::vector<vloom::ReadoutInfo> list = processor->readouts();
+        REQUIRE_FALSE(list.empty());
+        CHECK(list[0].id == "gainReduction");
+        CHECK(list[0].name == "Gain Reduction");
+        CHECK(list[0].unit == "dB");
+        CHECK_FALSE(list[0].toggle);
+        CHECK(processor->readouts().size() == list.size()); // the same every call
+    }
+    CHECK(vloom::createBuiltinProcessor("vloom.gain")->readouts().empty());
+    CHECK(vloom::createBuiltinProcessor("vloom.gain")->readoutValue(0) == 0.0f);
+
+    auto gate = activeInstance("vloom.gate");
+    vloom::AudioProcessor& processor = gate->processor();
+    const std::vector<vloom::ReadoutInfo> list = processor.readouts();
+    REQUIRE(list.size() == 2);
+    CHECK(list[1].id == "gateOpen");
+    CHECK(list[1].name == "Gate Open");
+    CHECK(list[1].unit.empty());
+    CHECK(list[1].toggle);
+    CHECK(processor.readoutValue(-1) == 0.0f); // bad indexes
+    CHECK(processor.readoutValue(2) == 0.0f);
+
+    std::vector<float> left(512);
+    std::vector<float> right(512);
+    const auto run = [&](float level, int blocks) {
+        for (int i = 0; i < blocks; ++i) {
+            for (std::size_t f = 0; f < left.size(); ++f) // a 375 Hz square wave
+                left[f] = right[f] = (f / 64) % 2 == 0 ? level : -level;
+            gate->process(left.data(), right.data(), 512, vloom::TransportInfo{});
+        }
+    };
+    // Silence: closed (the threshold is -40 dB), turning the sound down.
+    run(0.0f, 20);
+    CHECK(processor.readoutValue(1) == 0.0f);
+    // Loud: open, nothing turned down.
+    run(0.5f, 20);
+    CHECK(processor.readoutValue(1) == 1.0f);
+    CHECK(processor.readoutValue(0) == Approx(0.0f).margin(0.01));
+    CHECK(processor.readoutValue(0) == processor.gainReductionDb().value_or(-1.0f));
+    // Quiet again, past the hold (50 ms) and release (100 ms): closed.
+    run(0.001f, 40);
+    CHECK(processor.readoutValue(1) == 0.0f);
+    CHECK(processor.readoutValue(0) > 20.0f);
+    CHECK(processor.readoutValue(0) == processor.gainReductionDb().value_or(-1.0f));
+}
+
+TEST_CASE(
+    "Sample slots give the UI their audio and a version that changes with them", "[plugin][builtin][sample]")
+{
+    const TempFolder folder;
+    const auto first = folder.path / "first.wav";
+    const auto second = folder.path / "second.wav";
+    writeSine(first, 441.0, 0.25, 44100);
+    writeSine(second, 100.0, 0.1, 22050);
+
+    auto sampler = activeInstance("vloom.sampler");
+    vloom::AudioProcessor& processor = sampler->processor();
+    CHECK(processor.sampleAudio(0) == nullptr); // empty
+    CHECK(processor.sampleAudio(1) == nullptr); // no such slot
+    CHECK(processor.sampleAudio(-1) == nullptr);
+    const std::uint64_t start = processor.sampleSlotsVersion();
+
+    REQUIRE(processor.loadSample(0, first.string()));
+    const std::uint64_t loaded = processor.sampleSlotsVersion();
+    CHECK(loaded != start);
+    const std::shared_ptr<const vloom::SampleAudio> audio = processor.sampleAudio(0);
+    REQUIRE(audio != nullptr);
+    CHECK(audio->numChannels == 1);
+    CHECK(audio->frames == 11025);
+    CHECK(audio->sampleRate == 44100.0);
+    REQUIRE(audio->channels[0].size() == 11025);
+    CHECK(audio->channels[1].empty());
+    for (std::size_t i = 0; i < 11025; i += 97) { // what writeSine() wrote
+        INFO(i);
+        const double expected
+            = 0.5 * std::sin(2.0 * std::numbers::pi * 441.0 * static_cast<double>(i) / 44100);
+        CHECK(audio->channels[0][i] == Approx(expected).margin(1e-6));
+    }
+
+    // A failed load changes nothing: the same version and audio.
+    CHECK_FALSE(processor.loadSample(0, (folder.path / "missing.wav").string()));
+    CHECK(processor.sampleSlotsVersion() == loaded);
+    CHECK(processor.sampleAudio(0)->channels[0].data() == audio->channels[0].data());
+
+    // Replaced while the sound plays: the new one shows, the one held stays
+    // whole after the audio thread lets go of it and idle() releases it.
+    const std::array on{vloom::NoteEvent{0, vloom::NoteEvent::Type::On, 60, 1.0f}};
+    std::vector<float> left(512);
+    std::vector<float> right(512);
+    sampler->process(left.data(), right.data(), 512, vloom::TransportInfo{}, on);
+    REQUIRE(processor.loadSample(0, second.string()));
+    for (int block = 0; block < 10; ++block)
+        sampler->process(left.data(), right.data(), 512, vloom::TransportInfo{});
+    processor.idle();
+    CHECK(processor.sampleSlotsVersion() != loaded);
+    const auto replaced = processor.sampleAudio(0);
+    REQUIRE(replaced != nullptr);
+    CHECK(replaced->frames == 2205);
+    CHECK(replaced->sampleRate == 22050.0);
+    CHECK(audio->frames == 11025); // still the first one, intact
+    CHECK(audio->channels[0][100]
+        == Approx(0.5 * std::sin(2.0 * std::numbers::pi * 441.0 * 100.0 / 44100)).margin(1e-6));
+
+    const std::uint64_t beforeClear = processor.sampleSlotsVersion();
+    REQUIRE(processor.clearSample(0));
+    CHECK(processor.sampleSlotsVersion() != beforeClear);
+    CHECK(processor.sampleAudio(0) == nullptr);
+
+    // A loaded state bumps it too, and a missing file in it as well.
+    REQUIRE(processor.loadSample(0, first.string()));
+    const std::vector<std::uint8_t> state = processor.saveState();
+    auto restored = vloom::createBuiltinProcessor("vloom.sampler");
+    const std::uint64_t fresh = restored->sampleSlotsVersion();
+    REQUIRE(restored->loadState(state));
+    CHECK(restored->sampleSlotsVersion() != fresh);
+    REQUIRE(restored->sampleAudio(0) != nullptr);
+    CHECK(restored->sampleAudio(0)->frames == 11025);
+
+    // The drum sampler: one per pad.
+    auto drums = vloom::createBuiltinProcessor("vloom.drums");
+    REQUIRE(drums->loadSample(3, second.string()));
+    CHECK(drums->sampleAudio(2) == nullptr);
+    REQUIRE(drums->sampleAudio(3) != nullptr);
+    CHECK(drums->sampleAudio(3)->frames == 2205);
+
+    // Processors without slots.
+    auto gain = vloom::createBuiltinProcessor("vloom.gain");
+    CHECK(gain->sampleAudio(0) == nullptr);
+    CHECK(gain->sampleSlotsVersion() == 0);
+}
+
 TEST_CASE(
     "The built-in sampler plays a WAV file at its own pitch on the root key", "[plugin][builtin][sample]")
 {

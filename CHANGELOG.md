@@ -7,6 +7,24 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Data for editors that a host draws itself (ADR 0019):
+  - Per-instance level meters for every plugin, CLAP, VST 3, VST 2 or
+    built-in: `PluginInstance::setMetersEnabled()` and `readLevels()`. Each
+    read gives the input peak (before the processor) and the output peak
+    (after it) per channel since the last read, lock-free. Off by default
+    and free while off.
+  - A stereo scope: `PluginInstance::readScopeStereo(left, right)`, which
+    keeps left and right apart for a vectorscope or correlation meter.
+    `readScope()` still returns the mono average.
+  - Generic readouts: `AudioProcessor::readouts()` (`ReadoutInfo`: id,
+    name, unit, toggle) and `readoutValue(index)`, readable from any
+    thread. The built-in compressor, gate, limiter and de-esser report
+    "gainReduction" (dB), and the gate also reports "gateOpen".
+    `gainReductionDb()` stays.
+  - A sample slot's audio for a waveform: `AudioProcessor::sampleAudio(slot)`
+    (`std::shared_ptr<const SampleAudio>`, sharing the processor's own
+    copy and safe to hold across a reload). `sampleSlotsVersion()` is a
+    lock-free counter that changes with every load, clear or loaded state.
 - All 20 built-in processors of vloom-dsp (ADR 0008, vloom-dsp pinned to
   b469c4f), which completes M5's built-in effects: compressor, limiter,
   gate, de-esser, transient shaper, EQ, filter, delay, reverb, chorus,

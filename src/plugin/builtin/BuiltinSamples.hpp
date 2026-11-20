@@ -24,6 +24,13 @@ namespace vloom::builtin {
 [[nodiscard]] std::shared_ptr<const dsp::SampleBuffer> readSampleFile(
     const std::string& path, const SampleFileResolver& resolver, std::string* error);
 
+/// `buffer` as the host's read-only SampleAudio (AudioProcessor::
+/// sampleAudio()), sharing its samples and keeping it alive while held.
+/// Null for a null buffer, or if memory runs out. Never throws. Not for the
+/// audio thread.
+[[nodiscard]] std::shared_ptr<const SampleAudio> sampleAudioOf(
+    std::shared_ptr<const dsp::SampleBuffer> buffer);
+
 /// The sample paths' part of a built-in's state, after the parameters:
 /// "SMP1", a 4-byte count, then per slot with a file its 4-byte index, the
 /// 4-byte length of its path and the path (UTF-8), all little endian.
