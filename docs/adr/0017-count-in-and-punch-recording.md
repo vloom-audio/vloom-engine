@@ -13,8 +13,8 @@ place, often in a loop, pass after pass.
 Both must keep what ADR 0015 and ADR 0016 already guarantee: everything is
 placed where the player *heard* the song, with the latency taken off, and
 the audio thread does not allocate, lock or wait. The punch edges must be
-exact to the sample, even where they fall inside a block, and stay right
-when the latency carries a stretch over the loop's jump back.
+exact to the sample for audio, even where they fall inside a block, and stay
+right when the latency carries a stretch over the loop's jump back.
 
 ## Decision
 
@@ -46,7 +46,9 @@ when the latency carries a stretch over the loop's jump back.
    the loop. While it is set:
    - **MIDI**: a message heard inside `[start, end)` (the same heard
      position as ADR 0015, loop pass included) is recorded; outside it is
-     only played. Note-offs are always recorded, so a note begun inside can
+     only played. Live MIDI carries no time within the block, so its heard
+     position, and with it the punch test, is the block's: at 256 frames
+     and 48 kHz a note within about 5 ms of an edge goes by its block. Note-offs are always recorded, so a note begun inside can
      end. `MidiTake::setPunch()` applies the note rule: a note whose key
      went down before the punch-in, or at or after the punch-out, is left
      out; a note held over the punch-out ends there; controls outside are

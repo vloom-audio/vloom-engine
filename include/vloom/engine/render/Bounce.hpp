@@ -48,7 +48,9 @@ struct BounceOptions {
     float silenceThreshold = 1e-5f; ///< as SongExportOptions::silenceThreshold
     int blockSize = 512;
     /// A stereo WAV file to write (UTF-8), in `format`; written only on
-    /// success. Empty: the audio goes into BounceResult::audio instead.
+    /// success. Empty: the audio goes into BounceResult::audio instead, at
+    /// most kMaxInMemoryBounceSeconds of it (tail included); longer fails
+    /// with an error, like running out of memory does.
     std::string path{};
     WavFormat format = WavFormat::Float32;
     bool dither = true; ///< integer formats: TPDF dither
@@ -70,6 +72,11 @@ struct BounceResult {
 /// mode: ChannelState::steps, notes and controls, SequencerState::stepCount
 /// steps long) instead of one of SequencerState::patterns.
 inline constexpr int kChannelRackPattern = -1;
+
+/// The longest bounce kept in memory (BounceOptions::path empty), in
+/// seconds at the render's sample rate: 30 minutes, about 660 MB of stereo
+/// floats at 48 kHz. Longer ranges bounce to a file.
+inline constexpr double kMaxInMemoryBounceSeconds = 30.0 * 60.0;
 
 /// How long pattern `pattern` of `state` is in ticks: its stepCount steps
 /// (SongPattern::stepCount; 0: its longest row of steps; still 0: the
