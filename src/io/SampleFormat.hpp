@@ -69,7 +69,8 @@ void convertFromFloat(SampleFormat format, const float* in, std::byte* out, std:
 /// negative code reads slightly below -1
 /// (-32768 -> -1.00003) and is not clamped. The LSB-aligned formats
 /// sign-extend from their valid bits, ignoring the container's upper bits.
-/// Float NaN reads as 0. Real-time safe: no allocation. `in` needs no
+/// Float NaN and infinities read as 0; float64 beyond float's range is
+/// clamped to it. Real-time safe: no allocation. `in` needs no
 /// alignment.
 void convertToFloat(SampleFormat format, const std::byte* in, float* out, std::size_t count) noexcept;
 

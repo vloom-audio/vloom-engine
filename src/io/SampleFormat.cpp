@@ -2,7 +2,10 @@
 // Copyright (C) 2026 Vloom Audio contributors
 #include "io/SampleFormat.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace vloom::io {
 
@@ -200,14 +203,17 @@ void convertToFloat(SampleFormat format, const std::byte* in, float* out, std::s
         for (std::size_t i = 0; i < count; ++i) {
             float value = 0.0f;
             std::memcpy(&value, in + i * 4, 4);
-            out[i] = value == value ? value : 0.0f; // NaN as 0
+            out[i] = std::isfinite(value) ? value : 0.0f;
         }
         return;
     case SampleFormat::Float64:
         for (std::size_t i = 0; i < count; ++i) {
             double value = 0.0;
             std::memcpy(&value, in + i * 8, 8);
-            out[i] = value == value ? static_cast<float>(value) : 0.0f;
+            // Out of float's range the cast would be undefined.
+            constexpr double kFloatMax = static_cast<double>(std::numeric_limits<float>::max());
+            out[i]
+                = std::isfinite(value) ? static_cast<float>(std::clamp(value, -kFloatMax, kFloatMax)) : 0.0f;
         }
         return;
     case SampleFormat::Int32:

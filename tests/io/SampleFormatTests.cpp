@@ -234,12 +234,15 @@ TEST_CASE("Integer samples read back as float by the same scale", "[io]")
             1.0f, static_cast<float>(-8388607.0 / 8388607.0), static_cast<float>(-1.0 / 8388607.0)});
 }
 
-TEST_CASE("Float samples read back unchanged, NaN as 0, overs kept", "[io]")
+TEST_CASE("Float samples read back unchanged, non-finite as 0, overs kept", "[io]")
 {
-    CHECK(read<float>(SampleFormat::Float32, {0.5f, -1.5f, kNaN, kInf})
-        == std::vector<float>{0.5f, -1.5f, 0.0f, kInf});
-    CHECK(read<double>(SampleFormat::Float64, {0.5, -2.0, std::numeric_limits<double>::quiet_NaN()})
-        == std::vector<float>{0.5f, -2.0f, 0.0f});
+    CHECK(read<float>(SampleFormat::Float32, {0.5f, -1.5f, kNaN, kInf, -kInf})
+        == std::vector<float>{0.5f, -1.5f, 0.0f, 0.0f, 0.0f});
+    constexpr double kInf64 = std::numeric_limits<double>::infinity();
+    constexpr float kMax = std::numeric_limits<float>::max();
+    CHECK(read<double>(SampleFormat::Float64,
+              {0.5, -2.0, std::numeric_limits<double>::quiet_NaN(), kInf64, -kInf64, 1e300, -1e300})
+        == std::vector<float>{0.5f, -2.0f, 0.0f, 0.0f, 0.0f, kMax, -kMax});
 }
 
 TEST_CASE("Every format round-trips codes of up to 24 bits", "[io]")
