@@ -29,6 +29,7 @@ target_sources(vloom_engine PRIVATE
     io/CoreAudioInputBackend.cpp
     io/CoreMidiBackend.cpp
     io/MidiInput.cpp
+    io/SampleFormat.cpp
     io/WasapiBackend.cpp
     io/WasapiInputBackend.cpp
     io/WinMmMidiBackend.cpp
