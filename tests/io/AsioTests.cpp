@@ -10,12 +10,15 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -44,6 +47,11 @@ struct FakeState {
     int inputLatency = 300;
     int outputLatency = 400;
     bool outputReadySupported = true;
+    std::function<void(AsioDriverHost&)> duringCreate; ///< called inside createBuffers
+    std::function<void()> duringStart; ///< called inside start, with the host connected
+    bool throwInCreate = false;
+    int stopDelayMs = 0; ///< threadStopping waits this long
+    std::shared_ptr<FakeState> previous; ///< the driver of the session before
 
     // Seen: written on the session's driver thread, read by the test after
     // a control call returned (which orders them).
@@ -61,6 +69,9 @@ struct FakeState {
     std::vector<std::vector<std::byte>> storage;
     AsioDriverHost* host = nullptr;
     std::atomic<int> outputReadyCalls{0};
+    std::atomic<bool> stoppingStarted{false};
+    std::atomic<bool> stopped{false};
+    bool previousWasStopped = false;
 };
 
 int bytesFor(std::int32_t type)
@@ -80,11 +91,17 @@ public:
     {
         seen();
         s_->comIn = true;
+        if (s_->previous)
+            s_->previousWasStopped = s_->previous->stopped.load();
     }
     void threadStopping() override
     {
         seen();
         s_->comOut = true;
+        s_->stoppingStarted.store(true);
+        if (s_->stopDelayMs > 0) // the old session's teardown, slowed down
+            std::this_thread::sleep_for(std::chrono::milliseconds(s_->stopDelayMs));
+        s_->stopped.store(true);
     }
     std::vector<std::string> driverNames() override
     {
@@ -148,6 +165,8 @@ public:
     std::int32_t createBuffers(std::vector<AsioBuffer>& buffers, int frames, AsioDriverHost& host) override
     {
         seen();
+        if (s_->throwInCreate)
+            throw std::runtime_error("fake driver failure");
         s_->storage.clear();
         s_->storage.reserve(buffers.size() * 2); // the halves' pointers must stay valid
         for (AsioBuffer& buffer : buffers) {
@@ -162,6 +181,8 @@ public:
         s_->createdFrames = frames;
         s_->host = &host;
         s_->buffersCreated = true;
+        if (s_->duringCreate)
+            s_->duringCreate(host);
         return asio::kOk;
     }
     std::int32_t disposeBuffers() override
@@ -182,6 +203,8 @@ public:
     {
         seen();
         s_->started = true;
+        if (s_->duringStart)
+            s_->duringStart();
         return asio::kOk;
     }
     std::int32_t stop() override
@@ -318,27 +341,45 @@ TEST_CASE("ASIO buffer size: the requested one if the driver allows it, else its
 
 TEST_CASE("asioMessage answers the host questions and only flags resets", "[io][asio]")
 {
-    std::atomic<std::uint32_t> resets{0};
+    AsioMessageState state;
+    state.accepting.store(true);
     for (const std::int32_t selector : {asio::kSelectorSupported, asio::kEngineVersion, asio::kResetRequest,
              asio::kBufferSizeChange, asio::kResyncRequest, asio::kLatenciesChanged, asio::kSupportsTimeInfo})
-        CHECK(handleAsioMessage(asio::kSelectorSupported, selector, resets) == 1);
+        CHECK(handleAsioMessage(asio::kSelectorSupported, selector, state) == 1);
     for (const std::int32_t selector :
         {asio::kSupportsTimeCode, asio::kMmcCommand, asio::kSupportsInputMonitor, asio::kOverload, 0, 99})
-        CHECK(handleAsioMessage(asio::kSelectorSupported, selector, resets) == 0);
-    CHECK(handleAsioMessage(asio::kEngineVersion, 0, resets) == 2);
-    CHECK(handleAsioMessage(asio::kSupportsTimeInfo, 0, resets) == 1);
-    CHECK(handleAsioMessage(asio::kSupportsTimeCode, 0, resets) == 0);
-    CHECK(handleAsioMessage(99, 0, resets) == 0);
-    CHECK(resets.load() == 0); // questions flag nothing
+        CHECK(handleAsioMessage(asio::kSelectorSupported, selector, state) == 0);
+    CHECK(handleAsioMessage(asio::kEngineVersion, 0, state) == 2);
+    CHECK(handleAsioMessage(asio::kSupportsTimeInfo, 0, state) == 1);
+    CHECK(handleAsioMessage(asio::kSupportsTimeCode, 0, state) == 0);
+    CHECK(handleAsioMessage(99, 0, state) == 0);
+    CHECK(state.resets.load() == 0); // questions flag nothing
+    CHECK(state.notices.load() == 0);
 
-    CHECK(handleAsioMessage(asio::kResetRequest, 0, resets) == 1);
-    CHECK(resets.load() == bit(AsioReset::Request));
-    CHECK(handleAsioMessage(asio::kBufferSizeChange, 1024, resets) == 1);
-    CHECK(handleAsioMessage(asio::kResyncRequest, 0, resets) == 1);
-    CHECK(handleAsioMessage(asio::kLatenciesChanged, 0, resets) == 1);
-    CHECK(resets.load()
-        == (bit(AsioReset::Request) | bit(AsioReset::BufferSize) | bit(AsioReset::Resync)
-            | bit(AsioReset::Latencies)));
+    // Latency changes and resyncs are notices, not resets.
+    CHECK(handleAsioMessage(asio::kLatenciesChanged, 0, state) == 1);
+    CHECK(handleAsioMessage(asio::kResyncRequest, 0, state) == 1);
+    CHECK(state.resets.load() == 0);
+    CHECK(state.notices.load() == (bit(AsioNotice::Latencies) | bit(AsioNotice::Resync)));
+
+    CHECK(handleAsioMessage(asio::kResetRequest, 0, state) == 1);
+    CHECK(state.resets.load() == bit(AsioReset::Request));
+    CHECK(handleAsioMessage(asio::kBufferSizeChange, 1024, state) == 1);
+    CHECK(state.resets.load() == (bit(AsioReset::Request) | bit(AsioReset::BufferSize)));
+    CHECK(state.bufferSize.load() == 1024);
+    CHECK(handleAsioMessage(asio::kBufferSizeChange, 0, state) == 1); // no size given: keeps the last one
+    CHECK(state.bufferSize.load() == 1024);
+
+    // While not accepting (a stream being set up), the answers stay and nothing is recorded.
+    state.clear();
+    state.accepting.store(false);
+    for (const std::int32_t selector :
+        {asio::kResetRequest, asio::kBufferSizeChange, asio::kResyncRequest, asio::kLatenciesChanged})
+        CHECK(handleAsioMessage(selector, 512, state) == 1);
+    CHECK(handleAsioMessage(asio::kEngineVersion, 0, state) == 2);
+    CHECK(state.resets.load() == 0);
+    CHECK(state.notices.load() == 0);
+    CHECK(state.bufferSize.load() == 0);
 }
 
 // ---- the session over a fake driver
@@ -530,10 +571,14 @@ TEST_CASE("bufferSwitch converts input to float and output into the driver's for
         c->renderCallsBefore = c->rendered->calls.load();
         std::copy_n(interleaved, numChannels * numFrames, c->samples.begin());
     };
-    REQUIRE(session.attachInput(capture, &captured, error));
+    CHECK_FALSE(session.attachInput(capture, &captured, info.generation + 1, error)); // another stream's
+    CHECK(contains(error, "opened again"));
+    REQUIRE(session.attachInput(capture, &captured, info.generation, error));
     CHECK(session.isInputAttached(&captured));
     void* other = &rendered;
-    CHECK_FALSE(session.attachInput(capture, other, error)); // one input at a time
+    CHECK_FALSE(session.attachInput(capture, other, info.generation, error)); // one input at a time
+    session.detachInput(other); // not the attached one: no effect
+    CHECK(session.isInputAttached(&captured));
 
     // Input half 1: left 16384, right -32767.
     for (std::size_t i = 0; i < 4; ++i) {
@@ -610,7 +655,8 @@ TEST_CASE("Driver messages flag a reset; questions and a same-rate change do not
     state->host->sampleRateChanged(48000.0);
     CHECK(session.resetReasons() == bit(AsioReset::SampleRate));
     CHECK(state->host->message(asio::kResyncRequest, 0) == 1);
-    CHECK(session.resetReasons() == (bit(AsioReset::SampleRate) | bit(AsioReset::Resync)));
+    CHECK(session.resetReasons() == bit(AsioReset::SampleRate)); // a resync is only noted
+    CHECK(session.notices() == bit(AsioNotice::Resync));
     // A reopen starts clean.
     session.close();
     REQUIRE(session.open(request, &renderConstant, &rendered, info, error));
@@ -766,6 +812,167 @@ TEST_CASE("An ASIO AudioInput taps the output's driver", "[io][asio]")
     CHECK_FALSE(input.isRunning());
     input.close();
     CHECK_FALSE(input.isOpen());
+}
+
+TEST_CASE(
+    "What a driver says while opening or starting is no reset; latency changes are asked again", "[io][asio]")
+{
+    auto state = std::make_shared<FakeState>();
+    FakeState* raw = state.get();
+    state->duringCreate = [](AsioDriverHost& host) {
+        host.message(asio::kResetRequest, 0);
+        host.message(asio::kLatenciesChanged, 0);
+        host.message(asio::kBufferSizeChange, 128);
+        host.sampleRateChanged(96000.0);
+    };
+    state->duringStart = [raw] {
+        raw->host->message(asio::kResetRequest, 0);
+        raw->host->message(asio::kBufferSizeChange, 64);
+    };
+    const FakeAsioFactory factory(state);
+
+    vloom::AudioDevice device;
+    vloom::AudioDeviceConfig config;
+    config.api = vloom::AudioApi::Asio;
+    config.sampleRate = 44100;
+    std::string error;
+    REQUIRE(device.open(config, [](float* const*, int, int) { }, &error));
+    CHECK_FALSE(device.resetRequested());
+    CHECK(device.bufferFrames() == 256);
+    CHECK(device.reopenBufferFrames() == 256);
+    REQUIRE(device.start(&error));
+    CHECK_FALSE(device.resetRequested());
+    CHECK(device.reopenBufferFrames() == 256);
+
+    CHECK(device.inputLatencyFrames() == 300);
+    CHECK(device.outputLatencyFrames() == 400);
+    state->inputLatency = 500;
+    state->outputLatency = 700;
+    CHECK(device.outputLatencyFrames() == 400); // nothing reported: the values from open
+    CHECK(state->host->message(asio::kLatenciesChanged, 0) == 1);
+    CHECK_FALSE(device.resetRequested());
+    CHECK(device.outputLatencyFrames() == 700);
+    CHECK(device.inputLatencyFrames() == 500);
+
+    CHECK(state->host->message(asio::kResyncRequest, 0) == 1);
+    CHECK_FALSE(device.resetRequested());
+    CHECK(device.isRunning());
+}
+
+TEST_CASE("After a buffer-size change the device reopens at the driver's new size", "[io][asio]")
+{
+    auto state = std::make_shared<FakeState>();
+    const FakeAsioFactory factory(state);
+    vloom::AudioDevice device;
+    vloom::AudioDeviceConfig config;
+    config.api = vloom::AudioApi::Asio;
+    config.sampleRate = 44100;
+    std::string error;
+    auto callback = [](float* const*, int, int) { };
+    REQUIRE(device.open(config, callback, &error));
+    REQUIRE(device.start(&error));
+    CHECK(device.bufferFrames() == 256);
+
+    SECTION("the size the message names")
+    {
+        CHECK(state->host->message(asio::kBufferSizeChange, 1024) == 1);
+        CHECK(device.resetRequested());
+        CHECK(device.reopenBufferFrames() == 1024);
+    }
+    SECTION("no size in the message: the driver's preferred size now")
+    {
+        state->sizes.preferred = 128;
+        CHECK(state->host->message(asio::kBufferSizeChange, 0) == 1);
+        CHECK(device.resetRequested());
+        CHECK(device.reopenBufferFrames() == 128);
+    }
+    config.bufferFrames = device.reopenBufferFrames();
+    device.close();
+    CHECK(device.reopenBufferFrames() == 0);
+    REQUIRE(device.open(config, callback, &error));
+    CHECK(device.bufferFrames() == config.bufferFrames);
+    CHECK_FALSE(device.resetRequested());
+}
+
+TEST_CASE("An ASIO input must be opened again after its output was", "[io][asio]")
+{
+    auto state = std::make_shared<FakeState>();
+    const FakeAsioFactory factory(state);
+    vloom::AudioDevice device;
+    vloom::AudioDeviceConfig config;
+    config.api = vloom::AudioApi::Asio;
+    config.sampleRate = 44100;
+    config.inputChannels = 2;
+    std::string error;
+    auto onOutput = [](float* const*, int, int) { };
+    auto onInput = [](const float* const*, int, int) { };
+    REQUIRE(device.open(config, onOutput, &error));
+
+    vloom::AudioInput input;
+    vloom::AudioInputConfig inputConfig;
+    inputConfig.api = vloom::AudioApi::Asio;
+    inputConfig.sampleRate = 0;
+    REQUIRE(input.open(inputConfig, onInput, &error));
+    CHECK(input.sampleRate() == 44100);
+
+    // The output comes back at another rate: the input's view is stale.
+    device.close();
+    config.sampleRate = 48000;
+    REQUIRE(device.open(config, onOutput, &error));
+    CHECK_FALSE(input.start(&error));
+    CHECK(contains(error, "opened again"));
+
+    REQUIRE(input.open(inputConfig, onInput, &error));
+    CHECK(input.sampleRate() == 48000);
+    CHECK(input.start(&error));
+}
+
+TEST_CASE("An exception while opening unloads the driver and says why", "[io][asio]")
+{
+    auto state = std::make_shared<FakeState>();
+    state->throwInCreate = true;
+    Rendered rendered;
+    AsioSession session(std::make_unique<FakeAsioDriver>(state));
+    AsioStreamInfo info;
+    std::string error;
+    CHECK_FALSE(session.open({}, &renderConstant, &rendered, info, error));
+    CHECK(contains(error, "fake driver failure"));
+    CHECK_FALSE(state->loaded);
+    CHECK_FALSE(session.isOpen());
+
+    state->throwInCreate = false;
+    CHECK(session.open({}, &renderConstant, &rendered, info, error));
+    CHECK(state->loaded);
+}
+
+TEST_CASE("A new ASIO session waits until the previous one is fully gone", "[io][asio]")
+{
+    // The SDK keeps globals: a new driver thread must not start while the
+    // old one still tears down.
+    auto first = std::make_shared<FakeState>();
+    first->stopDelayMs = 100;
+    auto second = std::make_shared<FakeState>();
+    second->previous = first;
+    int made = 0;
+    setAsioDriverFactoryForTesting(
+        [&made, first, second] { return std::make_unique<FakeAsioDriver>(made++ == 0 ? first : second); });
+
+    std::shared_ptr<AsioSession> session = acquireAsioSession();
+    REQUIRE(session != nullptr);
+    CHECK(acquireAsioSession() == session); // one per process
+
+    std::thread releaser([held = std::move(session)]() mutable { held.reset(); });
+    while (!first->stoppingStarted.load())
+        std::this_thread::yield();
+    std::shared_ptr<AsioSession> next = acquireAsioSession();
+    REQUIRE(next != nullptr);
+    releaser.join();
+    next.reset();
+    setAsioDriverFactoryForTesting(nullptr);
+
+    CHECK(made == 2);
+    CHECK(first->stopped.load());
+    CHECK(second->previousWasStopped);
 }
 
 TEST_CASE("Without an ASIO driver factory, ASIO is what the build says", "[io][asio]")
