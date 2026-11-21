@@ -7,6 +7,50 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- ASIO drivers on Windows (ADR 0021), through the Steinberg ASIO SDK 2.3.4
+  used under its GPLv3 option. **Licence:** that option is GPL version 3
+  only, so a Windows binary built with ASIO (`VLOOM_ENGINE_ASIO`, default
+  ON on Windows) is GPL-3.0-only; the source stays GPL-3.0-or-later, and
+  `-DVLOOM_ENGINE_ASIO=OFF` builds without it. The SDK is downloaded at
+  configure time (pinned by SHA-256) or taken from
+  `VLOOM_ENGINE_ASIO_SDK_DIR`; no SDK file is in the repository.
+  - `AudioApi { Default, Asio }`: `AudioDeviceConfig::api`,
+    `AudioInputConfig::api`, `listOutputDevices(AudioApi)`,
+    `listInputDevices(AudioApi)` (the installed drivers),
+    `AudioDevice::isApiAvailable()`, `AudioDevice::api()`,
+    `AudioInput::api()`. The defaults keep every existing path unchanged.
+  - Full duplex on one clock: `AudioDeviceConfig::inputChannels` opens
+    driver inputs with the output, and an `AudioInput` with `AudioApi::Asio`
+    taps them; its callback runs on the driver's thread just before the
+    output's. One ASIO driver per process.
+  - The requested rate or a clear error (driver name and ASIO error); the
+    requested buffer size when the driver allows it, else its preferred
+    one (`AudioDevice::bufferFrames()`).
+  - `AudioDevice::inputLatencyFrames()` and `outputLatencyFrames()` from
+    `ASIOGetLatencies`, for `Engine::setAudioRecordLatency()`.
+  - `AudioDevice::showControlPanel()` (the driver's panel; false for other
+    APIs; a modal panel blocks stop and close until it is closed),
+    `AudioDevice::resetRequested()` (the driver asked for a reset, a
+    buffer-size or a rate change: close and open again, not for what it
+    says while opening or starting) and `AudioDevice::reopenBufferFrames()`
+    (the size to reopen with after a buffer-size change). A latency change
+    is no reset: the latency getters ask the driver again.
+  - An ASIO input opened against an earlier stream of the output fails to
+    start and must be opened again.
+  - Sample formats Int16, Int24 (packed), Int32, Float32, Float64 and
+    Int32 with 16/18/20/24-bit alignment, little-endian; output clamped to
+    [-1, 1]. Big-endian and DSD drivers fail to open with a message.
+  - Elsewhere the API is there but ASIO lists nothing and fails to open
+    ("ASIO is not available on this platform").
+- WASAPI exclusive mode on Windows (ADR 0020): `AudioDeviceConfig::exclusive`
+  opens the output without the Windows mixer, its rate conversion or its
+  limiter, and `AudioDevice::isExclusive()` reports whether the open stream
+  got it. The device must take the requested rate and channel count; the
+  first format it accepts of float32, int32, int24 in 32 bits, packed int24
+  and int16 is used, and samples beyond [-1, 1] hard-clip. A busy device,
+  a device that forbids exclusive use or one that takes none of these
+  formats fails `open()` with a message; there is no fallback to shared
+  mode. Other platforms ignore the flag. Shared mode is unchanged.
 - The tuner (`vloom.tuner`) and the spectrum analyzer (`vloom.analyzer`)
   built-ins, under the new category "Analysis" (vloom-dsp ADR 0005). The
   analyzer passes audio through; a host draws its spectrum from the

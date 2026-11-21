@@ -23,6 +23,8 @@ struct BackendStreamConfig {
     int sampleRate = 48000; ///< 0 = the device's own rate
     int bufferFrames = 256; ///< requested period; the backend may round it
     int channels = 2;
+    bool exclusive = false; ///< WASAPI exclusive mode; other backends ignore it
+    int inputChannels = 0; ///< ASIO: driver inputs opened with the output; others ignore it
 };
 
 /// What open() actually got.
@@ -30,6 +32,10 @@ struct BackendStreamInfo {
     int sampleRate = 0;
     int channels = 0;
     std::string deviceName;
+    bool exclusive = false; ///< the stream really runs exclusive
+    int bufferFrames = 0; ///< the period the stream got; 0 = the backend does not say
+    int inputLatency = 0; ///< frames the driver reports for its input; 0 = unknown
+    int outputLatency = 0; ///< frames the driver reports for its output; 0 = unknown
 };
 
 /// Fills `numFrames` interleaved float frames of `numChannels` channels.
@@ -70,6 +76,31 @@ public:
     virtual void close() noexcept = 0;
     /// True between start() and stop(), unless the device was lost (unplugged).
     [[nodiscard]] virtual bool isRunning() const noexcept = 0;
+
+    /// Opens the driver's own settings dialog, where the API has one (ASIO).
+    virtual bool showControlPanel(std::string& error)
+    {
+        error = "This audio API has no control panel";
+        return false;
+    }
+
+    /// True once the driver asked for the open stream to be reopened (ASIO
+    /// reset, buffer-size, resync or latency messages).
+    [[nodiscard]] virtual bool resetRequested() const noexcept { return false; }
+
+    /// The open stream's current latencies, asking the driver again if it
+    /// reported a change (ASIO). False when the backend does not report
+    /// them: BackendStreamInfo's values stand.
+    virtual bool refreshLatency(int& input, int& output) noexcept
+    {
+        (void)input;
+        (void)output;
+        return false;
+    }
+
+    /// The period to reopen with after resetRequested(): the driver's new
+    /// size after a buffer-size change (ASIO). 0 = the backend does not say.
+    [[nodiscard]] virtual int reopenBufferFrames() noexcept { return 0; }
 
     /// Calls `onChange` when outputs are added or removed or the default
     /// output changes. It runs on an OS thread, so it must be quick and

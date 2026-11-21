@@ -8,7 +8,7 @@
 | core | `core/` | Lock-free queue, version, small utilities | — |
 | time | `time/` | PPQ, bar/beat/tick, transport clock | core |
 | dsp | `dsp/` | Sound generators and processors | core |
-| io | `io/` | Hardware audio devices, output and input (WASAPI, CoreAudio, ALSA), and MIDI inputs (WinMM, CoreMIDI, ALSA sequencer) | core |
+| io | `io/` | Hardware audio devices, output and input (WASAPI, ASIO, CoreAudio, ALSA), and MIDI inputs (WinMM, CoreMIDI, ALSA sequencer) | core |
 | mixer | `mixer/` | Insert settings (volume, pan, effect chain, output, sends), the pan law, and `MixerGraph`: inserts in processing order with delay compensation (ADR 0007); Engine mixes the buses along it | core, dsp, plugin |
 | plugin | `plugin/` | Hosted processors behind one interface (ADR 0006): CLAP, VST 3 and VST 2 (ADR 0010) hosts, built-in processors from vloom-dsp (ADR 0008) | core, time |
 | sample | `sample/` | Decoded audio in memory: WAV reading, resampling | core |

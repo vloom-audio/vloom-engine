@@ -1,26 +1,40 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Vloom Audio contributors
 //
-// Windows output through WASAPI, shared mode, event driven.
+// Windows output through WASAPI, event driven, shared or exclusive mode.
 //
 // Every COM object of a stream is created and used on one worker thread
 // (multi-threaded apartment), so the control thread's apartment (Qt's UI
 // thread is single-threaded) never matters. The worker renders on the
-// "Pro Audio" MMCSS class. Windows converts the sample rate and channel
-// count when the device runs at another format (AUTOCONVERTPCM).
+// "Pro Audio" MMCSS class.
+//
+// Shared mode: float32 into the Windows mixer, which converts the sample
+// rate and channel count when the device runs at another format
+// (AUTOCONVERTPCM).
+//
+// Exclusive mode (ADR 0020): the stream owns the device, at the requested
+// rate and channel count exactly. The first format of float32, int32, int24
+// in 32, packed int24 and int16 that the device takes is used; the engine
+// renders float into a scratch buffer, which convertFromFloat() clips into
+// that format. Each event fills the whole buffer (buffer = period). Any
+// failure fails open(): there is no fallback to shared mode.
 #include "io/AudioBackend.hpp"
 
 #if defined(_WIN32)
 
+#include "io/SampleFormat.hpp"
 #include "io/WasapiCommon.hpp"
 // Platform and standard headers.
 #include <algorithm>
 #include <atomic>
 #include <avrt.h>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 // COM code uses Microsoft extensions (__uuidof, also inside IID_PPV_ARGS);
 // this file only builds on Windows, where they are the normal way.
@@ -31,6 +45,36 @@
 namespace vloom::io {
 
 namespace {
+
+WAVEFORMATEXTENSIBLE toWaveFormat(const PcmFormat& pcm)
+{
+    WAVEFORMATEXTENSIBLE format{};
+    format.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+    format.Format.nChannels = static_cast<WORD>(pcm.channels);
+    format.Format.nSamplesPerSec = static_cast<DWORD>(pcm.sampleRate);
+    format.Format.wBitsPerSample = static_cast<WORD>(pcm.containerBits);
+    format.Format.nBlockAlign = static_cast<WORD>(pcm.blockAlign);
+    format.Format.nAvgBytesPerSec = static_cast<DWORD>(pcm.bytesPerSecond);
+    format.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+    format.Samples.wValidBitsPerSample = static_cast<WORD>(pcm.validBits);
+    format.dwChannelMask = speakerMask(pcm.channels);
+    format.SubFormat = pcm.isFloat ? KSDATAFORMAT_SUBTYPE_IEEE_FLOAT : KSDATAFORMAT_SUBTYPE_PCM;
+    return format;
+}
+
+/// Why an exclusive stream could not be had, for the user.
+std::string exclusiveError(HRESULT result)
+{
+    if (result == AUDCLNT_E_DEVICE_IN_USE)
+        return "The audio device is in use by another application in exclusive mode";
+    if (result == AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED)
+        return "Exclusive mode is not allowed for this audio device (Windows sound settings: \"Allow "
+               "applications to take exclusive control of this device\")";
+    char text[96];
+    std::snprintf(text, sizeof(text), "The audio device refused exclusive mode (error 0x%08lX)",
+        static_cast<unsigned long>(result));
+    return text;
+}
 
 /// Forwards endpoint notifications to a callback. Windows calls it on its
 /// own threads; the callback only bumps a counter.
@@ -186,6 +230,7 @@ public:
         setupDone_ = false;
         setupOk_ = false;
         error_.clear();
+        exclusive_ = false;
 
         wake_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (wake_ == nullptr) {
@@ -304,7 +349,7 @@ private:
             const bool lost
                 = waited == WAIT_TIMEOUT && clientRunning && FAILED(client->GetCurrentPadding(&padding));
             if ((waited == WAIT_OBJECT_0 + 1 && clientRunning) || lost) {
-                if (lost || !renderAvailable(client.Get(), renderClient.Get(), bufferFrames)) {
+                if (lost || !fillBuffer(client.Get(), renderClient.Get(), bufferFrames)) {
                     // Device lost (unplugged, format changed): stop rendering;
                     // the control thread sees isRunning() == false.
                     client->Stop();
@@ -330,6 +375,8 @@ private:
         error_ = message;
         return false;
     }
+
+    bool fail(const std::string& message) { return fail(message.c_str()); }
 
     bool setup(ComPtr<IAudioClient>& client, ComPtr<IAudioRenderClient>& renderClient, HANDLE& audioEvent,
         UINT32& bufferFrames)
@@ -360,6 +407,37 @@ private:
         }
         const int channels = std::clamp(config_.channels, 1, 8);
 
+        if (config_.exclusive) {
+            if (!initializeExclusive(device.Get(), client, sampleRate, channels))
+                return false;
+        } else if (!initializeShared(client.Get(), sampleRate, channels))
+            return false;
+
+        if (FAILED(client->GetBufferSize(&bufferFrames)) || bufferFrames == 0)
+            return fail("Could not read the device buffer size");
+        if (FAILED(client->GetService(IID_PPV_ARGS(&renderClient))))
+            return fail("Could not open the device for playback");
+        audioEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (audioEvent == nullptr || FAILED(client->SetEventHandle(audioEvent)))
+            return fail("Could not set up the audio event");
+        if (config_.exclusive) {
+            // The engine renders float here; fillBuffer() converts it into
+            // the device's format. Allocated now, never on the audio thread.
+            scratch_.assign(
+                static_cast<std::size_t>(bufferFrames) * static_cast<std::size_t>(channels), 0.0f);
+            exclusive_ = true;
+        }
+
+        std::lock_guard lock(mutex_);
+        info_.sampleRate = sampleRate;
+        info_.channels = channels;
+        info_.deviceName = friendlyName(device.Get());
+        info_.exclusive = exclusive_;
+        return true;
+    }
+
+    bool initializeShared(IAudioClient* client, int sampleRate, int channels)
+    {
         WAVEFORMATEXTENSIBLE format{};
         format.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
         format.Format.nChannels = static_cast<WORD>(channels);
@@ -381,26 +459,109 @@ private:
         if (FAILED(client->Initialize(AUDCLNT_SHAREMODE_SHARED, flags, duration, 0,
                 reinterpret_cast<const WAVEFORMATEX*>(&format), nullptr)))
             return fail("The audio device does not accept this format");
+        return true;
+    }
 
-        if (FAILED(client->GetBufferSize(&bufferFrames)) || bufferFrames == 0)
-            return fail("Could not read the device buffer size");
-        if (FAILED(client->GetService(IID_PPV_ARGS(&renderClient))))
-            return fail("Could not open the device for playback");
-        audioEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (audioEvent == nullptr || FAILED(client->SetEventHandle(audioEvent)))
-            return fail("Could not set up the audio event");
+    /// The first candidate format the device takes in exclusive mode at
+    /// `sampleRate`, or null. Fills `refusal` when the device refuses
+    /// exclusive use as such (busy, not allowed), whatever the format.
+    static const PcmFormat* findExclusiveFormat(IAudioClient* client,
+        const std::array<PcmFormat, kExclusiveFormatOrder.size()>& candidates, HRESULT& refusal)
+    {
+        for (const auto& candidate : candidates) {
+            const WAVEFORMATEXTENSIBLE format = toWaveFormat(candidate);
+            const HRESULT supported = client->IsFormatSupported(
+                AUDCLNT_SHAREMODE_EXCLUSIVE, reinterpret_cast<const WAVEFORMATEX*>(&format), nullptr);
+            if (supported == S_OK)
+                return &candidate;
+            if (supported == AUDCLNT_E_DEVICE_IN_USE || supported == AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED) {
+                refusal = supported;
+                return nullptr;
+            }
+        }
+        return nullptr;
+    }
 
-        std::lock_guard lock(mutex_);
-        info_.sampleRate = sampleRate;
-        info_.channels = channels;
-        info_.deviceName = friendlyName(device.Get());
+    /// Formats the device's "no format" message, naming the rate.
+    std::string noExclusiveFormatMessage(IAudioClient* client, int sampleRate, int channels)
+    {
+        // Does the device play another rate? Its mix format's is the likeliest.
+        int mixRate = 0;
+        WAVEFORMATEX* mix = nullptr;
+        if (SUCCEEDED(client->GetMixFormat(&mix)) && mix != nullptr) {
+            mixRate = static_cast<int>(mix->nSamplesPerSec);
+            CoTaskMemFree(mix);
+        }
+        char text[256];
+        HRESULT refusal = S_OK;
+        if (mixRate > 0 && mixRate != sampleRate) {
+            const auto others = exclusiveFormatCandidates(mixRate, channels);
+            if (findExclusiveFormat(client, others, refusal) != nullptr) {
+                std::snprintf(text, sizeof(text),
+                    "The audio device does not play %d Hz in exclusive mode (it plays %d Hz); "
+                    "Windows does not convert the rate in exclusive mode",
+                    sampleRate, mixRate);
+                return text;
+            }
+        }
+        std::snprintf(text, sizeof(text),
+            "The audio device accepts none of float32, int32, int24 or int16 at %d Hz with %d channel%s in "
+            "exclusive mode",
+            sampleRate, channels, channels == 1 ? "" : "s");
+        return text;
+    }
+
+    bool initializeExclusive(IMMDevice* device, ComPtr<IAudioClient>& client, int sampleRate, int channels)
+    {
+        REFERENCE_TIME defaultPeriod = 0;
+        REFERENCE_TIME minimumPeriod = 0;
+        if (FAILED(client->GetDevicePeriod(&defaultPeriod, &minimumPeriod)))
+            return fail("Could not read the device period");
+
+        const auto candidates = exclusiveFormatCandidates(sampleRate, channels);
+        HRESULT refusal = S_OK;
+        const PcmFormat* chosen = findExclusiveFormat(client.Get(), candidates, refusal);
+        if (chosen == nullptr) {
+            if (FAILED(refusal))
+                return fail(exclusiveError(refusal));
+            return fail(noExclusiveFormatMessage(client.Get(), sampleRate, channels));
+        }
+        const WAVEFORMATEXTENSIBLE format = toWaveFormat(*chosen);
+        const auto* waveFormat = reinterpret_cast<const WAVEFORMATEX*>(&format);
+
+        // Requested period, rounded up to whole 100 ns units, at least the
+        // device's minimum. Buffer and period are the same in event mode.
+        REFERENCE_TIME duration = static_cast<REFERENCE_TIME>(
+            (static_cast<std::int64_t>(config_.bufferFrames) * kHundredNsPerSecond + sampleRate - 1)
+            / sampleRate);
+        duration = std::max(duration, minimumPeriod);
+        HRESULT result = client->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+            duration, duration, waveFormat, nullptr);
+        if (result == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED) {
+            // Microsoft's recipe: the failed client still reports the aligned
+            // size; initialise a new client with that duration.
+            UINT32 alignedFrames = 0;
+            if (FAILED(client->GetBufferSize(&alignedFrames)) || alignedFrames == 0)
+                return fail("Could not read the device's aligned buffer size");
+            client.Reset();
+            if (FAILED(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &client)))
+                return fail("Could not open the audio device");
+            duration = static_cast<REFERENCE_TIME>(static_cast<double>(kHundredNsPerSecond)
+                    * static_cast<double>(alignedFrames) / static_cast<double>(sampleRate)
+                + 0.5);
+            result = client->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                duration, duration, waveFormat, nullptr);
+        }
+        if (FAILED(result))
+            return fail(exclusiveError(result));
+        sample_ = chosen->sample;
         return true;
     }
 
     bool startClient(IAudioClient* client, IAudioRenderClient* renderClient, UINT32 bufferFrames)
     {
         // Fill the whole buffer first so playback starts without a gap.
-        bool ok = renderAvailable(client, renderClient, bufferFrames) && SUCCEEDED(client->Start());
+        bool ok = fillBuffer(client, renderClient, bufferFrames) && SUCCEEDED(client->Start());
         if (!ok) {
             std::lock_guard lock(mutex_);
             error_ = "Could not start the audio device";
@@ -418,6 +579,25 @@ private:
                 startResult_ = startResult;
         }
         changed_.notify_all();
+    }
+
+    // Real-time: no allocation, no locks.
+    bool fillBuffer(IAudioClient* client, IAudioRenderClient* renderClient, UINT32 bufferFrames) noexcept
+    {
+        return exclusive_ ? renderWhole(renderClient, bufferFrames)
+                          : renderAvailable(client, renderClient, bufferFrames);
+    }
+
+    // Real-time: exclusive mode fills the whole buffer on every event.
+    bool renderWhole(IAudioRenderClient* renderClient, UINT32 bufferFrames) noexcept
+    {
+        BYTE* data = nullptr;
+        if (FAILED(renderClient->GetBuffer(bufferFrames, &data)))
+            return false;
+        render_(user_, scratch_.data(), info_.channels, static_cast<int>(bufferFrames));
+        convertFromFloat(sample_, scratch_.data(), reinterpret_cast<std::byte*>(data),
+            static_cast<std::size_t>(bufferFrames) * static_cast<std::size_t>(info_.channels));
+        return SUCCEEDED(renderClient->ReleaseBuffer(bufferFrames, 0));
     }
 
     // Real-time: no allocation, no locks.
@@ -440,6 +620,12 @@ private:
     RenderFn render_ = nullptr;
     void* user_ = nullptr;
     BackendStreamInfo info_; ///< written by the worker before setupDone_
+
+    // Exclusive mode, set by the worker before setupDone_ and then only read
+    // by it.
+    bool exclusive_ = false;
+    SampleFormat sample_ = SampleFormat::Float32;
+    std::vector<float> scratch_; ///< bufferFrames * channels interleaved floats
 
     std::thread worker_;
     HANDLE wake_ = nullptr; ///< auto-reset: a control request is waiting

@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Vloom Audio contributors
 #include "vloom/engine/io/AudioDevice.hpp"
 
+#include "io/AsioSession.hpp"
 #include "io/AudioBackend.hpp"
 
 #include <algorithm>
@@ -19,12 +20,18 @@ void setError(std::string* error, const std::string& message)
     if (error)
         *error = message;
 }
+
+std::size_t apiIndex(AudioApi api) noexcept { return api == AudioApi::Asio ? 1 : 0; }
 } // namespace
 
 struct AudioDevice::Impl {
     std::unique_ptr<io::AudioBackend> backend = io::createPlatformBackend();
-    std::vector<io::BackendDeviceInfo> devices; ///< as last listed, for indices
+    std::unique_ptr<io::AudioBackend> asio; ///< made on first use of AudioApi::Asio
+    /// As last listed, per API, for indices.
+    std::array<std::vector<io::BackendDeviceInfo>, 2> devices;
 
+    io::AudioBackend* active = nullptr; ///< the open stream's backend
+    AudioApi api = AudioApi::Default;
     bool open = false;
     Callback callback;
     io::BackendStreamInfo info;
@@ -35,6 +42,15 @@ struct AudioDevice::Impl {
 
     // Real-time thread: asks the engine for planar blocks and interleaves them
     // into the backend's buffer.
+    io::AudioBackend& backendFor(AudioApi which)
+    {
+        if (which != AudioApi::Asio)
+            return *backend;
+        if (asio == nullptr)
+            asio = io::createAsioBackend();
+        return *asio;
+    }
+
     static void render(void* user, float* interleaved, int numChannels, int numFrames) noexcept
     {
         auto* self = static_cast<Impl*>(user);
@@ -69,14 +85,22 @@ AudioDevice::AudioDevice()
 
 AudioDevice::~AudioDevice() { close(); }
 
-std::vector<AudioDeviceInfo> AudioDevice::listOutputDevices()
+std::vector<AudioDeviceInfo> AudioDevice::listOutputDevices() { return listOutputDevices(AudioApi::Default); }
+
+std::vector<AudioDeviceInfo> AudioDevice::listOutputDevices(AudioApi api)
 {
-    impl_->devices = impl_->backend->listOutputDevices();
+    auto& devices = impl_->devices[apiIndex(api)];
+    devices = impl_->backendFor(api).listOutputDevices();
     std::vector<AudioDeviceInfo> result;
-    result.reserve(impl_->devices.size());
-    for (const auto& device : impl_->devices)
+    result.reserve(devices.size());
+    for (const auto& device : devices)
         result.push_back({device.name, device.isDefault});
     return result;
+}
+
+bool AudioDevice::isApiAvailable(AudioApi api) noexcept
+{
+    return api == AudioApi::Default || io::asioUnavailableReason()[0] == 0;
 }
 
 bool AudioDevice::open(const AudioDeviceConfig& config, Callback callback, std::string* error)
@@ -91,20 +115,24 @@ bool AudioDevice::open(const AudioDeviceConfig& config, Callback callback, std::
     stream.sampleRate = std::max(config.sampleRate, 0);
     stream.bufferFrames = std::clamp(config.bufferFrames, 16, kMaxBlockFrames);
     stream.channels = std::clamp(config.channels, 1, kMaxChannels);
+    stream.exclusive = config.exclusive;
+    stream.inputChannels = std::clamp(config.inputChannels, 0, kMaxChannels);
+    io::AudioBackend& backend = impl_->backendFor(config.api);
     if (config.deviceIndex >= 0) {
-        if (impl_->devices.empty())
-            impl_->devices = impl_->backend->listOutputDevices();
-        if (config.deviceIndex >= static_cast<int>(impl_->devices.size())) {
+        auto& devices = impl_->devices[apiIndex(config.api)];
+        if (devices.empty())
+            devices = backend.listOutputDevices();
+        if (config.deviceIndex >= static_cast<int>(devices.size())) {
             setError(error, "Audio device index out of range");
             return false;
         }
-        stream.deviceId = impl_->devices[static_cast<std::size_t>(config.deviceIndex)].id;
+        stream.deviceId = devices[static_cast<std::size_t>(config.deviceIndex)].id;
     }
 
     impl_->callback = std::move(callback);
     io::BackendStreamInfo info;
     std::string message;
-    if (!impl_->backend->open(stream, &Impl::render, impl_.get(), info, message)) {
+    if (!backend.open(stream, &Impl::render, impl_.get(), info, message)) {
         setError(error, message.empty() ? "Could not open the audio device" : message);
         impl_->callback = nullptr;
         return false;
@@ -115,6 +143,8 @@ bool AudioDevice::open(const AudioDeviceConfig& config, Callback callback, std::
     for (int ch = 0; ch < info.channels; ++ch)
         impl_->channelPtrs[static_cast<std::size_t>(ch)]
             = impl_->scratch.data() + static_cast<std::size_t>(ch) * kMaxBlockFrames;
+    impl_->active = &backend;
+    impl_->api = config.api;
     impl_->open = true;
     return true;
 }
@@ -125,10 +155,10 @@ bool AudioDevice::start(std::string* error)
         setError(error, "Audio device is not open");
         return false;
     }
-    if (impl_->backend->isRunning())
+    if (impl_->active->isRunning())
         return true;
     std::string message;
-    if (!impl_->backend->start(message)) {
+    if (!impl_->active->start(message)) {
         setError(error, message.empty() ? "Could not start the audio device" : message);
         return false;
     }
@@ -138,25 +168,74 @@ bool AudioDevice::start(std::string* error)
 void AudioDevice::stop()
 {
     if (impl_->open)
-        impl_->backend->stop();
+        impl_->active->stop();
 }
 
 void AudioDevice::close()
 {
     if (!impl_->open)
         return;
-    impl_->backend->stop();
-    impl_->backend->close();
+    impl_->active->stop();
+    impl_->active->close();
     impl_->open = false;
+    impl_->active = nullptr;
+    impl_->api = AudioApi::Default;
     impl_->callback = nullptr;
     impl_->info = {};
 }
 
 bool AudioDevice::isOpen() const noexcept { return impl_->open; }
-bool AudioDevice::isRunning() const noexcept { return impl_->open && impl_->backend->isRunning(); }
+bool AudioDevice::isRunning() const noexcept { return impl_->open && impl_->active->isRunning(); }
 int AudioDevice::sampleRate() const noexcept { return impl_->open ? impl_->info.sampleRate : 0; }
 int AudioDevice::channels() const noexcept { return impl_->open ? impl_->info.channels : 0; }
 std::string AudioDevice::deviceName() const { return impl_->open ? impl_->info.deviceName : std::string(); }
+bool AudioDevice::isExclusive() const noexcept { return impl_->open && impl_->info.exclusive; }
+AudioApi AudioDevice::api() const noexcept { return impl_->api; }
+int AudioDevice::bufferFrames() const noexcept { return impl_->open ? impl_->info.bufferFrames : 0; }
+int AudioDevice::inputLatencyFrames() const noexcept
+{
+    if (!impl_->open)
+        return 0;
+    int input = 0;
+    int output = 0;
+    if (impl_->active->refreshLatency(input, output))
+        return input;
+    return impl_->info.inputLatency;
+}
+
+int AudioDevice::outputLatencyFrames() const noexcept
+{
+    if (!impl_->open)
+        return 0;
+    int input = 0;
+    int output = 0;
+    if (impl_->active->refreshLatency(input, output))
+        return output;
+    return impl_->info.outputLatency;
+}
+
+int AudioDevice::reopenBufferFrames() const noexcept
+{
+    if (!impl_->open)
+        return 0;
+    const int frames = impl_->active->reopenBufferFrames();
+    return frames > 0 ? frames : impl_->info.bufferFrames;
+}
+bool AudioDevice::resetRequested() const noexcept { return impl_->open && impl_->active->resetRequested(); }
+
+bool AudioDevice::showControlPanel(std::string* error)
+{
+    if (!impl_->open) {
+        setError(error, "Audio device is not open");
+        return false;
+    }
+    std::string message;
+    if (!impl_->active->showControlPanel(message)) {
+        setError(error, message.empty() ? "Could not show the control panel" : message);
+        return false;
+    }
+    return true;
+}
 
 struct DeviceListWatcher::Impl {
     // The counter outlives the subscription's last callback: it is shared.

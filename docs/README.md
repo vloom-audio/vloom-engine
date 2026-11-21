@@ -23,3 +23,5 @@
   - [0017 Count-in and punch recording](adr/0017-count-in-and-punch-recording.md)
   - [0018 Bouncing a pattern to audio](adr/0018-bouncing-patterns-to-audio.md)
   - [0019 Meters, readouts and sample data for editors](adr/0019-meters-readouts-and-sample-data-for-editors.md)
+  - [0020 WASAPI exclusive mode, with no fallback to shared](adr/0020-wasapi-exclusive-mode.md)
+  - [0021 ASIO driver support, one shared session for output and input](adr/0021-asio-driver-support.md)

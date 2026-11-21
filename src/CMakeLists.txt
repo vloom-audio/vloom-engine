@@ -23,12 +23,16 @@ target_sources(vloom_engine PRIVATE
     io/AlsaBackend.cpp
     io/AlsaInputBackend.cpp
     io/AlsaMidiBackend.cpp
+    io/AsioDriver.cpp
+    io/AsioSdkDriver.cpp
+    io/AsioSession.cpp
     io/AudioDevice.cpp
     io/AudioInput.cpp
     io/CoreAudioBackend.cpp
     io/CoreAudioInputBackend.cpp
     io/CoreMidiBackend.cpp
     io/MidiInput.cpp
+    io/SampleFormat.cpp
     io/WasapiBackend.cpp
     io/WasapiInputBackend.cpp
     io/WinMmMidiBackend.cpp
@@ -81,6 +85,12 @@ if(WIN32)
 endif()
 # Built-in effects: their DSP comes from vloom-dsp (ADR 0008).
 target_link_libraries(vloom_engine PRIVATE vloom::dsp)
+
+# ASIO (ADR 0021): the SDK's host side, only when VLOOM_ENGINE_ASIO is on.
+if(TARGET vloom_asio_sdk)
+    target_link_libraries(vloom_engine PRIVATE vloom_asio_sdk)
+    target_compile_definitions(vloom_engine PRIVATE VLOOM_ENGINE_HAS_ASIO=1)
+endif()
 
 if(WIN32)
     # WASAPI: COM (ole32) and the MMCSS "Pro Audio" thread class (avrt).
