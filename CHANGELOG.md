@@ -7,6 +7,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- WASAPI exclusive mode on Windows (ADR 0020): `AudioDeviceConfig::exclusive`
+  opens the output without the Windows mixer, its rate conversion or its
+  limiter, and `AudioDevice::isExclusive()` reports whether the open stream
+  got it. The device must take the requested rate and channel count; the
+  first format it accepts of float32, int32, int24 in 32 bits, packed int24
+  and int16 is used, and samples beyond [-1, 1] hard-clip. A busy device,
+  a device that forbids exclusive use or one that takes none of these
+  formats fails `open()` with a message; there is no fallback to shared
+  mode. Other platforms ignore the flag. Shared mode is unchanged.
 - The tuner (`vloom.tuner`) and the spectrum analyzer (`vloom.analyzer`)
   built-ins, under the new category "Analysis" (vloom-dsp ADR 0005). The
   analyzer passes audio through; a host draws its spectrum from the
