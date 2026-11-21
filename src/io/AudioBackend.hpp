@@ -23,6 +23,7 @@ struct BackendStreamConfig {
     int sampleRate = 48000; ///< 0 = the device's own rate
     int bufferFrames = 256; ///< requested period; the backend may round it
     int channels = 2;
+    bool exclusive = false; ///< WASAPI exclusive mode; other backends ignore it
 };
 
 /// What open() actually got.
@@ -30,6 +31,7 @@ struct BackendStreamInfo {
     int sampleRate = 0;
     int channels = 0;
     std::string deviceName;
+    bool exclusive = false; ///< the stream really runs exclusive
 };
 
 /// Fills `numFrames` interleaved float frames of `numChannels` channels.

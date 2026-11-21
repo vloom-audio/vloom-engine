@@ -91,6 +91,7 @@ bool AudioDevice::open(const AudioDeviceConfig& config, Callback callback, std::
     stream.sampleRate = std::max(config.sampleRate, 0);
     stream.bufferFrames = std::clamp(config.bufferFrames, 16, kMaxBlockFrames);
     stream.channels = std::clamp(config.channels, 1, kMaxChannels);
+    stream.exclusive = config.exclusive;
     if (config.deviceIndex >= 0) {
         if (impl_->devices.empty())
             impl_->devices = impl_->backend->listOutputDevices();
@@ -157,6 +158,7 @@ bool AudioDevice::isRunning() const noexcept { return impl_->open && impl_->back
 int AudioDevice::sampleRate() const noexcept { return impl_->open ? impl_->info.sampleRate : 0; }
 int AudioDevice::channels() const noexcept { return impl_->open ? impl_->info.channels : 0; }
 std::string AudioDevice::deviceName() const { return impl_->open ? impl_->info.deviceName : std::string(); }
+bool AudioDevice::isExclusive() const noexcept { return impl_->open && impl_->info.exclusive; }
 
 struct DeviceListWatcher::Impl {
     // The counter outlives the subscription's last callback: it is shared.

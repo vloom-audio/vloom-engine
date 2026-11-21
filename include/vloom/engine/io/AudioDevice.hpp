@@ -20,16 +20,27 @@ struct AudioDeviceConfig {
     int sampleRate = 48000; ///< 0 = device native rate
     int bufferFrames = 256; ///< requested period size
     int channels = 2;
+    bool exclusive = false; ///< Windows: WASAPI exclusive mode; ignored elsewhere
 };
 
 /// A hardware output device, through each OS's own audio API: WASAPI
-/// (shared, event driven) on Windows, CoreAudio (HAL output unit) on macOS,
-/// ALSA on Linux (which also reaches PulseAudio and PipeWire).
+/// (shared or exclusive, event driven) on Windows, CoreAudio (HAL output
+/// unit) on macOS, ALSA on Linux (which also reaches PulseAudio and PipeWire).
 ///
 /// The callback runs on the real-time audio thread and receives
 /// non-interleaved float buffers of at most kMaxBlockFrames frames. When the
 /// device runs at another rate or channel count the OS converts, so
 /// sampleRate() reports the rate the callback is driven at.
+///
+/// Exclusive mode (Windows, AudioDeviceConfig::exclusive, ADR 0020) bypasses
+/// the Windows mixer: no rate or channel conversion and no limiter, so the
+/// device must accept the requested rate (0 = its mix format rate) and
+/// channel count as they are. The engine's float output is written as the
+/// first format the device takes of float32, int32, int24 in 32 bits, packed
+/// int24 and int16; samples beyond [-1, 1] hard-clip. If the device is busy,
+/// forbids exclusive use or takes none of these formats, open() fails with a
+/// message; it never falls back to shared mode. isExclusive() tells whether
+/// the open stream runs exclusive.
 ///
 /// If the device is lost while running (unplugged), isRunning() turns false.
 class AudioDevice {
@@ -59,6 +70,8 @@ public:
     [[nodiscard]] int sampleRate() const noexcept;
     [[nodiscard]] int channels() const noexcept;
     [[nodiscard]] std::string deviceName() const;
+    /// True only while open and the stream really runs in WASAPI exclusive mode.
+    [[nodiscard]] bool isExclusive() const noexcept;
 
 private:
     struct Impl;
