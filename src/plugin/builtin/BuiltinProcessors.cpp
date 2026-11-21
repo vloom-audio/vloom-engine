@@ -6,6 +6,7 @@
 
 #include <vloom/dsp/NoteValue.hpp>
 #include <vloom/dsp/Wavetable.hpp>
+#include <vloom/dsp/effects/Analyzer.hpp>
 #include <vloom/dsp/effects/Bitcrusher.hpp>
 #include <vloom/dsp/effects/Chorus.hpp>
 #include <vloom/dsp/effects/Compressor.hpp>
@@ -22,6 +23,7 @@
 #include <vloom/dsp/effects/Saturator.hpp>
 #include <vloom/dsp/effects/TransientShaper.hpp>
 #include <vloom/dsp/effects/Tremolo.hpp>
+#include <vloom/dsp/effects/Tuner.hpp>
 #include <vloom/dsp/effects/Utility.hpp>
 #include <vloom/dsp/instruments/DrumSampler.hpp>
 #include <vloom/dsp/instruments/Sampler.hpp>
@@ -116,6 +118,30 @@ Labels tremoloLabels(std::uint32_t id)
     if (id == dsp::Tremolo::kShape)
         return {"Sine", "Triangle", "Square"};
     return {};
+}
+
+Labels tunerLabels(std::uint32_t id)
+{
+    return id == dsp::Tuner::kInput ? Labels{"Left + right", "Left", "Right"} : Labels{};
+}
+
+Labels analyzerLabels(std::uint32_t id)
+{
+    using A = dsp::Analyzer;
+    switch (id) {
+    case A::kSpeed:
+        return {"Slow", "Medium", "Fast"};
+    case A::kResolution: {
+        Labels list;
+        for (int resolution = 0; resolution < A::kResolutions; ++resolution)
+            list.push_back(std::to_string(A::fftSize(resolution)));
+        return list;
+    }
+    case A::kChannel:
+        return {"Left + right", "Left", "Right"};
+    default:
+        return {};
+    }
 }
 
 Labels samplerLabels(std::uint32_t id)
@@ -219,6 +245,8 @@ constexpr builtin::Extras kTremolo{"Modulation", tremoloLabels};
 constexpr builtin::Extras kSaturator{"Distortion", saturatorLabels};
 constexpr builtin::Extras kDistortion{"Distortion"};
 constexpr builtin::Extras kUtility{"Utility"};
+constexpr builtin::Extras kTuner{"Analysis", tunerLabels};
+constexpr builtin::Extras kAnalyzer{"Analysis", analyzerLabels};
 constexpr builtin::Extras kSynth{"Synth", synthLabels};
 constexpr builtin::Extras kSampler{"Sampler", samplerLabels};
 constexpr builtin::Extras kDrums{"Drums", drumLabels};
@@ -243,6 +271,8 @@ constexpr std::array kBuiltins{
     entry<dsp::Bitcrusher, kDistortion>(),
     entry<dsp::Gain, kUtility>(),
     entry<dsp::Utility, kUtility>(),
+    entry<dsp::Tuner, kTuner>(),
+    entry<dsp::Analyzer, kAnalyzer>(),
     // Instruments
     entry<dsp::Synth, kSynth>(),
     entry<dsp::Sampler, kSampler>(),

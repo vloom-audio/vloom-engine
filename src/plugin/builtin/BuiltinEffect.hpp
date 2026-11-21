@@ -22,6 +22,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -53,31 +54,53 @@ template <typename Effect> struct Readout {
     float (*value)(const Effect& effect) noexcept = nullptr;
 };
 
+/// The table's lines for meters vloom-dsp also publishes as readouts: an
+/// effect with dsp::HasReadouts reports them there instead, so no id is
+/// listed twice (ADR 0019).
+template <typename Effect>
+inline constexpr bool kTableGainReduction = GainReductionMeter<Effect> && !dsp::HasReadouts<Effect>;
+template <typename Effect>
+inline constexpr bool kTableOpenState = OpenStateMeter<Effect> && !dsp::HasReadouts<Effect>;
+
 template <typename Effect>
 inline constexpr std::size_t kReadoutCount
-    = (GainReductionMeter<Effect> ? 1U : 0U) + (OpenStateMeter<Effect> ? 1U : 0U);
+    = (kTableGainReduction<Effect> ? 1U : 0U) + (kTableOpenState<Effect> ? 1U : 0U);
 
 /// The one place where vloom-dsp capabilities become readouts (ADR 0019).
 /// Every one must be readable from any thread without locking.
 ///
-/// vloom-dsp's coming HasReadouts concept (readoutSpecs() and readout(i))
-/// plugs in here: the adapter lists its readouts after these, under the ids
-/// it gives, and an effect that reports its gain reduction or open state
-/// through it drops out of the matching line below, so no id is listed
-/// twice.
+/// vloom-dsp's HasReadouts (readoutSpecs() and readout(i)) plugs in here:
+/// the adapter lists its readouts after these (dspReadoutInfo()), and an
+/// effect that reports its gain reduction or open state through it drops
+/// out of the matching line below.
 template <typename Effect>
 [[nodiscard]] constexpr std::array<Readout<Effect>, kReadoutCount<Effect>> readoutTable() noexcept
 {
     std::array<Readout<Effect>, kReadoutCount<Effect>> table{};
     std::size_t next = 0;
-    if constexpr (GainReductionMeter<Effect>)
+    if constexpr (kTableGainReduction<Effect>)
         table[next++] = Readout<Effect>{"gainReduction", "Gain Reduction", "dB", false,
             [](const Effect& effect) noexcept { return static_cast<float>(effect.gainReductionDb()); }};
-    if constexpr (OpenStateMeter<Effect>)
+    if constexpr (kTableOpenState<Effect>)
         table[next++] = Readout<Effect>{"gateOpen", "Gate Open", "", true,
             [](const Effect& effect) noexcept { return effect.isOpen() ? 1.0f : 0.0f; }};
     (void)next;
     return table;
+}
+
+/// How a vloom-dsp readout (HasReadouts) is listed: under the dsp's own id
+/// and name, except the gain reduction and a gate's open state, which keep
+/// the ids the table gave them before ("gainReduction", "gateOpen"), so a UI
+/// does not notice the move. A stepped 0 .. 1 readout is a toggle.
+[[nodiscard]] inline ReadoutInfo dspReadoutInfo(const dsp::ReadoutSpec& spec)
+{
+    const std::string_view id = spec.id;
+    const bool toggle = spec.stepped && spec.minValue == 0.0 && spec.maxValue == 1.0;
+    if (id == "gain_reduction_db")
+        return ReadoutInfo{"gainReduction", "Gain Reduction", spec.unit, toggle};
+    if (id == "open")
+        return ReadoutInfo{"gateOpen", "Gate Open", spec.unit, toggle};
+    return ReadoutInfo{spec.id, spec.name, spec.unit, toggle};
 }
 
 /// What the registry knows about a built-in besides its vloom-dsp spec.
@@ -113,7 +136,8 @@ struct Extras {
 /// - gainReductionDb() for a meter.
 /// - Readouts (ADR 0019): the capabilities above that are values to show
 ///   (gain reduction, a gate's open state), mapped in one place,
-///   readoutTable().
+///   readoutTable(), then dsp::HasReadouts' readoutSpecs() (the tuner, the
+///   analyzer, the dynamics), read lock-free through readout().
 template <dsp::Effect Effect> class BuiltinEffect final : public AudioProcessor {
 public:
     explicit BuiltinEffect(Extras extras = {})
@@ -170,22 +194,30 @@ public:
     [[nodiscard]] std::vector<ReadoutInfo> readouts() const override
     {
         std::vector<ReadoutInfo> list;
-        list.reserve(kReadouts.size());
+        list.reserve(kReadouts.size() + dspReadoutSpecs().size());
         for (const Readout<Effect>& readout : kReadouts)
             list.push_back(ReadoutInfo{readout.id, readout.name, readout.unit, readout.toggle});
+        for (const dsp::ReadoutSpec& spec : dspReadoutSpecs())
+            list.push_back(dspReadoutInfo(spec));
         return list;
     }
 
     [[nodiscard]] float readoutValue(int index) const noexcept override
     {
-        if constexpr (kReadoutCount<Effect> == 0) {
-            (void)index;
+        if (index < 0)
             return 0.0f;
-        } else {
-            if (index < 0 || static_cast<std::size_t>(index) >= kReadouts.size())
-                return 0.0f;
-            return kReadouts[static_cast<std::size_t>(index)].value(effect_);
+        const auto at = static_cast<std::size_t>(index);
+        if constexpr (kReadoutCount<Effect> > 0) {
+            if (at < kReadouts.size())
+                return kReadouts[at].value(effect_);
         }
+        if constexpr (dsp::HasReadouts<Effect>) {
+            const std::size_t past = at - kReadouts.size();
+            if (at >= kReadouts.size() && past < dspReadoutSpecs().size())
+                return effect_.readout(past); // lock-free (SharedValue), any thread
+        }
+        (void)at; // unused without readouts
+        return 0.0f;
     }
 
     bool activate(double sampleRate, int maxBlockFrames) override
@@ -535,6 +567,15 @@ private:
     }
 
     [[nodiscard]] static std::span<const dsp::ParameterSpec> specs() noexcept { return Effect::parameters(); }
+
+    /// vloom-dsp's readouts (HasReadouts), listed after the table's; empty without.
+    [[nodiscard]] static std::span<const dsp::ReadoutSpec> dspReadoutSpecs() noexcept
+    {
+        if constexpr (dsp::HasReadouts<Effect>)
+            return Effect::readoutSpecs();
+        else
+            return {};
+    }
 
     [[nodiscard]] static int indexOf(std::uint32_t id) noexcept
     {
