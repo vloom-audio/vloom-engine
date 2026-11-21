@@ -18,6 +18,7 @@ add_executable(vloom_engine_tests
     dsp/SynthTests.cpp
     io/AudioDeviceTests.cpp
     io/MidiInputTests.cpp
+    io/SampleFormatTests.cpp
     mixer/MixerTests.cpp
     mixer/RoutingTests.cpp
     plugin/BuiltinCapabilitiesTests.cpp
