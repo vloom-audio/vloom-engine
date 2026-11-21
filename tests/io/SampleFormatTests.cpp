@@ -4,14 +4,15 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>
 #include <vector>
 
-// Pure conversions for WASAPI exclusive output (ADR 0020). No device is
-// opened here or anywhere in these tests.
+// Pure conversions for WASAPI exclusive output (ADR 0020) and ASIO (ADR
+// 0021). No device is opened here or anywhere in these tests.
 
 using vloom::io::convertFromFloat;
 using vloom::io::SampleFormat;
@@ -156,4 +157,106 @@ TEST_CASE("Exclusive format candidates come best first with consistent sizes", "
     const auto surround = vloom::io::exclusiveFormatCandidates(96000, 6);
     CHECK(surround[3].blockAlign == 18); // packed int24, 6 channels
     CHECK(surround[3].bytesPerSecond == 96000 * 18);
+}
+
+// ---- the formats ASIO adds (ADR 0021), and reading samples back
+
+namespace {
+
+template <typename T> std::vector<float> read(SampleFormat format, const std::vector<T>& in)
+{
+    std::vector<std::byte> bytes(in.size() * sizeof(T));
+    std::memcpy(bytes.data(), in.data(), bytes.size());
+    std::vector<float> out(in.size(), 99.0f);
+    vloom::io::convertToFloat(format, bytes.data(), out.data(), in.size());
+    return out;
+}
+
+const SampleFormat kAllFormats[] = {SampleFormat::Float32, SampleFormat::Int32, SampleFormat::Int24In32,
+    SampleFormat::Int24Packed, SampleFormat::Int16, SampleFormat::Float64, SampleFormat::Int32Lsb16,
+    SampleFormat::Int32Lsb18, SampleFormat::Int32Lsb20, SampleFormat::Int32Lsb24};
+
+} // namespace
+
+TEST_CASE("float64 clips like float32 and keeps in-range samples exact", "[io]")
+{
+    const auto out
+        = convert<double>(SampleFormat::Float64, {0.0f, 0.25f, -0.123456789f, 1.5f, -3.0f, kNaN, kInf});
+    CHECK(out[0] == 0.0);
+    CHECK(out[1] == 0.25);
+    CHECK(out[2] == static_cast<double>(-0.123456789f));
+    CHECK(out[3] == 1.0);
+    CHECK(out[4] == -1.0);
+    CHECK(out[5] == 0.0);
+    CHECK(out[6] == 1.0);
+    CHECK(vloom::io::bytesPerSample(SampleFormat::Float64) == 8);
+}
+
+TEST_CASE("LSB-aligned int formats are right-justified and sign-extended", "[io]")
+{
+    CHECK(convert<std::int32_t>(SampleFormat::Int32Lsb16, {1.0f, -1.0f, 2.0f, kNaN, 0.5f})
+        == std::vector<std::int32_t>{32767, -32767, 32767, 0, 16384});
+    CHECK(convert<std::int32_t>(SampleFormat::Int32Lsb18, {1.0f, -1.0f, -9.0f})
+        == std::vector<std::int32_t>{131071, -131071, -131071});
+    CHECK(convert<std::int32_t>(SampleFormat::Int32Lsb20, {1.0f, -1.0f, 1.0f / 524287.0f})
+        == std::vector<std::int32_t>{524287, -524287, 1});
+    CHECK(convert<std::int32_t>(SampleFormat::Int32Lsb24, {1.0f, -1.0f, -1.0f / 8388607.0f})
+        == std::vector<std::int32_t>{8388607, -8388607, -1});
+    for (const SampleFormat format : {SampleFormat::Int32Lsb16, SampleFormat::Int32Lsb18,
+             SampleFormat::Int32Lsb20, SampleFormat::Int32Lsb24})
+        CHECK(vloom::io::bytesPerSample(format) == 4);
+}
+
+TEST_CASE("Integer samples read back as float by the same scale", "[io]")
+{
+    CHECK(read<std::int16_t>(SampleFormat::Int16, {0, 32767, -32767, -32768, 16384})
+        == std::vector<float>{0.0f, 1.0f, -1.0f, static_cast<float>(-32768.0 / 32767.0),
+            static_cast<float>(16384.0 / 32767.0)});
+    CHECK(read<std::int32_t>(SampleFormat::Int32, {0, 2147483647, -2147483647})
+        == std::vector<float>{0.0f, 1.0f, -1.0f});
+    CHECK(read<std::int32_t>(SampleFormat::Int24In32, {8388607 * 256, -8388607 * 256, 256 + 0x7F})
+        == std::vector<float>{1.0f, -1.0f, static_cast<float>(1.0 / 8388607.0)});
+    CHECK(read<std::int32_t>(SampleFormat::Int32Lsb24, {8388607, -8388607, -1})
+        == std::vector<float>{1.0f, -1.0f, static_cast<float>(-1.0 / 8388607.0)});
+    CHECK(read<std::int32_t>(SampleFormat::Int32Lsb20, {524287, -524287}) == std::vector<float>{1.0f, -1.0f});
+    CHECK(read<std::int32_t>(SampleFormat::Int32Lsb18, {131071, -131071}) == std::vector<float>{1.0f, -1.0f});
+    CHECK(read<std::int32_t>(SampleFormat::Int32Lsb16, {32767, -32767}) == std::vector<float>{1.0f, -1.0f});
+    // Bits above the valid ones are ignored: the low 16 bits are 0x8001 = -32767.
+    const auto stray = static_cast<std::int32_t>(0x12348001U);
+    CHECK(read<std::int32_t>(SampleFormat::Int32Lsb16, {stray}) == std::vector<float>{-1.0f});
+
+    const std::vector<std::byte> packed{std::byte{0xFF}, std::byte{0xFF}, std::byte{0x7F}, std::byte{0x01},
+        std::byte{0x00}, std::byte{0x80}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}};
+    std::vector<float> out(3);
+    vloom::io::convertToFloat(SampleFormat::Int24Packed, packed.data(), out.data(), 3);
+    CHECK(out
+        == std::vector<float>{
+            1.0f, static_cast<float>(-8388607.0 / 8388607.0), static_cast<float>(-1.0 / 8388607.0)});
+}
+
+TEST_CASE("Float samples read back unchanged, NaN as 0, overs kept", "[io]")
+{
+    CHECK(read<float>(SampleFormat::Float32, {0.5f, -1.5f, kNaN, kInf})
+        == std::vector<float>{0.5f, -1.5f, 0.0f, kInf});
+    CHECK(read<double>(SampleFormat::Float64, {0.5, -2.0, std::numeric_limits<double>::quiet_NaN()})
+        == std::vector<float>{0.5f, -2.0f, 0.0f});
+}
+
+TEST_CASE("Every format round-trips codes of up to 24 bits", "[io]")
+{
+    // Samples on the format's own grid survive a write and a read.
+    for (const SampleFormat format : kAllFormats) {
+        INFO(vloom::io::sampleFormatName(format));
+        CHECK(std::strlen(vloom::io::sampleFormatName(format)) > 0);
+        const std::vector<float> in{0.0f, 1.0f, -1.0f, 0.5f, -0.25f};
+        std::vector<std::byte> bytes(in.size() * static_cast<std::size_t>(vloom::io::bytesPerSample(format)));
+        vloom::io::convertFromFloat(format, in.data(), bytes.data(), in.size());
+        std::vector<float> back(in.size());
+        vloom::io::convertToFloat(format, bytes.data(), back.data(), in.size());
+        std::vector<std::byte> again(bytes.size());
+        vloom::io::convertFromFloat(format, back.data(), again.data(), back.size());
+        CHECK(again == bytes);
+        for (std::size_t i = 0; i < in.size(); ++i)
+            CHECK(std::abs(back[i] - in[i]) <= 1.0f / 32767.0f);
+    }
 }
