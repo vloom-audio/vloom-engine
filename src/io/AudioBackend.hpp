@@ -88,6 +88,20 @@ public:
     /// reset, buffer-size, resync or latency messages).
     [[nodiscard]] virtual bool resetRequested() const noexcept { return false; }
 
+    /// The open stream's current latencies, asking the driver again if it
+    /// reported a change (ASIO). False when the backend does not report
+    /// them: BackendStreamInfo's values stand.
+    virtual bool refreshLatency(int& input, int& output) noexcept
+    {
+        (void)input;
+        (void)output;
+        return false;
+    }
+
+    /// The period to reopen with after resetRequested(): the driver's new
+    /// size after a buffer-size change (ASIO). 0 = the backend does not say.
+    [[nodiscard]] virtual int reopenBufferFrames() noexcept { return 0; }
+
     /// Calls `onChange` when outputs are added or removed or the default
     /// output changes. It runs on an OS thread, so it must be quick and
     /// thread-safe. Notifications stop when the subscription is destroyed;

@@ -6,15 +6,16 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <exception>
 
 namespace vloom::io {
 
 namespace {
 
 constexpr int kMaxChannels = 8; ///< as AudioDevice and AudioInput
-/// How often the idle driver thread dispatches window messages: some
-/// drivers post their notifications to the apartment that loaded them.
-constexpr auto kPumpInterval = std::chrono::milliseconds(5);
+/// The longest the idle driver thread sleeps without being woken; queued
+/// work and (on Windows) window messages wake it at once.
+constexpr auto kIdleTimeout = std::chrono::milliseconds(100);
 
 std::string driverError(const std::string& driver, const std::string& what, std::int32_t error)
 {
@@ -41,47 +42,51 @@ AsioSession::~AsioSession()
         const std::lock_guard lock(taskMutex_);
         quit_ = true;
     }
-    taskChanged_.notify_all();
+    driver_->wakeIdle();
     thread_.join();
 }
 
 void AsioSession::driverThread()
 {
     driver_->threadStarted();
-    std::unique_lock lock(taskMutex_);
-    while (!quit_) {
-        if (task_ != nullptr && !taskDone_) {
-            const std::function<void()>* task = task_;
-            lock.unlock();
-            try {
-                (*task)();
-            } catch (...) {
-                // A control call must not end the driver thread; it reports
-                // its own failure through its captures.
-            }
-            lock.lock();
-            taskDone_ = true;
-            taskChanged_.notify_all();
+    for (;;) {
+        const std::function<void()>* task = nullptr;
+        {
+            const std::lock_guard lock(taskMutex_);
+            if (quit_)
+                break;
+            if (task_ != nullptr && !taskDone_)
+                task = task_;
+        }
+        if (task == nullptr) {
+            driver_->waitIdle(kIdleTimeout);
             continue;
         }
-        taskChanged_.wait_for(lock, kPumpInterval);
-        if (!quit_ && (task_ == nullptr || taskDone_)) {
-            lock.unlock();
-            driver_->pumpMessages();
-            lock.lock();
+        try {
+            (*task)();
+        } catch (...) {
+            // A control call must not end the driver thread; it reports
+            // its own failure through its captures.
         }
+        {
+            const std::lock_guard lock(taskMutex_);
+            taskDone_ = true;
+        }
+        taskChanged_.notify_all();
     }
-    lock.unlock();
     driver_->threadStopping();
 }
 
 void AsioSession::call(const std::function<void()>& task)
 {
     const std::lock_guard callLock(callMutex_);
+    {
+        const std::lock_guard lock(taskMutex_);
+        task_ = &task;
+        taskDone_ = false;
+    }
+    driver_->wakeIdle();
     std::unique_lock lock(taskMutex_);
-    task_ = &task;
-    taskDone_ = false;
-    taskChanged_.notify_all();
     taskChanged_.wait(lock, [this] { return taskDone_; });
     task_ = nullptr;
 }
@@ -110,10 +115,43 @@ bool AsioSession::open(
 bool AsioSession::openOnDriverThread(
     const AsioOpenRequest& request, RenderFn render, void* user, std::string& error)
 {
-    if (loaded_) {
-        error = "ASIO driver '" + info_.driverName + "' is already open in this process";
-        return false;
+    bool loaded = false;
+    bool created = false;
+    std::string failure;
+    try {
+        return openSteps(request, render, user, error, loaded, created);
+    } catch (const std::exception& e) {
+        failure = e.what();
+    } catch (...) {
+        failure = "unknown error";
     }
+    // Something threw half way: undo what was done.
+    try {
+        if (created)
+            driver_->disposeBuffers();
+        if (loaded)
+            driver_->unload();
+    } catch (...) {
+    }
+    try {
+        error = "Could not open the ASIO driver: " + failure;
+    } catch (...) {
+    }
+    return false;
+}
+
+bool AsioSession::openSteps(const AsioOpenRequest& request, RenderFn render, void* user, std::string& error,
+    bool& loaded, bool& created)
+{
+    {
+        const std::lock_guard lock(stateMutex_);
+        if (loaded_) {
+            error = "ASIO driver '" + info_.driverName + "' is already open in this process";
+            return false;
+        }
+    }
+    // What the driver says while it is set up is not about the open stream.
+    messages_.accepting.store(false);
     const std::vector<std::string> names = driver_->driverNames();
     if (names.empty()) {
         error = "No ASIO driver is installed";
@@ -126,19 +164,21 @@ bool AsioSession::openOnDriverThread(
     }
 
     std::string message;
-    const std::int32_t loaded = driver_->load(name, message);
-    if (loaded != asio::kOk) {
+    const std::int32_t loadResult = driver_->load(name, message);
+    if (loadResult != asio::kOk) {
         error = "Could not load ASIO driver '" + name + "'" + (message.empty() ? "" : ": " + message) + " ("
-            + asioErrorName(loaded) + ")";
+            + asioErrorName(loadResult) + ")";
         return false;
     }
+    loaded = true;
 
     // From here on a failure unloads the driver again.
-    bool created = false;
     auto fail = [&](std::string text) {
         if (created)
             driver_->disposeBuffers();
+        created = false;
         driver_->unload();
+        loaded = false;
         error = std::move(text);
         return false;
     };
@@ -209,12 +249,18 @@ bool AsioSession::openOnDriverThread(
         if (!addChannel(false, ch))
             return fail(error);
 
-    resets_.store(0);
+    // Everything bufferSwitch needs exists before the driver can call it.
+    const auto frameCount = static_cast<std::size_t>(frames);
+    std::vector<float> outputScratch(frameCount * static_cast<std::size_t>(outputChannels), 0.0f);
+    std::vector<float> inputScratch(frameCount * static_cast<std::size_t>(inputChannels), 0.0f);
+    std::vector<float> planar(frameCount, 0.0f);
+
     streamRate_.store(static_cast<int>(std::lround(rate)));
-    if (const std::int32_t result = driver_->createBuffers(buffers, frames, *this); result != asio::kOk)
-        return fail(
-            driverError(name, "could not create buffers of " + std::to_string(frames) + " frames", result));
-    created = true;
+    const std::int32_t createResult = driver_->createBuffers(buffers, frames, *this);
+    created = createResult == asio::kOk;
+    if (!created)
+        return fail(driverError(
+            name, "could not create buffers of " + std::to_string(frames) + " frames", createResult));
     for (std::size_t i = 0; i < buffers.size(); ++i) {
         for (void* half : buffers[i].halves)
             if (half == nullptr)
@@ -223,8 +269,7 @@ bool AsioSession::openOnDriverThread(
         // Both output halves start silent: the driver may play one before the first bufferSwitch.
         if (!buffers[i].isInput)
             for (void* half : buffers[i].halves)
-                std::memset(half, 0,
-                    static_cast<std::size_t>(bytesPerSample(formats[i])) * static_cast<std::size_t>(frames));
+                std::memset(half, 0, static_cast<std::size_t>(bytesPerSample(formats[i])) * frameCount);
     }
 
     int inputLatency = 0;
@@ -244,19 +289,21 @@ bool AsioSession::openOnDriverThread(
     stream.outputLatency = std::max(outputLatency, 0);
     stream.outputReady = driver_->outputReady() == asio::kOk;
 
-    // Nothing calls back into these until start().
+    // Nothing calls back into these until start(); nothing below throws.
     const std::lock_guard lock(stateMutex_);
+    stream.generation = ++generation_;
     loaded_ = true;
     buffersCreated_ = true;
-    info_ = stream;
+    info_ = std::move(stream);
     render_ = render;
     renderUser_ = user;
     buffers_ = std::move(buffers);
     formats_ = std::move(formats);
-    const auto frameCount = static_cast<std::size_t>(frames);
-    outputScratch_.assign(frameCount * static_cast<std::size_t>(outputChannels), 0.0f);
-    inputScratch_.assign(frameCount * static_cast<std::size_t>(inputChannels), 0.0f);
-    planar_.assign(frameCount, 0.0f);
+    outputScratch_ = std::move(outputScratch);
+    inputScratch_ = std::move(inputScratch);
+    planar_ = std::move(planar);
+    messages_.clear();
+    messages_.accepting.store(true);
     return true;
 }
 
@@ -279,6 +326,9 @@ bool AsioSession::start(std::string& error)
             error = driverError(info_.driverName, "could not start", result);
             return;
         }
+        // Drivers may ask for a reset while they start: that is not one.
+        messages_.resets.store(0);
+        messages_.bufferSize.store(0);
         ok = true;
     });
     return ok;
@@ -309,25 +359,38 @@ void AsioSession::close() noexcept
 
 void AsioSession::closeOnDriverThread() noexcept
 {
-    if (running_.load()) {
-        driver_->stop();
-        running_.store(false);
+    bool wasLoaded = false;
+    {
+        // First, so that no input attaches to a stream on its way out.
+        const std::lock_guard lock(stateMutex_);
+        wasLoaded = loaded_;
+        loaded_ = false;
     }
-    attached_.store(nullptr);
-    waitForCallbacks();
-    if (buffersCreated_)
-        driver_->disposeBuffers();
-    if (loaded_)
-        driver_->unload();
+    messages_.accepting.store(false);
+    try {
+        if (running_.load()) {
+            driver_->stop();
+            running_.store(false);
+        }
+        attached_.store(nullptr);
+        waitForCallbacks();
+        if (buffersCreated_)
+            driver_->disposeBuffers();
+        buffersCreated_ = false;
+        if (wasLoaded)
+            driver_->unload();
+    } catch (...) {
+        running_.store(false);
+        buffersCreated_ = false;
+    }
     const std::lock_guard lock(stateMutex_);
-    loaded_ = false;
-    buffersCreated_ = false;
     info_ = {};
     render_ = nullptr;
     renderUser_ = nullptr;
     buffers_.clear();
     formats_.clear();
     streamRate_.store(0);
+    messages_.clear();
 }
 
 void AsioSession::waitForCallbacks() const noexcept
@@ -352,7 +415,7 @@ bool AsioSession::showControlPanel(std::string& error)
 {
     bool ok = false;
     call([&] {
-        if (!loaded_) {
+        if (!buffersCreated_) {
             error = "No ASIO driver is open";
             return;
         }
@@ -365,11 +428,66 @@ bool AsioSession::showControlPanel(std::string& error)
     return ok;
 }
 
-bool AsioSession::attachInput(CaptureFn capture, void* user, std::string& error)
+bool AsioSession::latencies(int& input, int& output) noexcept
+{
+    try {
+        if ((messages_.notices.load() & bit(AsioNotice::Latencies)) != 0) {
+            call([&] {
+                if (!buffersCreated_)
+                    return;
+                // Cleared first: a change reported during the query is not lost.
+                messages_.notices.fetch_and(~bit(AsioNotice::Latencies));
+                int in = 0;
+                int out = 0;
+                if (driver_->getLatencies(in, out) != asio::kOk)
+                    return;
+                const std::lock_guard lock(stateMutex_);
+                info_.inputLatency = std::max(in, 0);
+                info_.outputLatency = std::max(out, 0);
+            });
+        }
+        const std::lock_guard lock(stateMutex_);
+        if (!loaded_)
+            return false;
+        input = info_.inputLatency;
+        output = info_.outputLatency;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+int AsioSession::reopenBufferFrames() noexcept
+{
+    try {
+        int frames = 0;
+        if ((messages_.resets.load() & bit(AsioReset::BufferSize)) != 0) {
+            frames = messages_.bufferSize.load();
+            if (frames <= 0)
+                call([&] {
+                    AsioBufferSizes sizes;
+                    if (buffersCreated_ && driver_->getBufferSize(sizes) == asio::kOk)
+                        frames = chooseAsioBufferSize(sizes.preferred, sizes);
+                });
+        }
+        if (frames > 0)
+            return frames;
+        const std::lock_guard lock(stateMutex_);
+        return loaded_ ? info_.bufferFrames : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
+bool AsioSession::attachInput(CaptureFn capture, void* user, std::uint64_t generation, std::string& error)
 {
     const std::lock_guard lock(stateMutex_);
     if (!loaded_) {
         error = "No ASIO driver is open: an ASIO input taps the driver the ASIO output opened";
+        return false;
+    }
+    if (generation != info_.generation) {
+        error = "The ASIO output was opened again since this input was opened: open the input again";
         return false;
     }
     if (info_.inputChannels <= 0) {
@@ -396,10 +514,14 @@ bool AsioSession::attachInput(CaptureFn capture, void* user, std::string& error)
 
 void AsioSession::detachInput(void* user) noexcept
 {
-    const InputTap* current = attached_.load();
-    if (current == nullptr || current->user != user)
-        return;
-    attached_.store(nullptr);
+    {
+        const std::lock_guard lock(stateMutex_);
+        if (tap_.user != user)
+            return;
+        const InputTap* expected = &tap_;
+        if (!attached_.compare_exchange_strong(expected, nullptr))
+            return;
+    }
     waitForCallbacks();
 }
 
@@ -448,14 +570,16 @@ void AsioSession::bufferSwitch(int index) noexcept
 
 std::int32_t AsioSession::message(std::int32_t selector, std::int32_t value) noexcept
 {
-    return handleAsioMessage(selector, value, resets_);
+    return handleAsioMessage(selector, value, messages_);
 }
 
 void AsioSession::sampleRateChanged(double rate) noexcept
 {
+    if (!messages_.accepting.load())
+        return;
     const int current = streamRate_.load();
     if (current != 0 && (!(rate > 0.0) || std::lround(rate) != current))
-        resets_.fetch_or(bit(AsioReset::SampleRate));
+        messages_.resets.fetch_or(bit(AsioReset::SampleRate));
 }
 
 // ---- the process's session
@@ -464,7 +588,9 @@ namespace {
 
 struct Registry {
     std::mutex mutex;
+    std::condition_variable gone; ///< a session finished destroying
     std::weak_ptr<AsioSession> session;
+    bool alive = false; ///< a session exists, perhaps still being destroyed
     std::function<std::unique_ptr<AsioDriver>()> testFactory;
 };
 
@@ -500,13 +626,26 @@ const char* asioUnavailableReason() noexcept
 std::shared_ptr<AsioSession> acquireAsioSession()
 {
     Registry& reg = registry();
-    const std::lock_guard lock(reg.mutex);
+    std::unique_lock lock(reg.mutex);
     if (std::shared_ptr<AsioSession> session = reg.session.lock())
         return session;
+    // The weak pointer expires as the last holder lets go, before the old
+    // session's destructor has joined its driver thread: the SDK's globals
+    // are not ours until it has.
+    reg.gone.wait(lock, [&reg] { return !reg.alive; });
     std::unique_ptr<AsioDriver> driver = reg.testFactory ? reg.testFactory() : makeAsioDriver();
     if (driver == nullptr)
         return nullptr;
-    auto session = std::make_shared<AsioSession>(std::move(driver));
+    std::shared_ptr<AsioSession> session(new AsioSession(std::move(driver)), [](AsioSession* old) {
+        delete old;
+        Registry& r = registry();
+        {
+            const std::lock_guard doneLock(r.mutex);
+            r.alive = false;
+        }
+        r.gone.notify_all();
+    });
+    reg.alive = true;
     reg.session = session;
     return session;
 }
@@ -616,6 +755,16 @@ public:
         return session_ != nullptr && session_->resetReasons() != 0;
     }
 
+    bool refreshLatency(int& input, int& output) noexcept override
+    {
+        return session_ != nullptr && session_->latencies(input, output);
+    }
+
+    [[nodiscard]] int reopenBufferFrames() noexcept override
+    {
+        return session_ != nullptr ? session_->reopenBufferFrames() : 0;
+    }
+
 private:
     std::shared_ptr<AsioSession> session_; ///< held while open: the stream is ours
 };
@@ -638,11 +787,11 @@ public:
             error = asioUnavailableReason();
             return false;
         }
-        if (!session->isOpen()) {
+        const AsioStreamInfo stream = session->info();
+        if (stream.generation == 0 || !session->isOpen()) {
             error = "Open the ASIO output first: an ASIO input taps the driver the output opened";
             return false;
         }
-        const AsioStreamInfo stream = session->info();
         if (!config.deviceId.empty() && config.deviceId != stream.driverName) {
             error = "ASIO driver '" + config.deviceId + "' is not the one open for output ('"
                 + stream.driverName + "'): only one ASIO driver can be loaded at a time";
@@ -661,6 +810,7 @@ public:
         session_ = std::move(session);
         capture_ = capture;
         user_ = user;
+        generation_ = stream.generation;
         info.sampleRate = stream.sampleRate;
         info.channels = std::clamp(config.channels, 1, stream.inputChannels);
         info.deviceName = stream.driverName;
@@ -676,7 +826,7 @@ public:
             error = "No ASIO input is open";
             return false;
         }
-        return session_->attachInput(capture_, user_, error);
+        return session_->attachInput(capture_, user_, generation_, error);
     }
 
     void stop() noexcept override
@@ -691,6 +841,7 @@ public:
         session_.reset();
         capture_ = nullptr;
         user_ = nullptr;
+        generation_ = 0;
     }
 
     [[nodiscard]] bool isRunning() const noexcept override
@@ -702,6 +853,7 @@ private:
     std::shared_ptr<AsioSession> session_;
     CaptureFn capture_ = nullptr;
     void* user_ = nullptr;
+    std::uint64_t generation_ = 0; ///< the output stream this input was opened against
 };
 
 } // namespace

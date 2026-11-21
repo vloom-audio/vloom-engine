@@ -192,8 +192,35 @@ std::string AudioDevice::deviceName() const { return impl_->open ? impl_->info.d
 bool AudioDevice::isExclusive() const noexcept { return impl_->open && impl_->info.exclusive; }
 AudioApi AudioDevice::api() const noexcept { return impl_->api; }
 int AudioDevice::bufferFrames() const noexcept { return impl_->open ? impl_->info.bufferFrames : 0; }
-int AudioDevice::inputLatencyFrames() const noexcept { return impl_->open ? impl_->info.inputLatency : 0; }
-int AudioDevice::outputLatencyFrames() const noexcept { return impl_->open ? impl_->info.outputLatency : 0; }
+int AudioDevice::inputLatencyFrames() const noexcept
+{
+    if (!impl_->open)
+        return 0;
+    int input = 0;
+    int output = 0;
+    if (impl_->active->refreshLatency(input, output))
+        return input;
+    return impl_->info.inputLatency;
+}
+
+int AudioDevice::outputLatencyFrames() const noexcept
+{
+    if (!impl_->open)
+        return 0;
+    int input = 0;
+    int output = 0;
+    if (impl_->active->refreshLatency(input, output))
+        return output;
+    return impl_->info.outputLatency;
+}
+
+int AudioDevice::reopenBufferFrames() const noexcept
+{
+    if (!impl_->open)
+        return 0;
+    const int frames = impl_->active->reopenBufferFrames();
+    return frames > 0 ? frames : impl_->info.bufferFrames;
+}
 bool AudioDevice::resetRequested() const noexcept { return impl_->open && impl_->active->resetRequested(); }
 
 bool AudioDevice::showControlPanel(std::string* error)

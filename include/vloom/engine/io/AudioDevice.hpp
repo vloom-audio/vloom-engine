@@ -108,17 +108,26 @@ public:
     [[nodiscard]] int bufferFrames() const noexcept;
     /// Latency the driver reports for its input and its output, in frames;
     /// 0 when unknown (today only ASIO reports it). Their sum is the round
-    /// trip for Engine::setAudioRecordLatency().
+    /// trip for Engine::setAudioRecordLatency(). After the driver reports a
+    /// latency change, the next call asks it again (control thread).
     [[nodiscard]] int inputLatencyFrames() const noexcept;
     [[nodiscard]] int outputLatencyFrames() const noexcept;
     /// True once the driver asked for the open stream to be reopened (ASIO:
-    /// reset request, buffer size, resync or latency change, or a sample
-    /// rate change). Poll from the control thread, then close() and open().
+    /// a reset request, a buffer-size change or a sample-rate change; not a
+    /// latency change or a resync). Poll from the control thread, then
+    /// close() and open(). What the driver says while the stream opens or
+    /// starts does not count.
     [[nodiscard]] bool resetRequested() const noexcept;
+    /// The bufferFrames to open with again after resetRequested(): after a
+    /// buffer-size change, the driver's new size; otherwise the open
+    /// stream's (bufferFrames()). 0 when closed or the API does not say.
+    [[nodiscard]] int reopenBufferFrames() const noexcept;
 
     /// Opens the driver's own settings dialog (ASIO: ASIOControlPanel), for
     /// an open stream. Other APIs have none: returns false with a message.
-    /// The driver may then ask for a reset (resetRequested()).
+    /// The driver may then ask for a reset (resetRequested()). If the
+    /// driver's panel is modal, this returns when the user closes it, and
+    /// stop() and close() from another thread wait for that too.
     bool showControlPanel(std::string* error = nullptr);
 
 private:

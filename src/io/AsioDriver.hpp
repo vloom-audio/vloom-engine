@@ -11,7 +11,10 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -75,19 +78,47 @@ inline constexpr std::int32_t kHostAsioVersion = 2;
 } // namespace asio
 
 /// Why the driver wants the stream reopened: bits of
-/// AsioSession::resetReasons().
+/// AsioMessageState::resets.
 enum class AsioReset : std::uint32_t {
     Request = 1U << 0U, ///< kAsioResetRequest: settings changed in the driver's panel
     BufferSize = 1U << 1U, ///< kAsioBufferSizeChange
-    Resync = 1U << 2U, ///< kAsioResyncRequest: the driver lost sync
-    Latencies = 1U << 3U, ///< kAsioLatenciesChanged
-    SampleRate = 1U << 4U, ///< sampleRateDidChange: the clock changed under the stream
+    SampleRate = 1U << 2U, ///< sampleRateDidChange: the clock changed under the stream
+};
+
+/// What the driver reported that needs no reopen: bits of
+/// AsioMessageState::notices. Many drivers send these while their buffers
+/// are created or the stream starts.
+enum class AsioNotice : std::uint32_t {
+    Latencies = 1U << 0U, ///< kAsioLatenciesChanged: query ASIOGetLatencies again
+    Resync = 1U << 1U, ///< kAsioResyncRequest: the driver lost sync and recovered
 };
 
 [[nodiscard]] constexpr std::uint32_t bit(AsioReset reason) noexcept
 {
     return static_cast<std::uint32_t>(reason);
 }
+
+[[nodiscard]] constexpr std::uint32_t bit(AsioNotice notice) noexcept
+{
+    return static_cast<std::uint32_t>(notice);
+}
+
+/// What asioMessage() records, read by the control thread. Lock-free.
+struct AsioMessageState {
+    /// Off while a stream is being opened or closed: what the driver says
+    /// then belongs to the setup, not to the open stream.
+    std::atomic<bool> accepting{false};
+    std::atomic<std::uint32_t> resets{0}; ///< AsioReset bits
+    std::atomic<std::uint32_t> notices{0}; ///< AsioNotice bits
+    std::atomic<int> bufferSize{0}; ///< the size kAsioBufferSizeChange named; 0 = none
+
+    void clear() noexcept
+    {
+        resets.store(0);
+        notices.store(0);
+        bufferSize.store(0);
+    }
+};
 
 /// The ASE_ name of an ASIO error ("ASE_NoClock"), or "ASIO error <n>".
 [[nodiscard]] std::string asioErrorName(std::int32_t error);
@@ -118,12 +149,12 @@ struct AsioBufferSizes {
 [[nodiscard]] int chooseAsioBufferSize(int requested, const AsioBufferSizes& sizes) noexcept;
 
 /// The host's side of asioMessage(). Answers kAsioSelectorSupported,
-/// kAsioEngineVersion (2) and kAsioSupportsTimeInfo (yes); for a reset,
-/// buffer-size change, resync or latency change it only records the reason
-/// in `resets` (a control thread reopens the stream: never this callback)
-/// and returns 1. Everything else returns 0. Real-time safe.
-std::int32_t handleAsioMessage(
-    std::int32_t selector, std::int32_t value, std::atomic<std::uint32_t>& resets) noexcept;
+/// kAsioEngineVersion (2) and kAsioSupportsTimeInfo (yes). A reset request
+/// or buffer-size change records a reset (and the new size), a latency
+/// change or resync records a notice, and each returns 1: a control thread
+/// acts on them, never this callback. Nothing is recorded while
+/// `state.accepting` is off. Everything else returns 0. Real-time safe.
+std::int32_t handleAsioMessage(std::int32_t selector, std::int32_t value, AsioMessageState& state) noexcept;
 
 /// One channel's double buffer, as ASIOCreateBuffers fills it.
 struct AsioBuffer {
@@ -165,9 +196,12 @@ public:
     /// On the driver thread, first and last: COM in and out.
     virtual void threadStarted() { }
     virtual void threadStopping() { }
-    /// Called on the driver thread while it waits (a COM apartment must
-    /// dispatch window messages).
-    virtual void pumpMessages() { }
+    /// On the driver thread, between tasks: waits up to `timeout` for
+    /// wakeIdle() (a COM apartment also dispatches its window messages
+    /// meanwhile). A wakeIdle() before the wait is not lost.
+    virtual void waitIdle(std::chrono::milliseconds timeout);
+    /// From any thread: work is queued for the driver thread.
+    virtual void wakeIdle();
 
     /// The installed drivers' names, in the SDK's form (what load() takes).
     [[nodiscard]] virtual std::vector<std::string> driverNames() = 0;
@@ -194,6 +228,11 @@ public:
     /// ASIOOutputReady. kOk when the driver supports it. Real-time: called
     /// from bufferSwitch().
     virtual std::int32_t outputReady() noexcept = 0;
+
+private:
+    std::mutex idleMutex_;
+    std::condition_variable idleChanged_;
+    bool woken_ = false;
 };
 
 } // namespace vloom::io

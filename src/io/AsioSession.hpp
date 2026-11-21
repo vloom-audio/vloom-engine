@@ -41,12 +41,17 @@ struct AsioStreamInfo {
     int inputLatency = 0; ///< frames, ASIOGetLatencies
     int outputLatency = 0; ///< frames, ASIOGetLatencies
     bool outputReady = false; ///< the driver takes ASIOOutputReady()
+    /// Counts the session's successful opens: an input opened against one
+    /// stream cannot attach to the next (its rate or inputs may differ).
+    std::uint64_t generation = 0;
 };
 
 /// Owns the loaded driver and a thread of its own that makes every call to
 /// it (load, buffers, start, stop, unload, control panel): COM apartments
-/// tie a driver to the thread that created it. Control calls from any one
-/// thread at a time; they block until the driver thread has done them.
+/// tie a driver to the thread that created it. Control calls from any
+/// thread; they run one at a time and block until the driver thread has
+/// done them. A modal control panel therefore blocks every other control
+/// call, stop() and close() included, until the user closes it.
 ///
 /// The driver's bufferSwitch converts the input halves into float and hands
 /// them to the attached input, then renders the output and converts it into
@@ -61,9 +66,12 @@ public:
     [[nodiscard]] std::vector<std::string> driverNames();
 
     /// Loads the driver and creates its buffers (does not start). Fails if
-    /// a stream is already open in this session.
+    /// a stream is already open in this session. What the driver reports
+    /// while opening is not taken as a reset.
     bool open(const AsioOpenRequest& request, RenderFn render, void* user, AsioStreamInfo& info,
         std::string& error);
+    /// Starts the stream; resets the driver asked for while starting are
+    /// dropped.
     bool start(std::string& error);
     /// Returns once bufferSwitch no longer renders.
     void stop() noexcept;
@@ -74,16 +82,29 @@ public:
     [[nodiscard]] bool isRunning() const noexcept { return running_.load(); }
     [[nodiscard]] AsioStreamInfo info() const;
 
-    /// ASIOControlPanel on the open driver.
+    /// ASIOControlPanel on the open driver. See the class comment: a modal
+    /// panel blocks other control calls until it is closed.
     bool showControlPanel(std::string& error);
 
     /// AsioReset bits the driver reported since open(); not 0 = reopen.
-    [[nodiscard]] std::uint32_t resetReasons() const noexcept { return resets_.load(); }
+    [[nodiscard]] std::uint32_t resetReasons() const noexcept { return messages_.resets.load(); }
+    /// AsioNotice bits since open() (latency changes, resyncs).
+    [[nodiscard]] std::uint32_t notices() const noexcept { return messages_.notices.load(); }
+
+    /// The open stream's latencies; after kAsioLatenciesChanged, asks the
+    /// driver again first. False when nothing is open.
+    bool latencies(int& input, int& output) noexcept;
+
+    /// The buffer size to reopen with: after kAsioBufferSizeChange, the
+    /// size the message named, else the driver's preferred size now; else
+    /// the open stream's size. 0 when nothing is open.
+    [[nodiscard]] int reopenBufferFrames() noexcept;
 
     /// Starts handing the open stream's input to `capture` (interleaved,
     /// inputChannels wide, bufferFrames long) from bufferSwitch. Fails when
-    /// nothing is open or it has no inputs. One input at a time.
-    bool attachInput(CaptureFn capture, void* user, std::string& error);
+    /// nothing is open, it has no inputs, or the stream is not the one of
+    /// `generation` (AsioStreamInfo::generation). One input at a time.
+    bool attachInput(CaptureFn capture, void* user, std::uint64_t generation, std::string& error);
     /// Returns once `capture` is no longer being called. Only detaches the
     /// input whose `user` it is.
     void detachInput(void* user) noexcept;
@@ -99,6 +120,8 @@ private:
     void call(const std::function<void()>& task);
 
     bool openOnDriverThread(const AsioOpenRequest& request, RenderFn render, void* user, std::string& error);
+    bool openSteps(const AsioOpenRequest& request, RenderFn render, void* user, std::string& error,
+        bool& loaded, bool& created);
     void closeOnDriverThread() noexcept;
     void waitForCallbacks() const noexcept;
 
@@ -115,8 +138,9 @@ private:
 
     // Set on the driver thread while nothing calls back; read by bufferSwitch.
     mutable std::mutex stateMutex_; ///< control threads only, never bufferSwitch
-    bool loaded_ = false;
-    bool buffersCreated_ = false;
+    bool loaded_ = false; ///< guarded by stateMutex_
+    bool buffersCreated_ = false; ///< driver thread only
+    std::uint64_t generation_ = 0; ///< guarded by stateMutex_
     AsioStreamInfo info_;
     RenderFn render_ = nullptr;
     void* renderUser_ = nullptr;
@@ -130,13 +154,13 @@ private:
         CaptureFn capture = nullptr;
         void* user = nullptr;
     };
-    InputTap tap_;
+    InputTap tap_; ///< written under stateMutex_ only while not attached
     std::atomic<const InputTap*> attached_{nullptr};
 
     std::atomic<bool> running_{false};
     std::atomic<int> streamRate_{0}; ///< for sampleRateChanged(), which may come at any time
     mutable std::atomic<int> inCallback_{0};
-    std::atomic<std::uint32_t> resets_{0};
+    AsioMessageState messages_;
 };
 
 /// Makes the real driver: the Steinberg SDK's on Windows builds with
@@ -147,7 +171,9 @@ private:
 [[nodiscard]] const char* asioUnavailableReason() noexcept;
 
 /// The session of the process, made on first use and kept while anyone
-/// holds it. Null when ASIO is unavailable.
+/// holds it. A new one is made only once the previous one is fully
+/// destroyed (its driver thread joined), since the SDK keeps globals. Null
+/// when ASIO is unavailable.
 [[nodiscard]] std::shared_ptr<AsioSession> acquireAsioSession();
 
 /// Tests only: makes acquireAsioSession() use `factory` (null = the real

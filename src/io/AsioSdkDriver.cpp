@@ -30,8 +30,11 @@
 // Standard headers.
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 // Defined by the SDK's host/asiodrivers.cpp.
@@ -44,17 +47,37 @@ namespace {
 
 /// The session whose buffers the driver calls back into: the SDK's
 /// callbacks have no user pointer. Set before ASIOCreateBuffers, cleared
-/// after ASIODisposeBuffers.
+/// (with clearHost()) after ASIODisposeBuffers and at unload.
 std::atomic<AsioDriverHost*> g_host{nullptr};
+/// Callbacks inside one of the shims below: clearHost() waits for none, so
+/// no callback still uses a session that is about to go.
+std::atomic<int> g_inFlight{0};
+
+class InFlight {
+public:
+    InFlight() noexcept { g_inFlight.fetch_add(1); }
+    ~InFlight() { g_inFlight.fetch_sub(1); }
+    InFlight(const InFlight&) = delete;
+    InFlight& operator=(const InFlight&) = delete;
+};
+
+void clearHost() noexcept
+{
+    g_host.store(nullptr);
+    while (g_inFlight.load() != 0)
+        std::this_thread::yield();
+}
 
 void onBufferSwitch(long index, ASIOBool /*directProcess*/)
 {
+    const InFlight inFlight;
     if (AsioDriverHost* host = g_host.load())
         host->bufferSwitch(static_cast<int>(index));
 }
 
 ASIOTime* onBufferSwitchTimeInfo(ASIOTime* /*params*/, long index, ASIOBool /*directProcess*/)
 {
+    const InFlight inFlight;
     if (AsioDriverHost* host = g_host.load())
         host->bufferSwitch(static_cast<int>(index));
     return nullptr;
@@ -62,16 +85,19 @@ ASIOTime* onBufferSwitchTimeInfo(ASIOTime* /*params*/, long index, ASIOBool /*di
 
 void onSampleRateDidChange(ASIOSampleRate rate)
 {
+    const InFlight inFlight;
     if (AsioDriverHost* host = g_host.load())
         host->sampleRateChanged(rate);
 }
 
 long onAsioMessage(long selector, long value, void* /*message*/, double* /*opt*/)
 {
+    const InFlight inFlight;
     if (AsioDriverHost* host = g_host.load())
         return host->message(static_cast<std::int32_t>(selector), static_cast<std::int32_t>(value));
-    // Before the session is connected, still answer the questions about the host.
-    std::atomic<std::uint32_t> ignored{0};
+    // Before the session is connected, still answer the questions about the
+    // host; nothing is recorded (not accepting).
+    AsioMessageState ignored;
     return handleAsioMessage(static_cast<std::int32_t>(selector), static_cast<std::int32_t>(value), ignored);
 }
 
@@ -120,8 +146,17 @@ void refreshDriverList()
 
 class AsioSdkDriver final : public AsioDriver {
 public:
-    AsioSdkDriver() = default;
-    ~AsioSdkDriver() override = default;
+    AsioSdkDriver()
+        : wake_(CreateEventW(nullptr, FALSE, FALSE, nullptr))
+    {
+    }
+
+    ~AsioSdkDriver() override
+    {
+        if (wake_ != nullptr)
+            CloseHandle(wake_);
+    }
+
     AsioSdkDriver(const AsioSdkDriver&) = delete;
     AsioSdkDriver& operator=(const AsioSdkDriver&) = delete;
 
@@ -130,6 +165,7 @@ public:
         // Most drivers expect a single-threaded apartment, and every call
         // to them comes from this thread.
         com_ = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        window_ = createMessageWindow();
     }
 
     void threadStopping() override
@@ -139,12 +175,23 @@ public:
         // its destructor uninitialises it: both here, so they pair.
         delete asioDrivers;
         asioDrivers = nullptr;
+        if (window_ != nullptr)
+            DestroyWindow(window_);
+        window_ = nullptr;
         if (SUCCEEDED(com_))
             CoUninitialize();
     }
 
-    void pumpMessages() override
+    void waitIdle(std::chrono::milliseconds timeout) override
     {
+        // Wakes for queued work (wake_) and for any window message, which an
+        // apartment must dispatch.
+        if (wake_ != nullptr)
+            MsgWaitForMultipleObjectsEx(
+                1, &wake_, static_cast<DWORD>(timeout.count()), QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        else
+            MsgWaitForMultipleObjectsEx(
+                0, nullptr, static_cast<DWORD>(timeout.count()), QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         MSG msg;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             TranslateMessage(&msg);
@@ -152,20 +199,31 @@ public:
         }
     }
 
+    void wakeIdle() override
+    {
+        if (wake_ != nullptr)
+            SetEvent(wake_);
+    }
+
     std::vector<std::string> driverNames() override
     {
         if (!loaded_ || asioDrivers == nullptr)
             refreshDriverList();
+        names_.clear();
         std::vector<std::string> names;
         const long count = asioDrivers->asioGetNumDev();
         for (long i = 0; i < count; ++i) {
-            // 32 as AsioDrivers::loadDriver() compares them: longer names
-            // end in "..." there too.
+            // 32 as AsioDrivers::loadDriver() compares them: names of 32
+            // bytes or more are cut to 28 and end in "..." there too.
             std::array<char, 32> name{};
             if (asioDrivers->asioGetDriverName(
                     static_cast<int>(i), name.data(), static_cast<int>(name.size()))
-                == 0)
-                names.push_back(ansiToUtf8(name.data()));
+                != 0)
+                continue;
+            // Shown in UTF-8; loaded by the SDK's own bytes, so a name the
+            // round trip cannot rebuild exactly still loads.
+            names_.emplace_back(ansiToUtf8(name.data()), std::string(name.data()));
+            names.push_back(names_.back().first);
         }
         return names;
     }
@@ -174,7 +232,12 @@ public:
     {
         unload();
         std::array<char, 64> ansi{};
-        const std::string converted = utf8ToAnsi(name);
+        std::string converted;
+        for (const auto& [utf8, bytes] : names_)
+            if (utf8 == name)
+                converted = bytes;
+        if (converted.empty())
+            converted = utf8ToAnsi(name);
         if (converted.empty() || converted.size() >= ansi.size())
             return ASE_NotPresent;
         std::memcpy(ansi.data(), converted.c_str(), converted.size());
@@ -183,7 +246,8 @@ public:
 
         ASIODriverInfo info{};
         info.asioVersion = asio::kHostAsioVersion;
-        info.sysRef = GetDesktopWindow();
+        // The driver's parent for dialogs and its message target.
+        info.sysRef = window_ != nullptr ? window_ : GetDesktopWindow();
         const ASIOError result = ASIOInit(&info);
         if (result != ASE_OK) {
             info.errorMessage[sizeof(info.errorMessage) - 1] = '\0';
@@ -202,7 +266,7 @@ public:
         if (!loaded_)
             return;
         ASIOExit();
-        g_host.store(nullptr);
+        clearHost();
         loaded_ = false;
     }
 
@@ -269,7 +333,7 @@ public:
         const ASIOError result = ASIOCreateBuffers(
             infos.data(), static_cast<long>(infos.size()), static_cast<long>(frames), &g_callbacks);
         if (result != ASE_OK) {
-            g_host.store(nullptr);
+            clearHost();
             return static_cast<std::int32_t>(result);
         }
         for (std::size_t i = 0; i < buffers.size(); ++i) {
@@ -282,7 +346,7 @@ public:
     std::int32_t disposeBuffers() override
     {
         const ASIOError result = ASIODisposeBuffers();
-        g_host.store(nullptr);
+        clearHost();
         return static_cast<std::int32_t>(result);
     }
 
@@ -302,8 +366,26 @@ public:
     std::int32_t outputReady() noexcept override { return static_cast<std::int32_t>(ASIOOutputReady()); }
 
 private:
+    /// A hidden message-only window owned by the driver thread: the
+    /// driver's sysRef. Null if Windows refuses one.
+    static HWND createMessageWindow()
+    {
+        static const wchar_t* const kClass = L"VloomAudioDriverHost";
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = &DefWindowProcW;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = kClass;
+        if (RegisterClassExW(&wc) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+            return nullptr;
+        return CreateWindowExW(0, kClass, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, wc.hInstance, nullptr);
+    }
+
+    HANDLE wake_ = nullptr; ///< auto-reset: work is queued for the driver thread
+    HWND window_ = nullptr;
     HRESULT com_ = E_FAIL;
     bool loaded_ = false;
+    std::vector<std::pair<std::string, std::string>> names_; ///< UTF-8 name, the SDK's own bytes
 };
 
 } // namespace

@@ -140,9 +140,9 @@ int chooseAsioBufferSize(int requested, const AsioBufferSizes& sizes) noexcept
     return std::max(sizes.preferred, 0);
 }
 
-std::int32_t handleAsioMessage(
-    std::int32_t selector, std::int32_t value, std::atomic<std::uint32_t>& resets) noexcept
+std::int32_t handleAsioMessage(std::int32_t selector, std::int32_t value, AsioMessageState& state) noexcept
 {
+    const bool accepting = state.accepting.load();
     switch (selector) {
     case asio::kSelectorSupported:
         switch (value) {
@@ -160,22 +160,45 @@ std::int32_t handleAsioMessage(
     case asio::kEngineVersion:
         return asio::kHostAsioVersion;
     case asio::kResetRequest:
-        resets.fetch_or(bit(AsioReset::Request));
+        if (accepting)
+            state.resets.fetch_or(bit(AsioReset::Request));
         return 1;
     case asio::kBufferSizeChange:
-        resets.fetch_or(bit(AsioReset::BufferSize));
+        if (accepting) {
+            if (value > 0)
+                state.bufferSize.store(static_cast<int>(value));
+            state.resets.fetch_or(bit(AsioReset::BufferSize));
+        }
         return 1;
     case asio::kResyncRequest:
-        resets.fetch_or(bit(AsioReset::Resync));
+        if (accepting)
+            state.notices.fetch_or(bit(AsioNotice::Resync));
         return 1;
     case asio::kLatenciesChanged:
-        resets.fetch_or(bit(AsioReset::Latencies));
+        if (accepting)
+            state.notices.fetch_or(bit(AsioNotice::Latencies));
         return 1;
     case asio::kSupportsTimeInfo:
         return 1;
     default:
         return 0;
     }
+}
+
+void AsioDriver::waitIdle(std::chrono::milliseconds timeout)
+{
+    std::unique_lock lock(idleMutex_);
+    idleChanged_.wait_for(lock, timeout, [this] { return woken_; });
+    woken_ = false;
+}
+
+void AsioDriver::wakeIdle()
+{
+    {
+        const std::lock_guard lock(idleMutex_);
+        woken_ = true;
+    }
+    idleChanged_.notify_all();
 }
 
 } // namespace vloom::io
