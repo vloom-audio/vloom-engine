@@ -40,7 +40,10 @@ reused by other Vloom Audio tools.
   comes back through atomics.
 - **Native audio I/O, no third-party audio library**: WASAPI on Windows,
   CoreAudio on macOS, ALSA on Linux (PulseAudio and PipeWire through ALSA).
-  See [ADR 0004](docs/adr/0004-native-audio-io.md). Input the same way, heard
+  See [ADR 0004](docs/adr/0004-native-audio-io.md). On Windows, also WASAPI
+  exclusive mode ([ADR 0020](docs/adr/0020-wasapi-exclusive-mode.md)) and
+  ASIO drivers, output and input on one clock
+  ([ADR 0021](docs/adr/0021-asio-driver-support.md)). Input the same way, heard
   through an insert and recorded with its latency taken off
   ([ADR 0016](docs/adr/0016-audio-input-and-recording.md)). MIDI input too:
   WinMM, CoreMIDI and the ALSA sequencer, played live on any channel and
@@ -137,7 +140,7 @@ vloom-engine/
 │   ├── Engine.hpp            # The engine: process(), play / stop / tempo control
 │   ├── core/                 # SpscQueue, SnapshotExchange, version info
 │   ├── dsp/                  # Sound generators and processors (Metronome, Sampler, Synth)
-│   ├── io/                   # Hardware audio devices (WASAPI, CoreAudio, ALSA)
+│   ├── io/                   # Hardware audio devices (WASAPI, ASIO, CoreAudio, ALSA)
 │   ├── mixer/                # Insert settings and the pan law
 │   ├── render/               # Offline rendering, WAV writer
 │   ├── sample/               # WAV reader, resampler, sample loading
@@ -201,3 +204,14 @@ Contributions and bug reports are welcome. Before opening a pull request:
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
+
+Windows builds with ASIO support (`VLOOM_ENGINE_ASIO`, on by default there)
+compile the host side of the Steinberg ASIO SDK 2.3.4, which Steinberg
+licenses under its ASIO License or, alternatively, the GPL version 3. We use
+the GPLv3 option, and it is version 3 only, so such a binary is distributed
+under GPL-3.0-only; the engine's own source stays GPL-3.0-or-later. The SDK
+is not part of this repository: CMake downloads it from Steinberg (pinned by
+SHA-256) or uses `VLOOM_ENGINE_ASIO_SDK_DIR`. Its host helpers
+(`host/asiodrivers.cpp`, `host/pc/asiolist.cpp`) carry a BSD-style notice
+that redistributions must keep. Configure with `-DVLOOM_ENGINE_ASIO=OFF` for
+a build without it. ASIO is a trademark of Steinberg Media Technologies GmbH.
