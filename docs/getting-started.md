@@ -39,6 +39,13 @@ repos, set once in your shell profile:
 export CPM_SOURCE_CACHE="$HOME/.cache/cpm"
 ```
 
+On Windows this includes the Steinberg ASIO SDK 2.3.4 (ADR 0021), which makes
+the binary GPL-3.0-only (see the README's licence section). Options:
+
+- `-DVLOOM_ENGINE_ASIO_SDK_DIR=C:/path/to/ASIOSDK`: use an extracted SDK
+  (the folder holding `common/` and `host/`) instead of downloading it.
+- `-DVLOOM_ENGINE_ASIO=OFF`: build without ASIO.
+
 ## 4. Hear it
 
 ```sh
