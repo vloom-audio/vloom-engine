@@ -66,3 +66,67 @@ CPMAddPackage(
     GITHUB_REPOSITORY vloom-audio/vloom-dsp
     GIT_TAG 7c5f3a1d879bd630b31ed741afad02eb7461fd04
     GIT_SHALLOW FALSE)
+
+# Steinberg ASIO SDK 2.3.4 (Windows only) — the host side of ASIO, the
+# driver API most audio interfaces ship for low latency (docs/adr/0021).
+# Licensed "under the terms of the Steinberg ASIO License, or alternatively
+# under the terms of the GPL Version 3" (ASIOSDK/LICENSE.txt): we use the
+# GPLv3 option. That is version 3 only, not "or later", so a binary built
+# with VLOOM_ENGINE_ASIO=ON is in effect GPL-3.0-only, while the engine's
+# own source stays GPL-3.0-or-later. Its host helpers (host/asiodrivers.cpp,
+# host/pc/asiolist.cpp) carry a BSD-style notice that redistributions keep.
+# No SDK file is in this repository: it is downloaded (pinned by hash) or
+# taken from VLOOM_ENGINE_ASIO_SDK_DIR. Only the host side is compiled, into
+# its own static library, without our warnings.
+if(WIN32)
+    set(VLOOM_ENGINE_ASIO_DEFAULT ON)
+else()
+    set(VLOOM_ENGINE_ASIO_DEFAULT OFF)
+endif()
+option(VLOOM_ENGINE_ASIO
+    "Windows: ASIO driver support through the Steinberg ASIO SDK 2.3.4 under GPLv3 (makes the binary GPL-3.0-only)"
+    ${VLOOM_ENGINE_ASIO_DEFAULT})
+set(VLOOM_ENGINE_ASIO_SDK_DIR "" CACHE PATH
+    "Extracted ASIOSDK folder (holds common/ and host/) to use instead of downloading the SDK")
+
+if(VLOOM_ENGINE_ASIO AND NOT WIN32)
+    message(STATUS "vloom-engine: VLOOM_ENGINE_ASIO is ignored: ASIO exists only on Windows")
+elseif(VLOOM_ENGINE_ASIO)
+    if(VLOOM_ENGINE_ASIO_SDK_DIR)
+        set(VLOOM_ASIO_SDK_ROOT ${VLOOM_ENGINE_ASIO_SDK_DIR})
+    else()
+        # The zip's single ASIOSDK/ folder is unpacked as the source dir itself.
+        CPMAddPackage(
+            NAME asiosdk
+            VERSION 2.3.4
+            URL https://download.steinberg.net/sdk_downloads/ASIO-SDK_2.3.4_2025-10-15.zip
+            URL_HASH SHA256=d5ebf0c20dd2c5f43771fd0c1418f4b361bf52434ee670097cfa6b3a335e2eca
+            DOWNLOAD_ONLY YES)
+        set(VLOOM_ASIO_SDK_ROOT ${asiosdk_SOURCE_DIR})
+    endif()
+    foreach(file common/asio.h common/asio.cpp host/asiodrivers.cpp host/pc/asiolist.cpp)
+        if(NOT EXISTS ${VLOOM_ASIO_SDK_ROOT}/${file})
+            message(FATAL_ERROR "ASIO SDK: ${VLOOM_ASIO_SDK_ROOT}/${file} not found. Point "
+                "VLOOM_ENGINE_ASIO_SDK_DIR at the extracted ASIOSDK folder, or set VLOOM_ENGINE_ASIO=OFF.")
+        endif()
+    endforeach()
+    add_library(vloom_asio_sdk STATIC
+        ${VLOOM_ASIO_SDK_ROOT}/common/asio.cpp
+        ${VLOOM_ASIO_SDK_ROOT}/host/asiodrivers.cpp
+        ${VLOOM_ASIO_SDK_ROOT}/host/pc/asiolist.cpp)
+    # SYSTEM: the SDK's warnings are not ours, also under -Werror / /WX.
+    target_include_directories(vloom_asio_sdk SYSTEM PUBLIC
+        ${VLOOM_ASIO_SDK_ROOT}/common
+        ${VLOOM_ASIO_SDK_ROOT}/host
+        ${VLOOM_ASIO_SDK_ROOT}/host/pc)
+    # asiolist.cpp calls the registry's TCHAR functions with char buffers:
+    # it must build without UNICODE (nothing here defines it).
+    target_compile_definitions(vloom_asio_sdk PRIVATE _CRT_SECURE_NO_WARNINGS)
+    if(MSVC)
+        target_compile_options(vloom_asio_sdk PRIVATE /W0 /utf-8)
+    else()
+        target_compile_options(vloom_asio_sdk PRIVATE -w)
+    endif()
+    set_target_properties(vloom_asio_sdk PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_link_libraries(vloom_asio_sdk PUBLIC ole32 advapi32 user32)
+endif()
