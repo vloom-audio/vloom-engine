@@ -46,18 +46,26 @@ Facts that shape the design:
 2. **One session per process** (`io::AsioSession`), held by `shared_ptr`
    by whoever uses it and destroyed when the last holder lets go. It owns
    the loaded driver and a driver thread of its own: COM is initialised
-   there as a single-threaded apartment, every driver call (list, load,
-   buffers, start, stop, control panel, unload) is made there, and the
-   thread pumps window messages while it waits. Control calls from the
-   API block until the driver thread has done them. A second `AudioDevice`
-   opening ASIO while one is open fails with "already open in this process".
+   there as a single-threaded apartment, a hidden message-only window made
+   there is the driver's `sysRef`, every driver call (list, load, buffers,
+   start, stop, control panel, unload) is made there, and between calls
+   the thread waits in `MsgWaitForMultipleObjectsEx`, woken at once by
+   queued work or by a window message, which it dispatches. Control calls
+   from the API run one at a time and block until the driver thread has
+   done them. A second `AudioDevice` opening ASIO while one is open fails
+   with "already open in this process". Because the weak pointer to the
+   session expires before its destructor has joined the driver thread, a
+   new session is made only once the old one is fully destroyed: the SDK's
+   globals (`asioDrivers`) are never touched by two driver threads.
 3. **Full duplex in this pass: the input taps the output's session.** The
    output opens the driver with `AudioDeviceConfig::inputChannels` inputs
    (from the first). An `AudioInput` with `AudioApi::Asio` does not load
    anything: it attaches a capture callback to the open session, and fails
    with a message when no ASIO output is open, when it was opened without
    inputs, when the index names another driver, or when it asks for another
-   rate. In each `bufferSwitch` the input half is converted and handed to
+   rate. Each successful open of the session has a generation; an input
+   remembers the one it was opened against and cannot start on a later
+   stream (whose rate or inputs may differ): it must be opened again. In each `bufferSwitch` the input half is converted and handed to
    the input first, then the output is rendered: one thread, one clock, no
    drift for `Engine::pushAudioInput()` to absorb. When the output closes,
    the input stops running and must be opened again after the output.
@@ -86,28 +94,46 @@ Facts that shape the design:
    - `ASIOOutputReady()` is probed once at open and, if the driver takes it,
      called after every output fill.
    - Error texts name the driver and the ASIO error (`ASE_...`), and include
-     the driver's own message when `ASIOInit` gives one.
+     the driver's own message when `ASIOInit` gives one. An exception half
+     way through opening disposes the buffers and unloads the driver again,
+     and the error says what was thrown.
 6. **Formats.** Int16LSB, Int24LSB (packed), Int32LSB, Float32LSB,
    Float64LSB and Int32LSB16/18/20/24 (right-justified in 32 bits,
    sign-extended), per channel, through `convertFromFloat()` and the new
    `convertToFloat()` in `src/io/SampleFormat` (pure, tested on every
    platform). Output follows ADR 0020: clamp to [-1, 1], NaN to 0, scale by
    2^(bits-1) - 1, round to nearest. Input divides by the same scale, so
-   codes of up to 24 bits round-trip; float input passes through (NaN as 0),
-   overs included. Big-endian (MSB) and DSD types fail `open()` with the
+   codes of up to 24 bits round-trip;
+   float input passes through, overs included, with NaN and infinities as
+   0 and float64 clamped to float's range before the cast. Big-endian (MSB) and DSD types fail `open()` with the
    type's name. Both output halves are cleared right after
    `ASIOCreateBuffers`.
 7. **Driver messages never act from the callback.** `asioMessage` answers
    `kAsioSelectorSupported` (for the selectors below), `kAsioEngineVersion`
    (2) and `kAsioSupportsTimeInfo` (yes, so drivers call
-   `bufferSwitchTimeInfo`). `kAsioResetRequest`, `kAsioBufferSizeChange`,
-   `kAsioResyncRequest` and `kAsioLatenciesChanged`, and a
-   `sampleRateDidChange` to another rate, only set a flag:
-   `AudioDevice::resetRequested()` turns true and the control thread closes
-   and opens the device again.
+   `bufferSwitchTimeInfo`). It only records:
+   - resets: `kAsioResetRequest`, `kAsioBufferSizeChange` (with the size it
+     names) and a `sampleRateDidChange` to another rate turn
+     `AudioDevice::resetRequested()` true; the control thread closes and
+     opens again, with `AudioDevice::reopenBufferFrames()` as the buffer
+     size (after a buffer-size change, the named size or else the driver's
+     preferred size at that moment);
+   - notices, which need no reopen: `kAsioLatenciesChanged` makes the next
+     `inputLatencyFrames()` / `outputLatencyFrames()` ask `ASIOGetLatencies`
+     again; `kAsioResyncRequest` is only noted.
+   Many drivers send these while their buffers are created or the stream
+   starts. Nothing is recorded until open() has finished, and resets that
+   arrive during `ASIOStart` are dropped once it succeeds, so a fresh
+   stream never asks to be reopened by its own setup.
+   The SDK's four callback shims count the calls inside them; the host
+   pointer is cleared and that count waited out at dispose and unload, so
+   no callback reaches a session being destroyed.
 8. **Control panel.** `AudioDevice::showControlPanel()` calls
    `ASIOControlPanel()` on the driver thread for an open ASIO stream; other
-   APIs return false with a message.
+   APIs return false with a message. Most drivers open a modeless window
+   and return; a driver whose panel is modal holds the driver thread until
+   the user closes it, so every other control call, `stop()` and `close()`
+   included, waits that long.
 9. **Real-time rules hold.** `bufferSwitch` does not allocate or lock: the
    scratch buffers are made at open, and the input tap and the "running"
    state are atomics. `stop()` and detaching the input clear their flag and
@@ -159,8 +185,13 @@ Facts that shape the design:
   "or later" (or prefer no download) set `VLOOM_ENGINE_ASIO=OFF`.
 - Configuring a Windows build downloads the SDK once (cached by CPM), unless
   `VLOOM_ENGINE_ASIO_SDK_DIR` points at a local copy.
-- Driver names are limited by the SDK to 31 characters (longer ones end in
-  "..."); two drivers that differ only after that cannot both be chosen.
+- Driver names go through the SDK's 32-byte buffers: a name of 32 bytes or
+  more is cut to its first 28 bytes plus "..." (the SDK compares names the
+  same way when loading), so two drivers that differ only after that
+  cannot both be chosen. Names are in the ANSI code page: they are shown
+  converted to UTF-8, and loaded by the SDK's original bytes, so a name
+  whose characters UTF-8 cannot carry back still loads; it may only look
+  wrong when shown.
 - Choosing which driver channels to open (other than "from the first") is
   not in this pass: a follow-up can add a first-channel offset to both
   configs without breaking them.

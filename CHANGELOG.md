@@ -29,9 +29,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
   - `AudioDevice::inputLatencyFrames()` and `outputLatencyFrames()` from
     `ASIOGetLatencies`, for `Engine::setAudioRecordLatency()`.
   - `AudioDevice::showControlPanel()` (the driver's panel; false for other
-    APIs) and `AudioDevice::resetRequested()` (the driver asked for a
-    reset, buffer-size, resync, latency or rate change: close and open
-    again).
+    APIs; a modal panel blocks stop and close until it is closed),
+    `AudioDevice::resetRequested()` (the driver asked for a reset, a
+    buffer-size or a rate change: close and open again, not for what it
+    says while opening or starting) and `AudioDevice::reopenBufferFrames()`
+    (the size to reopen with after a buffer-size change). A latency change
+    is no reset: the latency getters ask the driver again.
+  - An ASIO input opened against an earlier stream of the output fails to
+    start and must be opened again.
   - Sample formats Int16, Int24 (packed), Int32, Float32, Float64 and
     Int32 with 16/18/20/24-bit alignment, little-endian; output clamped to
     [-1, 1]. Big-endian and DSD drivers fail to open with a message.
